@@ -51,10 +51,6 @@ def validate_all(root: Path) -> None:
     """Validate all OpenAPI documents, component schemas, and example payloads."""
     contracts_root = root / "contracts"
 
-    for event_contract_path in sorted((contracts_root / "events").glob("*.json")):
-        event_contract = _load_json(event_contract_path)
-        Draft202012Validator.check_schema(event_contract)
-
     for contract_path in sorted((contracts_root / "openapi").glob("*.yaml")):
         contract = _load_yaml(contract_path)
         validate(contract, base_uri=contract_path.as_uri())

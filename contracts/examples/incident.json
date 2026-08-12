@@ -5,6 +5,7 @@
   "severity": "CRITICAL",
   "status": "INVESTIGATING",
   "alertState": "FIRING",
+  "rcaStatus": "RUNNING",
   "scope": {
     "teamId": "0d2d93f1-5439-4616-82aa-283793c4e56d",
     "projectId": "0b1e90de-b18e-458d-93ce-2e4615889146",

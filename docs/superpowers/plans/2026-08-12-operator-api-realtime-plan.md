@@ -1,12 +1,12 @@
-# Operator API and Realtime Implementation Plan
+# Operator REST API Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Expose secure, versioned Incident/Alert/RCA/conversation operations and replayable realtime updates for the Angular client.
+**Goal:** Expose secure, versioned Incident/Alert/RCA/conversation REST operations for the Angular client.
 
-**Architecture:** Thin FastAPI routers call application use cases through an identity/scope policy boundary. Read models use cursor pagination and explicit DTO mapping. Mutations use ETags or idempotency keys, write audit/timeline/outbox records transactionally, and SSE replays authorized event records.
+**Architecture:** Thin FastAPI routers call application use cases through an identity/scope policy boundary. Read models use cursor pagination and explicit DTO mapping. Mutations use ETags or idempotency keys and write audit/timeline/outbox records transactionally. Internal outbox records coordinate durable jobs and audit only; no browser event stream is exposed.
 
-**Tech Stack:** Python 3.11+, FastAPI, Pydantic v2, SQLAlchemy async, PostgreSQL 18, SSE, pytest, httpx, OpenAPI 3.1.
+**Tech Stack:** Python 3.11+, FastAPI, Pydantic v2, SQLAlchemy async, PostgreSQL 18, pytest, httpx, OpenAPI 3.1.
 
 ## Global Constraints
 
@@ -28,7 +28,6 @@
 - `backend/src/sre_agent/application/incidents/`: commands and query services.
 - `backend/src/sre_agent/api/routers/`: v1 operator routes.
 - `backend/src/sre_agent/api/schemas/`: contract DTOs, never ORM models.
-- `backend/src/sre_agent/application/events/`: replayable authorized event stream.
 
 ### Task 1: Pluggable identity and scope authorization
 
@@ -217,40 +216,7 @@ git add backend/src/sre_agent/application/alerts backend/src/sre_agent/api/route
 git commit -m "feat: expose alert classification and mappings"
 ```
 
-### Task 6: Replayable authorized SSE
-
-**Files:**
-- Create: `backend/src/sre_agent/application/events/stream_events.py`
-- Create: `backend/src/sre_agent/api/routers/event_stream.py`
-- Create: `backend/tests/contract/api/test_event_stream.py`
-
-**Interfaces:**
-- Produces: `GET /api/v1/events/stream` with `id`, `event`, and JSON `data` frames.
-
-- [ ] **Step 1: Write stream/replay tests**
-
-Test live delivery, `Last-Event-ID` or equivalent `after` cursor replay, heartbeat comments, authorization filtering, revoked scope on reconnect, unknown/expired cursor problem response, ordering by `(occurred_at,id)`, and disconnect cancellation without leaked DB sessions.
-
-- [ ] **Step 2: Run failing tests**
-
-Run: `cd backend && uv run pytest tests/contract/api/test_event_stream.py -v`
-Expected: FAIL/404.
-
-- [ ] **Step 3: Implement event reader**
-
-Read immutable timeline/outbox-backed operator events with keyset cursor. Accept browser replay through `after=<eventId>` and standard clients through `Last-Event-ID`, rejecting conflicting values. Apply current subject scope on every batch. Serialize only `IncidentEventV1` fields; never include raw evidence. Emit heartbeat comments while idle and close cleanly on cancellation.
-
-- [ ] **Step 4: Verify and commit**
-
-Run: `cd backend && uv run pytest tests/contract/api/test_event_stream.py -v`
-Expected: PASS.
-
-```bash
-git add backend/src/sre_agent/application/events backend/src/sre_agent/api/routers/event_stream.py backend/tests/contract/api/test_event_stream.py
-git commit -m "feat: stream authorized replayable incident events"
-```
-
-### Task 7: Dashboard, RCA, evidence, timeline, and audit read routes
+### Task 6: Dashboard, RCA, evidence, timeline, and audit read routes
 
 **Files:**
 - Create: `backend/src/sre_agent/application/queries/dashboard.py`
@@ -286,7 +252,7 @@ git add backend/src/sre_agent/application/queries backend/src/sre_agent/api/rout
 git commit -m "feat: expose authorized operator read models"
 ```
 
-### Task 8: Full Operator API contract and security verification
+### Task 7: Full Operator API contract and security verification
 
 **Files:**
 - Modify: `backend/src/sre_agent/api/main.py`
@@ -302,7 +268,7 @@ Compare FastAPI operation path/method pairs to `contracts/openapi/operator-api-v
 
 - [ ] **Step 2: Add adversarial scope tests**
 
-Create two teams and test list, detail, timeline, RCA, message, SSE, and raw evidence paths. Manipulating `teamId`, Incident UUID, cursor, or raw endpoint must never reveal the other team.
+Create two teams and test list, detail, timeline, RCA, message, and raw evidence paths. Manipulating `teamId`, Incident UUID, cursor, or raw endpoint must never reveal the other team. Assert no undocumented browser streaming route is mounted.
 
 - [ ] **Step 3: Run final gates**
 

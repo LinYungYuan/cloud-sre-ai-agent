@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: SRE Operator API
   version: 1.0.0
-  description: The sole versioned REST and realtime boundary used by the operator UI.
+  description: The sole versioned authenticated REST boundary used by the operator UI.
 security:
   - bearerAuth: []
 
@@ -46,16 +46,45 @@ paths:
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
-        - name: status
+        - name: teamId
           in: query
           required: false
           schema:
-            $ref: '#/components/schemas/IncidentStatus'
+            type: string
+            format: uuid
+        - name: projectId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: environmentId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: serviceId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
         - name: severity
           in: query
           required: false
           schema:
             $ref: '#/components/schemas/Severity'
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/IncidentStatus'
+        - name: rcaStatus
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/RcaRunStatus'
         - name: assigneeId
           in: query
           required: false
@@ -69,6 +98,20 @@ paths:
             type: string
             minLength: 1
             maxLength: 200
+        - name: sortBy
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [openedAt, updatedAt, severity, status]
+            default: updatedAt
+        - name: sortOrder
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
       responses:
         <<: *commonErrorResponses
         '200':
@@ -493,23 +536,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/IncidentMessage'
 
-  /api/v1/events/stream:
-    get:
-      operationId: streamIncidentEvents
-      summary: Stream authorized incident events with replay support.
-      description: If both replay values are supplied they must identify the same event.
-      parameters:
-        - $ref: '#/components/parameters/AfterEventId'
-        - $ref: '#/components/parameters/LastEventId'
-      responses:
-        <<: *commonErrorResponses
-        '200':
-          description: SSE frames whose JSON data conforms to IncidentEventV1.
-          content:
-            text/event-stream:
-              schema:
-                type: string
-
 components:
   securitySchemes:
     bearerAuth:
@@ -562,7 +588,7 @@ components:
       description: Strong ETag returned by the latest representation.
       schema:
         type: string
-        pattern: '^"[1-9][0-9]*"$'
+        pattern: '^"[^"]+"$'
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -571,30 +597,13 @@ components:
         type: string
         minLength: 1
         maxLength: 128
-    AfterEventId:
-      name: after
-      in: query
-      required: false
-      description: Browser-compatible replay cursor for EventSource clients.
-      schema:
-        type: string
-        format: uuid
-    LastEventId:
-      name: Last-Event-ID
-      in: header
-      required: false
-      description: Standard SSE replay cursor.
-      schema:
-        type: string
-        format: uuid
-
   headers:
     ETag:
       description: Strong version ETag used by If-Match mutations.
       required: true
       schema:
         type: string
-        pattern: '^"[1-9][0-9]*"$'
+        pattern: '^"[^"]+"$'
 
   responses:
     IncidentUpdated:
@@ -607,7 +616,7 @@ components:
           schema:
             $ref: '#/components/schemas/IncidentDetail'
     BadRequest:
-      description: Invalid request, cursor, time range, or replay cursor.
+      description: Invalid request, cursor, or time range.
       content:
         application/problem+json:
           schema:
@@ -683,7 +692,6 @@ components:
         - INVALID_REQUEST
         - INVALID_CURSOR
         - INVALID_TIME_RANGE
-        - INVALID_EVENT_CURSOR
         - UNAUTHENTICATED
         - SCOPE_FORBIDDEN
         - RESOURCE_NOT_FOUND
@@ -760,6 +768,7 @@ components:
         - severity
         - status
         - alertState
+        - rcaStatus
         - scope
         - acknowledged
         - openedAt
@@ -781,10 +790,21 @@ components:
           $ref: '#/components/schemas/IncidentStatus'
         alertState:
           $ref: '#/components/schemas/AlertState'
+        rcaStatus:
+          oneOf:
+            - $ref: '#/components/schemas/RcaRunStatus'
+            - type: 'null'
         scope:
           $ref: '#/components/schemas/Scope'
         acknowledged:
           type: boolean
+        acknowledgedAt:
+          oneOf:
+            - $ref: '#/components/schemas/UtcDateTime'
+            - type: 'null'
+        acknowledgedBy:
+          type: [string, 'null']
+          format: uuid
         assignee:
           oneOf:
             - $ref: '#/components/schemas/Assignee'
@@ -800,6 +820,30 @@ components:
         version:
           type: integer
           minimum: 1
+      allOf: &incidentStateInvariants
+        - if:
+            required: [acknowledged]
+            properties:
+              acknowledged:
+                const: true
+          then:
+            required: [acknowledgedAt, acknowledgedBy]
+            properties:
+              acknowledgedAt:
+                $ref: '#/components/schemas/UtcDateTime'
+              acknowledgedBy:
+                type: string
+                format: uuid
+        - if:
+            required: [status]
+            properties:
+              status:
+                const: RESOLVED
+          then:
+            required: [resolvedAt]
+            properties:
+              resolvedAt:
+                $ref: '#/components/schemas/UtcDateTime'
       additionalProperties: false
     IncidentDetail:
       type: object
@@ -810,6 +854,7 @@ components:
         - severity
         - status
         - alertState
+        - rcaStatus
         - scope
         - acknowledged
         - openedAt
@@ -833,13 +878,7 @@ components:
             type: string
             format: uuid
           uniqueItems: true
-        acknowledgedAt:
-          oneOf:
-            - $ref: '#/components/schemas/UtcDateTime'
-            - type: 'null'
-        acknowledgedBy:
-          type: [string, 'null']
-          format: uuid
+      allOf: *incidentStateInvariants
       additionalProperties: false
 
     AlertSummary:
@@ -1196,7 +1235,7 @@ components:
       additionalProperties: false
     ClassificationMapping:
       type: object
-      required: [id, matcher, targetScope, priority, enabled, version, createdAt, updatedAt]
+      required: [id, matcher, targetScope, priority, enabled, version, etag, createdAt, updatedAt]
       properties:
         id:
           type: string
@@ -1213,6 +1252,11 @@ components:
         version:
           type: integer
           minimum: 1
+        etag:
+          type: string
+          minLength: 3
+          pattern: '^"[^"]+"$'
+          description: Opaque strong entity tag to send unchanged in the If-Match header.
         createdAt:
           $ref: '#/components/schemas/UtcDateTime'
         updatedAt:
@@ -1302,12 +1346,29 @@ components:
 
     DashboardSummary:
       type: object
-      required: [openIncidents, criticalIncidents, firingAlerts, activeRcaRuns, generatedAt]
+      required:
+        - openIncidents
+        - criticalIncidents
+        - unacknowledgedIncidents
+        - unassignedIncidents
+        - firingAlerts
+        - activeRcaRuns
+        - rcaStatusCounts
+        - unclassifiedAlerts
+        - recentIncidents
+        - alertTrend24h
+        - generatedAt
       properties:
         openIncidents:
           type: integer
           minimum: 0
         criticalIncidents:
+          type: integer
+          minimum: 0
+        unacknowledgedIncidents:
+          type: integer
+          minimum: 0
+        unassignedIncidents:
           type: integer
           minimum: 0
         firingAlerts:
@@ -1316,8 +1377,53 @@ components:
         activeRcaRuns:
           type: integer
           minimum: 0
+        rcaStatusCounts:
+          $ref: '#/components/schemas/RcaStatusCounts'
+        unclassifiedAlerts:
+          type: integer
+          minimum: 0
+        recentIncidents:
+          type: array
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/IncidentSummary'
+        alertTrend24h:
+          type: array
+          maxItems: 24
+          items:
+            $ref: '#/components/schemas/AlertTrendPoint'
         generatedAt:
           $ref: '#/components/schemas/UtcDateTime'
+      additionalProperties: false
+    RcaStatusCounts:
+      type: object
+      required: [queued, running, partial, failed]
+      properties:
+        queued:
+          type: integer
+          minimum: 0
+        running:
+          type: integer
+          minimum: 0
+        partial:
+          type: integer
+          minimum: 0
+        failed:
+          type: integer
+          minimum: 0
+      additionalProperties: false
+    AlertTrendPoint:
+      type: object
+      required: [bucketStart, firing, resolved]
+      properties:
+        bucketStart:
+          $ref: '#/components/schemas/UtcDateTime'
+        firing:
+          type: integer
+          minimum: 0
+        resolved:
+          type: integer
+          minimum: 0
       additionalProperties: false
 
     CursorPageIncidents:

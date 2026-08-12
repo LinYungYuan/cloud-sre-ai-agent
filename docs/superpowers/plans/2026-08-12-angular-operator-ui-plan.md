@@ -4,7 +4,7 @@
 
 **Goal:** Deliver an independently deployable Traditional Chinese Angular interface for alert triage, shared investigation, evidence-backed RCA, and Incident operations.
 
-**Architecture:** Lazy standalone feature routes consume a generated OpenAPI client through feature services. Signals hold local feature state. A single realtime service reconnects SSE, stores `Last-Event-ID`, and triggers bounded REST refreshes; components never depend on backend source or database models.
+**Architecture:** Lazy standalone feature routes consume a generated OpenAPI client through feature services. Signals hold local feature state. Authenticated REST is the only backend boundary; components never depend on backend source or database models. Users refresh the page or invoke an explicit reload action to obtain new server state.
 
 **Tech Stack:** Angular 22 standalone components, Node.js 24.15+, TypeScript strict mode, Angular signals, Angular i18n/localization, generated OpenAPI client, SCSS, the Angular 22 scaffolded unit-test runner, Playwright for E2E.
 
@@ -14,7 +14,8 @@
 - Technical identifiers and raw evidence remain unchanged.
 - Dates display in `Asia/Taipei`; API values remain UTC.
 - The frontend never connects to PostgreSQL or imports backend files.
-- API/SSE URLs come from runtime configuration.
+- The API URL comes from runtime configuration.
+- Do not implement browser event streams, background polling, or automatic data refresh.
 - Backend remains the authorization boundary.
 - All pages implement loading, empty, partial, error, and unauthorized states.
 - Important state is not color-only; keyboard and basic accessibility are required.
@@ -26,7 +27,6 @@
 ## File map
 
 - `frontend/src/app/core/api-client/`: generated, never manually edited.
-- `frontend/src/app/core/realtime/`: one SSE lifecycle implementation.
 - `frontend/src/app/core/i18n/`: enum/error zh-TW mappings.
 - `frontend/src/app/layout/`: shell and navigation.
 - `frontend/src/app/features/`: dashboard, incidents, alerts, classification, mappings.
@@ -108,40 +108,7 @@ git add frontend/src/app/layout frontend/src/app/core/i18n frontend/src/app/shar
 git commit -m "feat: add Traditional Chinese operator shell"
 ```
 
-### Task 3: Realtime SSE with polling fallback
-
-**Files:**
-- Create: `frontend/src/app/core/realtime/incident-event.ts`
-- Create: `frontend/src/app/core/realtime/realtime.service.ts`
-- Create: `frontend/src/app/core/realtime/realtime.service.spec.ts`
-
-**Interfaces:**
-- Produces: `events: Signal<IncidentEventV1 | null>`, `connectionState`, `start()`, `stop()`.
-
-- [ ] **Step 1: Write fake EventSource tests**
-
-Assert event parsing, event ID persistence, reconnect using the API's `after=<eventId>` replay cursor, exponential backoff with cap, no duplicate listeners, scope reset clears cursor, stop cancels timers, and repeated failure enables polling signal.
-
-- [ ] **Step 2: Run failing test**
-
-Run: `cd frontend && npm test -- --watch=false --include='**/realtime.service.spec.ts'`
-Expected: FAIL.
-
-- [ ] **Step 3: Implement centralized realtime lifecycle**
-
-Validate incoming JSON fields/version before publishing. Components subscribe through feature services and refetch resource IDs; they never accept SSE data as the complete resource. Polling fallback uses bounded interval and stops when SSE reconnects.
-
-- [ ] **Step 4: Verify and commit**
-
-Run: `cd frontend && npm test -- --watch=false`
-Expected: PASS.
-
-```bash
-git add frontend/src/app/core/realtime
-git commit -m "feat: add resilient incident realtime updates"
-```
-
-### Task 4: Dashboard and Incident list
+### Task 3: Dashboard and Incident list
 
 **Files:**
 - Create: `frontend/src/app/features/dashboard/**`
@@ -155,7 +122,7 @@ git commit -m "feat: add resilient incident realtime updates"
 
 - [ ] **Step 1: Write component/service tests**
 
-Test counts, severity/status accessible text, URL-backed filters, `指派給我`, cursor next/back history, error states, and SSE-triggered debounced refresh that does not reorder the visible table unexpectedly.
+Test counts, severity/status accessible text, URL-backed filters, `指派給我`, cursor next/back history, error states, and an explicit reload action that preserves the visible table filters and sorting.
 
 - [ ] **Step 2: Run failing tests**
 
@@ -180,7 +147,7 @@ git add frontend/src/app/features/dashboard frontend/src/app/features/incidents/
 git commit -m "feat: add dashboard and incident list"
 ```
 
-### Task 5: Incident detail operations and conflict handling
+### Task 4: Incident detail operations and conflict handling
 
 **Files:**
 - Create: `frontend/src/app/features/incidents/incident-detail/**`
@@ -217,7 +184,7 @@ git add frontend/src/app/features/incidents
 git commit -m "feat: add incident detail and operations"
 ```
 
-### Task 6: Shared investigation, RCA, evidence, and audit tabs
+### Task 5: Shared investigation, RCA, evidence, and audit tabs
 
 **Files:**
 - Create: `frontend/src/app/features/investigation/shared-chat/**`
@@ -256,7 +223,7 @@ git add frontend/src/app/features/investigation frontend/src/app/features/incide
 git commit -m "feat: add shared investigation and evidence views"
 ```
 
-### Task 7: Alerts, unclassified queue, and mapping management
+### Task 6: Alerts, unclassified queue, and mapping management
 
 **Files:**
 - Create: `frontend/src/app/features/alerts/**`
@@ -293,7 +260,7 @@ git add frontend/src/app/features/alerts frontend/src/app/features/unclassified-
 git commit -m "feat: add alert classification interface"
 ```
 
-### Task 8: Settings and runtime information
+### Task 7: Settings and runtime information
 
 **Files:**
 - Create: `frontend/src/app/features/settings/settings.component.*`
@@ -325,25 +292,24 @@ git add frontend/src/app/features/settings
 git commit -m "feat: add safe runtime settings view"
 ```
 
-### Task 9: End-to-end and accessibility release gate
+### Task 8: End-to-end and accessibility release gate
 
 **Files:**
 - Create: `frontend/playwright.config.ts`
 - Create: `frontend/e2e/incident-lifecycle.spec.ts`
 - Create: `frontend/e2e/scope-authorization.spec.ts`
-- Create: `frontend/e2e/realtime-recovery.spec.ts`
 - Modify: `frontend/package.json`
 
 **Interfaces:**
 - Produces `npm run e2e` and `npm run check` release gates.
 
-- [ ] **Step 1: Implement deterministic API/SSE fixtures**
+- [ ] **Step 1: Implement deterministic REST fixtures**
 
-Mock the published OpenAPI responses and an SSE stream, not internal backend objects. Fixtures cover a new critical Incident, running specialists, partial then completed report, conversation, assignment, resolution, reopen, and unclassified workflow.
+Mock the published OpenAPI responses, not internal backend objects. Fixtures cover a new critical Incident, running specialists, partial then completed report, conversation, assignment, resolution, reopen, and unclassified workflow. State transitions become visible only after the test invokes the page's explicit reload action or performs browser refresh.
 
 - [ ] **Step 2: Implement critical journey E2E**
 
-Verify new Incident appears, user confirms/assigns, watches progress, reads evidence-backed zh-TW report, asks shared question, resolves, reopens, and handles a version conflict. Verify another team's direct URL returns unauthorized without data flash.
+Verify a user refreshes to see a new Incident, confirms/assigns it, explicitly reloads to observe progress, reads the evidence-backed zh-TW report, asks a shared question, resolves, reopens, and handles a version conflict. Verify another team's direct URL returns unauthorized without data flash.
 
 - [ ] **Step 3: Add accessibility assertions**
 

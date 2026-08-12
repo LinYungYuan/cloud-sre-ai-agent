@@ -31,7 +31,7 @@
 - Create: `backend/tests/integration/observability/test_request_trace.py`
 
 **Interfaces:**
-- Produces correlation/trace propagation from webhook/API through outbox, worker, specialist, MCP, database result, and SSE event.
+- Produces correlation/trace propagation from webhook/API through outbox, worker, specialist, MCP, and database result.
 
 - [ ] **Step 1: Write redaction tests**
 
@@ -149,7 +149,7 @@ Use a non-root runtime user, locked `uv.lock`, no compiler/dev dependencies in r
 
 - [ ] **Step 3: Implement Angular image**
 
-Build in a Node stage and serve static files in a minimal non-root web server stage. Entrypoint creates `config.json` only from allowlisted `API_BASE_URL`, `SSE_URL`, `LOCALE=zh-TW`, `TIME_ZONE=Asia/Taipei` variables; safely JSON-escape values.
+Build in a Node stage and serve static files in a minimal non-root web server stage. Entrypoint creates `config.json` only from allowlisted `API_BASE_URL`, `LOCALE=zh-TW`, `TIME_ZONE=Asia/Taipei` variables; safely JSON-escape values.
 
 - [ ] **Step 4: Run smoke tests and commit**
 
@@ -179,11 +179,11 @@ Use PostgreSQL 18, in-process FastAPI, fake Pub/Sub with redelivery, fake clock 
 
 - [ ] **Step 2: Test failure modes**
 
-Cover duplicate Grafana delivery, database rollback, Pub/Sub publish failure/recovery, worker crash/redelivery, one MCP timeout causing partial report, all MCP failures, SSE reconnect/replay, stale ETag, unclassified waiting/release, and cross-scope access attempts.
+Cover duplicate Grafana delivery, database rollback, Pub/Sub publish failure/recovery, worker crash/redelivery, one MCP timeout causing partial report, all MCP failures, REST query visibility after explicit refresh, stale ETag, unclassified waiting/release, and cross-scope access attempts.
 
 - [ ] **Step 3: Enforce objectives**
 
-Webhook must be `<2s`, Incident visibility `<5s`, and real-time-budget RCA `<=300s`; deterministic tests additionally use shorter injected deadlines to avoid five-minute CI waits while proving the same deadline logic. Output JSON includes sample count, p50, p95, max, and pass/fail.
+Webhook must be `<2s`, authenticated REST Incident query visibility `<5s`, and end-to-end RCA completion `<=300s`; deterministic tests additionally use shorter injected deadlines to avoid five-minute CI waits while proving the same deadline logic. Output JSON includes sample count, p50, p95, max, and pass/fail.
 
 - [ ] **Step 4: Run all release gates**
 

@@ -4,7 +4,7 @@
 
 **Goal:** Deliver the approved SRE AI Agent platform without coupling Angular, the operator API, Grafana ingestion, or the RCA runtime.
 
-**Architecture:** A monorepo contains an independently deployable FastAPI API, Python RCA worker, and Angular SPA. Versioned OpenAPI and SSE schemas are the only frontend/backend boundary; Cloud SQL PostgreSQL 18 is the source of truth and Pub/Sub carries durable jobs through a transactional outbox.
+**Architecture:** A monorepo contains an independently deployable FastAPI API, Python RCA worker, and Angular SPA. Versioned OpenAPI is the only frontend/backend boundary; Cloud SQL PostgreSQL 18 is the source of truth and Pub/Sub carries durable jobs through a transactional outbox. The browser uses authenticated REST with user-initiated refresh only.
 
 **Approved design:** `docs/superpowers/specs/2026-08-12-observability-rca-platform-design.md`
 
@@ -20,10 +20,10 @@
    - Create the worker, MCP capability boundaries, specialist execution, evidence/provenance persistence, hypothesis synthesis, deadlines, retries, and partial reports.
    - Exit condition: deterministic fake MCP data produces an evidence-backed zh-TW RCA report and survives redelivery.
 4. `2026-08-12-operator-api-realtime-plan.md`
-   - Create scope authorization, Incident/Alert/RCA/conversation operations, optimistic concurrency, cursor pagination, audit logs, and replayable SSE.
+   - Create scope authorization, Incident/Alert/RCA/conversation operations, optimistic concurrency, cursor pagination, and audit logs through authenticated REST.
    - Exit condition: all operator flows pass API contract and authorization tests.
 5. `2026-08-12-angular-operator-ui-plan.md`
-   - Create the zh-TW Angular SPA, generated API client, realtime service, dashboard, Incident investigation, alert classification, mappings, and E2E tests.
+   - Create the zh-TW Angular SPA, generated API client, dashboard, Incident investigation, alert classification, mappings, explicit refresh behavior, and E2E tests.
    - Exit condition: the critical user journey passes independently against the published backend contract.
 6. `2026-08-12-release-hardening-plan.md`
    - Add health/readiness, structured redacted telemetry, partition maintenance, admin bootstrap commands, independent containers, and end-to-end SLO verification.
@@ -44,10 +44,10 @@
 
 | Design area | Implemented by |
 |---|---|
-| Repository boundaries, canonical states, OpenAPI/SSE, zh-TW shell | Foundation and Contracts |
+| Repository boundaries, canonical states, OpenAPI, zh-TW shell | Foundation and Contracts |
 | PostgreSQL 18, permanent retention, partitions, Grafana auth, dedup, classification, Incident/outbox | Grafana Ingestion and PostgreSQL |
 | Skills, Hybrid Router, ADK, endpoint-isolated MCP, specialists, RCA, evidence/provenance, shared follow-up | RCA Agent Worker |
-| Identity abstraction, scope policy, REST operations/reads, audit, cursor pagination, realtime replay | Operator API and Realtime |
+| Identity abstraction, scope policy, REST operations/reads, audit, cursor pagination | Operator REST API |
 | Dashboard, Incident/Alert UI, shared chat, RCA/evidence, unclassified/mappings, zh-TW/accessibility | Angular Operator UI |
 | Redaction, telemetry, health, maintenance, containers, timing/failure acceptance | Release Hardening |
 

@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 
 sys.path.insert(0, str(Path(__file__).parents[2]))
@@ -17,7 +16,6 @@ validate_all = import_module("scripts.contract_check.check_contracts").validate_
 ROOT = Path(__file__).parents[2]
 CONTRACT_PATH = ROOT / "contracts" / "openapi" / "grafana-webhook-v1.yaml"
 OPERATOR_CONTRACT_PATH = ROOT / "contracts" / "openapi" / "operator-api-v1.yaml"
-INCIDENT_EVENTS_PATH = ROOT / "contracts" / "events" / "incident-events-v1.json"
 
 
 def _contract() -> dict:
@@ -26,10 +24,6 @@ def _contract() -> dict:
 
 def _operator_contract() -> dict:
     return yaml.safe_load(OPERATOR_CONTRACT_PATH.read_text(encoding="utf-8"))
-
-
-def _incident_event_contract() -> dict:
-    return json.loads(INCIDENT_EVENTS_PATH.read_text(encoding="utf-8"))
 
 
 def _resolve_local_ref(document: dict, value: dict) -> dict:
@@ -172,7 +166,6 @@ def test_operator_contract_declares_every_approved_operation():
         ("/api/v1/rca-runs/{id}/hypotheses", "get"),
         ("/api/v1/incidents/{id}/messages", "get"),
         ("/api/v1/incidents/{id}/messages", "post"),
-        ("/api/v1/events/stream", "get"),
     }
     actual_operations = {
         (path, method)
@@ -196,6 +189,14 @@ def test_operator_mutations_declare_a_concurrency_or_idempotency_header():
                 assert parameter_names & {"Idempotency-Key", "If-Match"}, (
                     f"{method.upper()} {path} lacks a mutation-safety header"
                 )
+                safety_parameters = [
+                    _resolve_local_ref(contract, parameter)
+                    for parameter in operation.get("parameters", [])
+                    if _resolve_local_ref(contract, parameter)["name"]
+                    in {"Idempotency-Key", "If-Match"}
+                ]
+                assert all(parameter["in"] == "header" for parameter in safety_parameters)
+                assert all(parameter["required"] is True for parameter in safety_parameters)
 
 
 def test_operator_collection_schemas_are_cursor_pages_without_offsets():
@@ -298,6 +299,9 @@ def test_operator_errors_are_problem_json_and_timestamps_are_utc_z():
         for method, operation in path_item.items():
             if method not in {"get", "post", "patch", "delete"}:
                 continue
+            assert {"400", "401", "403", "404", "409", "500"} <= set(
+                operation["responses"]
+            )
             for status, response_reference in operation["responses"].items():
                 if int(status) < 400:
                     continue
@@ -305,59 +309,102 @@ def test_operator_errors_are_problem_json_and_timestamps_are_utc_z():
                 assert set(response["content"]) == {"application/problem+json"}
 
 
-def test_sse_contract_is_replayable_and_has_no_arbitrary_payload():
-    operator_contract = _operator_contract()
-    stream = operator_contract["paths"]["/api/v1/events/stream"]["get"]
+def test_operator_boundary_is_rest_only():
+    assert "/api/v1/events/stream" not in _operator_contract()["paths"]
+    assert not (ROOT / "contracts" / "events" / "incident-events-v1.json").exists()
+
+
+def test_dashboard_contract_covers_approved_operator_summary():
+    schemas = _operator_contract()["components"]["schemas"]
+    dashboard = schemas["DashboardSummary"]
+
+    assert {
+        "openIncidents",
+        "criticalIncidents",
+        "unacknowledgedIncidents",
+        "unassignedIncidents",
+        "rcaStatusCounts",
+        "unclassifiedAlerts",
+        "recentIncidents",
+        "alertTrend24h",
+        "generatedAt",
+    } <= set(dashboard["required"])
+    assert dashboard["properties"]["recentIncidents"]["items"] == {
+        "$ref": "#/components/schemas/IncidentSummary"
+    }
+    assert dashboard["properties"]["alertTrend24h"]["items"] == {
+        "$ref": "#/components/schemas/AlertTrendPoint"
+    }
+    assert set(schemas["RcaStatusCounts"]["required"]) == {
+        "queued",
+        "running",
+        "partial",
+        "failed",
+    }
+
+
+def test_incident_list_contract_exposes_scope_filters_sorting_and_rca_status():
+    contract = _operator_contract()
+    incident = contract["components"]["schemas"]["IncidentSummary"]
+    operation = contract["paths"]["/api/v1/incidents"]["get"]
     parameters = {
-        _resolve_local_ref(operator_contract, parameter)["name"]: _resolve_local_ref(
-            operator_contract, parameter
+        _resolve_local_ref(contract, parameter)["name"]: _resolve_local_ref(
+            contract, parameter
         )
-        for parameter in stream["parameters"]
-    }
-    assert parameters["after"]["in"] == "query"
-    assert parameters["Last-Event-ID"]["in"] == "header"
-    assert set(stream["responses"]["200"]["content"]) == {"text/event-stream"}
-
-    event_schema = _incident_event_contract()
-    assert set(event_schema["required"]) == {
-        "eventId",
-        "type",
-        "incidentId",
-        "resourceId",
-        "occurredAt",
-        "version",
-    }
-    assert event_schema["properties"]["version"] == {"type": "integer", "const": 1}
-    assert event_schema["additionalProperties"] is False
-    assert "payload" not in event_schema["properties"]
-    assert "raw" not in event_schema["properties"]
-    assert set(event_schema["properties"]["type"]["enum"]) == {
-        "INCIDENT_CREATED",
-        "INCIDENT_ACKNOWLEDGED",
-        "INCIDENT_ASSIGNED",
-        "INCIDENT_RESOLVED",
-        "INCIDENT_REOPENED",
-        "ALERT_FIRING",
-        "ALERT_RESOLVED",
-        "ALERT_CLASSIFIED",
-        "RCA_RUN_CREATED",
-        "RCA_RUN_STATUS_CHANGED",
-        "RCA_REPORT_PUBLISHED",
-        "MESSAGE_CREATED",
+        for parameter in operation["parameters"]
     }
 
-    valid_event = {
-        "eventId": "9ad048da-37d2-4fc6-8ef8-dc17ddb7af80",
-        "type": "RCA_REPORT_PUBLISHED",
-        "incidentId": "e276fdf9-8600-41f7-8c32-fd3cbed55247",
-        "resourceId": "aab5602d-a58f-4617-b4ad-81233ce38125",
-        "occurredAt": "2026-08-12T02:45:00Z",
-        "version": 1,
+    assert "rcaStatus" in incident["required"]
+    assert set(parameters) == {
+        "cursor",
+        "limit",
+        "from",
+        "to",
+        "teamId",
+        "projectId",
+        "environmentId",
+        "serviceId",
+        "severity",
+        "status",
+        "rcaStatus",
+        "assigneeId",
+        "search",
+        "sortBy",
+        "sortOrder",
     }
-    Draft202012Validator(
-        event_schema, format_checker=Draft202012Validator.FORMAT_CHECKER
-    ).validate(valid_event)
+    assert parameters["sortBy"]["schema"]["enum"] == [
+        "openedAt",
+        "updatedAt",
+        "severity",
+        "status",
+    ]
+    assert parameters["sortOrder"]["schema"]["enum"] == ["asc", "desc"]
+
+
+def test_mapping_items_publish_etag_for_if_match_updates():
+    contract = _operator_contract()
+    mapping = contract["components"]["schemas"]["ClassificationMapping"]
+    if_match = contract["components"]["parameters"]["IfMatch"]
+
+    assert "etag" in mapping["required"]
+    assert mapping["properties"]["etag"]["description"].startswith("Opaque")
+    assert mapping["properties"]["etag"]["pattern"] == if_match["schema"]["pattern"]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda payload: payload.pop("acknowledgedAt"),
+        lambda payload: payload.update(status="RESOLVED", resolvedAt=None),
+    ],
+    ids=["acknowledged-without-actor-time", "resolved-without-resolved-at"],
+)
+def test_incident_example_rejects_impossible_lifecycle_state(tmp_path: Path, mutate):
+    root = _copy_contracts(tmp_path)
+    example_path = root / "contracts" / "examples" / "incident.json"
+    payload = json.loads(example_path.read_text(encoding="utf-8"))
+    mutate(payload)
+    _write_example(root, "incident.json", payload)
+
     with pytest.raises(ValidationError):
-        Draft202012Validator(event_schema).validate(
-            {**valid_event, "payload": {"rawEvidence": "must not cross SSE"}}
-        )
+        validate_all(root)
