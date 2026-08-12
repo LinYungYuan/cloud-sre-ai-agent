@@ -67,6 +67,31 @@ def test_parse_grafana_body_rejects_a_body_over_one_mebibyte_without_revealing_i
     assert "do-not-log-me" not in str(error.value)
 
 
+def test_parse_grafana_body_accepts_a_valid_body_at_exactly_one_mebibyte():
+    body = {
+        "status": "firing",
+        "alerts": [
+            {
+                "status": "firing",
+                "labels": {},
+                "annotations": {},
+                "startsAt": "2026-08-12T02:00:00Z",
+                "endsAt": "2026-08-12T03:00:00Z",
+                "values": {},
+                "generatorURL": "https://grafana.example.com/alert/1",
+                "fingerprint": "fingerprint",
+            }
+        ],
+    }
+    raw_body = json.dumps(body, separators=(",", ":")).encode()
+    raw_body += b" " * (1_048_576 - len(raw_body))
+
+    webhook = parse_grafana_body(raw_body, max_bytes=1_048_576)
+
+    assert len(raw_body) == 1_048_576
+    assert webhook.raw_body is raw_body
+
+
 def test_parse_grafana_body_rejects_naive_timestamps_without_revealing_the_raw_body():
     supplied_raw_body = b'''{
         "status": "firing",

@@ -46,6 +46,19 @@ def test_verify_rejects_an_invalid_token_without_revealing_it():
     assert supplied_credential not in str(error.value)
 
 
+def test_verify_rejects_a_non_ascii_credential_without_revealing_it():
+    supplied_credential = "caf\u00e9"
+    authenticator = GrafanaTokenAuthenticator(
+        FakeSecretProvider({"current": SecretStr("current-token")})
+    )
+
+    with pytest.raises(GrafanaUnauthorized) as error:
+        authenticator.verify(uuid4(), f"Bearer {supplied_credential}")
+
+    assert str(error.value) == "invalid Grafana authorization"
+    assert supplied_credential not in str(error.value)
+
+
 def test_verify_returns_the_non_secret_identifier_for_the_current_token():
     authenticator = GrafanaTokenAuthenticator(
         FakeSecretProvider({"current-2026-08": SecretStr("current-token")})

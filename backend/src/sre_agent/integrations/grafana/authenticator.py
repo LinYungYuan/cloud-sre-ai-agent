@@ -38,7 +38,11 @@ class GrafanaTokenAuthenticator:
             raise GrafanaUnauthorized("invalid Grafana authorization")
 
         credential = authorization.removeprefix("Bearer ")
-        if not credential or any(character.isspace() for character in credential):
+        if (
+            not credential
+            or not credential.isascii()
+            or any(character.isspace() for character in credential)
+        ):
             raise GrafanaUnauthorized("invalid Grafana authorization")
 
         return credential
