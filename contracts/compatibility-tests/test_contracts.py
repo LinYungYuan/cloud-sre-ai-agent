@@ -81,6 +81,7 @@ def test_cross_cloud_grafana_fixtures_use_the_standard_v1_envelope(
     }
     assert payload["version"] == "1"
     assert payload["alerts"][0]["labels"]["cloud_provider"] == expected_provider
+    assert payload["groupLabels"]["resource_id"] in payload["groupKey"]
     validate_example(
         payload,
         "GrafanaWebhook",

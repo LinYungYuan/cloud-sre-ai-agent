@@ -52,7 +52,7 @@
   "commonAnnotations": {},
   "externalURL": "https://grafana.example.com",
   "version": "1",
-  "groupKey": "{}:{alertname=\"GkePodRestart\",cloud_provider=\"gcp\",resource_id=\".../pods/aaaa-7b9f\"}",
+  "groupKey": "{}:{alertname=\"GkePodRestart\",cloud_provider=\"gcp\",resource_id=\"projects/svc-lx-afa-01-uat-1b9a87/locations/asia-east1/clusters/cluster-a/namespaces/default/pods/aaaa-7b9f\"}",
   "truncatedAlerts": 0,
   "title": "GKE Pod restart",
   "message": "GKE Pod aaaa 持續重新啟動"

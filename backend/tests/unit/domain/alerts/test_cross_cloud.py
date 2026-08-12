@@ -99,7 +99,7 @@ def test_validator_reports_invalid_values_for_enumerated_labels(field: str, valu
 
 @pytest.mark.parametrize(
     "scope_id",
-    ["12345678901", "1234567890123", "12345678901a"],
+    ["12345678901", "1234567890123", "12345678901a", "１２３４５６７８９０１２"],
 )
 def test_validator_rejects_aws_scope_ids_that_are_not_twelve_digits(scope_id: str):
     result = CrossCloudAlertValidator().validate(
@@ -110,6 +110,19 @@ def test_validator_rejects_aws_scope_ids_that_are_not_twelve_digits(scope_id: st
     assert result.errors == (
         AlertValidationError(field="cloud_scope_id", code="invalid_value"),
     )
+
+
+@pytest.mark.parametrize(
+    "scope_id",
+    ["a23456", "a" * 30],
+)
+def test_validator_accepts_gcp_scope_ids_at_the_exact_length_boundaries(scope_id: str):
+    result = CrossCloudAlertValidator().validate(
+        dict(GCP_LABELS, cloud_scope_id=scope_id)
+    )
+
+    assert result.is_valid is True
+    assert result.errors == ()
 
 
 @pytest.mark.parametrize(

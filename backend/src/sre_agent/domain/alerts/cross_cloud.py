@@ -29,7 +29,7 @@ INCIDENT_IDENTITY_FIELDS = (
 )
 
 _GCP_PROJECT_ID = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
-_AWS_ACCOUNT_ID = re.compile(r"^\d{12}$")
+_AWS_ACCOUNT_ID = re.compile(r"^[0-9]{12}$")
 
 
 @dataclass(frozen=True, slots=True)
