@@ -120,10 +120,6 @@ components:
         - values
         - generatorURL
         - fingerprint
-        - silenceURL
-        - dashboardURL
-        - panelURL
-        - imageURL
       properties:
         status:
           type: string
@@ -155,29 +151,34 @@ components:
         silenceURL:
           type: string
           format: uri
+          description: Optional URL for silencing the alert in Grafana.
         dashboardURL:
-          type: string
-          format: uri
+          description: Optional Grafana dashboard URL; the default payload sends an empty string when no dashboard is linked.
+          anyOf:
+            - type: string
+              format: uri
+            - const: ''
         panelURL:
-          type: string
-          format: uri
+          description: Optional Grafana panel URL; the default payload sends an empty string when no panel is linked.
+          anyOf:
+            - type: string
+              format: uri
+            - const: ''
         imageURL:
           type: string
           format: uri
+          description: Optional panel screenshot URL, omitted when no image is available.
       additionalProperties: true
     WebhookAccepted:
       type: object
       required:
-        - accepted
-        - eventId
+        - deliveryId
         - acceptedAt
       properties:
-        accepted:
-          type: boolean
-          const: true
-        eventId:
+        deliveryId:
           type: string
           format: uuid
+          description: UUID identifying the persisted webhook delivery.
         acceptedAt:
           type: string
           format: date-time

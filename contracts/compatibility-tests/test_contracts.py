@@ -73,12 +73,41 @@ def test_grafana_webhook_contract_locks_platform_boundary():
         "panelURL",
         "imageURL",
     }
+    required_alert_fields = {
+        "status",
+        "labels",
+        "annotations",
+        "startsAt",
+        "endsAt",
+        "values",
+        "generatorURL",
+        "fingerprint",
+    }
     alert = schemas["GrafanaAlert"]
     assert set(alert["properties"]) == expected_alert_fields
-    assert set(alert["required"]) == expected_alert_fields
+    assert set(alert["required"]) == required_alert_fields
     assert schemas["GrafanaWebhook"]["additionalProperties"] is True
     assert alert["additionalProperties"] is True
-    assert schemas["WebhookAccepted"]["properties"]["acceptedAt"]["pattern"] == "Z$"
+
+    accepted = schemas["WebhookAccepted"]
+    assert set(accepted["required"]) == {"deliveryId", "acceptedAt"}
+    assert set(accepted["properties"]) == {"deliveryId", "acceptedAt"}
+    assert accepted["properties"]["deliveryId"]["format"] == "uuid"
+    assert accepted["properties"]["acceptedAt"]["pattern"] == "Z$"
+    assert accepted["additionalProperties"] is False
+
+
+def test_validator_accepts_official_default_grafana_link_semantics(tmp_path: Path):
+    root = _copy_contracts(tmp_path)
+    example_path = root / "contracts" / "examples" / "grafana-firing.json"
+    payload = json.loads(example_path.read_text(encoding="utf-8"))
+    alert = payload["alerts"][0]
+    alert["dashboardURL"] = ""
+    alert["panelURL"] = ""
+    alert.pop("imageURL", None)
+    _write_example(root, "grafana-firing.json", payload)
+
+    validate_all(root)
 
 
 @pytest.mark.parametrize(
@@ -86,7 +115,7 @@ def test_grafana_webhook_contract_locks_platform_boundary():
     [
         ("grafana-firing.json", ("alerts", 0, "startsAt"), "not-a-timestamp"),
         ("grafana-firing.json", ("alerts", 0, "generatorURL"), "not-a-uri"),
-        ("webhook-accepted.json", ("eventId",), "not-a-uuid"),
+        ("webhook-accepted.json", ("deliveryId",), "not-a-uuid"),
     ],
 )
 def test_validator_rejects_invalid_date_time_uri_and_uuid_formats(

@@ -21,9 +21,8 @@
       "generatorURL": "https://grafana.example.com/alerting/grafana/abc/view",
       "fingerprint": "a9f2b7cd0e1a",
       "silenceURL": "https://grafana.example.com/alerting/silence/new",
-      "dashboardURL": "https://grafana.example.com/d/checkout",
-      "panelURL": "https://grafana.example.com/d/checkout?viewPanel=4",
-      "imageURL": "https://grafana.example.com/render/d-solo/checkout",
+      "dashboardURL": "",
+      "panelURL": "",
       "grafanaExtension": {
         "runbookOwner": "payments"
       }
