@@ -1,0 +1,48 @@
+{
+  "receiver": "platform-oncall",
+  "status": "firing",
+  "orgId": 1,
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HighErrorRate",
+        "service": "checkout",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "Checkout error rate is above 5%"
+      },
+      "startsAt": "2026-08-12T02:00:00Z",
+      "endsAt": "2026-08-12T03:00:00Z",
+      "values": {
+        "B": 7.2
+      },
+      "generatorURL": "https://grafana.example.com/alerting/grafana/abc/view",
+      "fingerprint": "a9f2b7cd0e1a",
+      "silenceURL": "https://grafana.example.com/alerting/silence/new",
+      "dashboardURL": "",
+      "panelURL": "",
+      "grafanaExtension": {
+        "runbookOwner": "payments"
+      }
+    }
+  ],
+  "groupLabels": {
+    "alertname": "HighErrorRate"
+  },
+  "commonLabels": {
+    "service": "checkout"
+  },
+  "commonAnnotations": {
+    "summary": "Checkout error rate is above 5%"
+  },
+  "externalURL": "https://grafana.example.com/",
+  "version": "1",
+  "groupKey": "{}:{alertname=\"HighErrorRate\"}",
+  "truncatedAlerts": 0,
+  "title": "[FIRING:1] HighErrorRate",
+  "state": "alerting",
+  "message": "Checkout error rate is above 5%",
+  "grafanaTopLevelExtension": "retain-me"
+}

@@ -251,7 +251,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement lifecycle transactions**
 
-Atomically claim `QUEUED` job with `FOR UPDATE SKIP LOCKED`, set `RUNNING`, increment attempt, and establish `deadline_at = queued_at + 300 seconds`. Persist evidence, synthesis, report, timeline, and SSE outbox events in recoverable stages. If a completed report exists, acknowledge redelivery without running agents.
+Atomically claim `QUEUED` job with `FOR UPDATE SKIP LOCKED`, set `RUNNING`, increment attempt, and establish `deadline_at = queued_at + 300 seconds`. Persist evidence, synthesis, report, timeline, and internal outbox/status events in recoverable stages. If a completed report exists, acknowledge redelivery without running agents.
 
 - [ ] **Step 4: Implement bounded retry**
 

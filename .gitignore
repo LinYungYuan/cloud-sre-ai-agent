@@ -1,2 +1,30 @@
 .worktrees/
 .superpowers/
+
+# Python environments, bytecode, and tool caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.pyright/
+.mypy_cache/
+.coverage
+htmlcov/
+.uv-cache/
+*.egg-info/
+
+# Node dependencies, build output, and tool caches
+node_modules/
+dist/
+.angular/
+.cache/
+.npm/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local runtime configuration (keep committed templates)
+.env*
+!.env.example

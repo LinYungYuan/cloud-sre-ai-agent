@@ -46,7 +46,7 @@
 ### 2.3 體驗與服務目標
 
 - 合法 webhook 在 2 秒內完成接收並回傳。
-- 新 Incident 在 5 秒內出現在 Angular 前端。
+- 新 Incident 在 webhook 接收後 5 秒內可由 authenticated Operator REST API 查詢；使用者重新整理後即可看到最新狀態。
 - 完整 RCA 目標在 5 分鐘內完成。
 - 超過 deadline 時必須保存已有 evidence，並產生 `PARTIAL` 或清楚的失敗狀態。
 - Angular 畫面、狀態、提示及錯誤訊息使用繁體中文。
@@ -63,7 +63,7 @@
 - Cloud SQL PostgreSQL 18 schema 與 migration。
 - Durable asynchronous RCA workflow。
 - Angular frontend。
-- OpenAPI 與 SSE event contracts。
+- Versioned OpenAPI contracts。
 - 前後端測試、agent evaluation、observability 及安全邊界。
 
 ### 3.2 本規格不包含
@@ -97,14 +97,14 @@ Pub/Sub ─────── RCA Worker
               ADK / MCP Agents
 
 Angular SPA
-   │ REST + SSE
+   │ Authenticated REST
    ▼
 Backend API
 ```
 
 Backend API 與 RCA Worker 使用相同 codebase，但以不同 process、container image 與 deployment 執行。AI 任務不得占用 API process。Cloud SQL 是 transactional source of truth；Pub/Sub 是 durable work delivery mechanism；transactional outbox 防止資料已提交但工作事件遺失。
 
-Angular 是獨立 project、image、version 與發布流程，只依賴已發布的 OpenAPI 與 SSE contracts，不得 import backend source、SQLAlchemy models 或 ADK events。
+Angular 是獨立 project、image、version 與發布流程，只依賴已發布的 OpenAPI contract，不得 import backend source、SQLAlchemy models 或 ADK events。第一版不提供 browser realtime channel；使用者以頁面重新整理或明確的重新載入操作取得最新狀態。
 
 ## 5. Repository 結構
 
@@ -165,7 +165,6 @@ sre-ai-agent-platform/
 │   │   ├── core/
 │   │   │   ├── api-client/
 │   │   │   ├── auth/
-│   │   │   ├── realtime/
 │   │   │   └── error-handling/
 │   │   ├── layout/
 │   │   ├── features/
@@ -186,7 +185,6 @@ sre-ai-agent-platform/
 │   ├── openapi/
 │   │   ├── grafana-webhook-v1.yaml
 │   │   └── operator-api-v1.yaml
-│   ├── events/incident-events-v1.yaml
 │   ├── examples/
 │   └── compatibility-tests/
 ├── docs/
@@ -458,15 +456,9 @@ POST /api/v1/incidents/{id}/messages
 
 原始 payload 與 tool results 使用受額外權限保護的 endpoints。列表採 cursor pagination。Mutation 使用 idempotency key 或 `If-Match` optimistic concurrency。錯誤使用 `application/problem+json`，並提供穩定 error code 與 correlation ID。
 
-### 10.3 SSE contract
+### 10.3 Browser refresh contract
 
-```http
-GET /api/v1/events/stream
-Accept: text/event-stream
-Last-Event-ID: <event-id>
-```
-
-事件包含 Incident、alert、RCA、message 狀態變更。SSE 只傳 event type、resource IDs、occurred time 與小型摘要，不傳大型 evidence。Angular 收到事件後透過 REST 取得最新 resource。斷線後使用 `Last-Event-ID` 接續；無法恢復時退回 polling。
+Operator UI 僅使用 authenticated REST。系統不公開 SSE、WebSocket 或其他 browser realtime endpoint，也不在背景 polling。使用者透過頁面重新整理或明確的重新載入操作取得最新 Incident、alert、RCA 與 message 狀態。內部 outbox/event records 僅供 durable jobs、audit 與 transaction coordination，不是 frontend contract。
 
 ## 11. Angular Frontend
 
@@ -475,7 +467,7 @@ Last-Event-ID: <event-id>
 - 使用 Angular standalone components 與 lazy-loaded feature routes。
 - 第一版使用 Angular signals 與 feature services，不先引入大型全域 state framework。
 - OpenAPI generated client 是唯一 REST client contract。
-- API base URL 與 SSE URL 使用 runtime config，不寫死於 build。
+- API base URL 使用 runtime config，不寫死於 build。
 - 使用正式 zh-TW i18n resources，不把中文散落寫死在 components。
 - API enums 維持英文穩定值，由前端翻譯成繁體中文。
 - 日期以 Asia/Taipei 顯示，但 API 與 database 使用 UTC。
@@ -504,7 +496,7 @@ Last-Event-ID: <event-id>
 
 ### 11.4 Incident 列表與詳情
 
-列表支援 scope、severity、status、assignee、時間範圍、搜尋及 cursor pagination。SSE 更新可見狀態，但不得自動打亂使用者目前排序。
+列表支援 scope、severity、status、RCA status、assignee、時間範圍、搜尋、server-side sorting 及 cursor pagination。列表不自動更新；使用者重新整理或明確重新載入時保留目前 filter 與 sorting query parameters。
 
 詳情頁固定顯示 severity、incident ID、title、scope、alert state、incident status、RCA status、acknowledgement 與 assignee，並提供確認、指派、重跑 RCA、結案及重新開啟。
 
@@ -566,7 +558,6 @@ Webhook/API
 → MCP call
 → RCA synthesis
 → Database result
-→ SSE notification
 ```
 
 至少記錄：latency、route、model calls、token usage、MCP latency/timeout、specialist status、evidence count、RCA status、queue lag、webhook acceptance latency、Incident visibility latency 與 correlation IDs。Logs 不得包含 token、authorization header、未遮罩敏感 payload 或不必要的完整 tool results。
@@ -586,7 +577,7 @@ Webhook/API
 
 ### 15.2 Angular
 
-- Unit：繁體中文狀態轉換、filter、SSE reconnect。
+- Unit：繁體中文狀態轉換、filter、sorting 與明確重新載入。
 - Component：loading、empty、partial、error、unauthorized。
 - Contract：generated client 與 operator OpenAPI 一致。
 - E2E：告警顯示、確認、指派、共享對話、RCA、結案與重新開啟。
@@ -595,11 +586,11 @@ Webhook/API
 ## 16. 驗收標準
 
 1. 合法 Grafana webhook 在 2 秒內回傳 `202 Accepted`。
-2. 新 Incident 在 5 秒內可於 Angular 查詢或透過 SSE 顯示。
+2. 新 Incident 在 webhook 接收後 5 秒內可由 authenticated Operator REST API 查詢，並在使用者重新整理 Angular 後顯示。
 3. RCA 在 5 分鐘內完成，或產生可理解、可重跑的 `PARTIAL/FAILED` 狀態。
 4. 相同 Grafana delivery、fingerprint update 或 worker redelivery 不產生重複 Incident/RCA。
 5. 所有資料永久保存於 Cloud SQL PostgreSQL 18，時間型大型資料表按月分區。
-6. 未授權 scope 無法透過 API、SSE 或 raw evidence endpoint 讀取。
+6. 未授權 scope 無法透過 API 或 raw evidence endpoint 讀取。
 7. 每個 observed fact 能追溯至 specialist、MCP tool、endpoint、time window 與原始 evidence。
 8. Angular 所有系統文字及 AI 說明為繁體中文；原始技術證據不被翻譯或改寫。
 9. Backend API、RCA Worker 與 Angular 可獨立建置、測試、版本化及發布。

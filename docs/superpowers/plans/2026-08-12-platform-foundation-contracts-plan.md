@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Create independently testable backend/frontend foundations plus canonical v1 HTTP and realtime contracts.
+**Goal:** Create independently testable backend/frontend foundations plus canonical v1 HTTP contracts.
 
 **Architecture:** The backend uses a Python `src/` package with domain types that do not depend on FastAPI or SQLAlchemy. The Angular project is independently buildable. OpenAPI and JSON Schema files under `contracts/` are the only shared integration boundary.
 
@@ -30,7 +30,6 @@
 - `backend/src/sre_agent/domain/incidents/models.py`: Incident and RCA state enums.
 - `contracts/openapi/grafana-webhook-v1.yaml`: public machine ingestion contract.
 - `contracts/openapi/operator-api-v1.yaml`: Angular-facing contract.
-- `contracts/events/incident-events-v1.json`: replayable SSE payload schema.
 - `contracts/examples/`: valid contract examples used by tests.
 - `frontend/`: standalone Angular workspace, initially a shell only.
 - `scripts/contract_check/check_contracts.py`: deterministic schema/OpenAPI validation.
@@ -208,19 +207,18 @@ git add contracts scripts/contract_check
 git commit -m "feat: define Grafana webhook v1 contract"
 ```
 
-### Task 4: Operator API and SSE contracts
+### Task 4: Operator REST API contract
 
 **Files:**
 - Create: `contracts/openapi/operator-api-v1.yaml`
-- Create: `contracts/events/incident-events-v1.json`
 - Create: `contracts/examples/incident.json`
 - Create: `contracts/examples/rca-report.json`
 - Modify: `scripts/contract_check/check_contracts.py`
 - Modify: `contracts/compatibility-tests/test_contracts.py`
 
 **Interfaces:**
-- Produces all approved `/api/v1` resources and `IncidentEventV1`.
-- Consumed by: FastAPI response models, generated Angular client, SSE service.
+- Produces all approved Operator REST `/api/v1` resources.
+- Consumed by: FastAPI response models and the generated Angular client.
 
 - [ ] **Step 1: Extend the contract test with required operations**
 
@@ -235,9 +233,9 @@ Expected: FAIL because `operator-api-v1.yaml` is missing.
 
 Define `IncidentSummary`, `IncidentDetail`, `AlertSummary`, `RcaRun`, `RcaReport`, `Evidence`, `Hypothesis`, `IncidentMessage`, `TimelineEvent`, `CursorPage*`, and RFC 9457-style `Problem`. Use UUID strings, `date-time`, English enums from Task 2, ETag response headers for Incident resources, and stable error codes including `RCA_ALREADY_RUNNING`, `INCIDENT_VERSION_CONFLICT`, `SCOPE_FORBIDDEN`, `MCP_TIMEOUT`.
 
-- [ ] **Step 4: Define replayable SSE payload**
+- [ ] **Step 4: Lock REST-only operator behavior and schema invariants**
 
-`IncidentEventV1` requires `eventId`, `type`, `incidentId`, `resourceId`, `occurredAt`, and `version: 1`. Limit `type` to the approved incident/alert/RCA/message event names. The SSE operation accepts optional `after` for browser replay in addition to `Last-Event-ID`. Do not include raw evidence or arbitrary payload blobs.
+Assert no public browser event-stream path or event contract exists. Include dashboard counts/trends/recent Incidents, current RCA status, scope/filter/sort parameters, mapping ETags, and Incident acknowledgement/resolution invariants. The UI obtains new state only through authenticated REST after a user refresh or explicit reload.
 
 - [ ] **Step 5: Validate examples and commit**
 
@@ -246,7 +244,7 @@ Expected: PASS.
 
 ```bash
 git add contracts scripts/contract_check
-git commit -m "feat: define operator API and realtime contracts"
+git commit -m "feat: define operator REST API contract"
 ```
 
 ### Task 5: Independent Angular shell
@@ -268,7 +266,7 @@ git commit -m "feat: define operator API and realtime contracts"
 - Create: `frontend/README.md`
 
 **Interfaces:**
-- Produces: `RuntimeConfig { apiBaseUrl: string; sseUrl: string; locale: 'zh-TW'; timeZone: 'Asia/Taipei' }`.
+- Produces: `RuntimeConfig { apiBaseUrl: string; locale: 'zh-TW'; timeZone: 'Asia/Taipei' }`.
 
 - [ ] **Step 1: Scaffold an Angular standalone app without Git or routing boilerplate outside `frontend/`**
 
@@ -280,7 +278,7 @@ Expected: only `frontend/` is created or modified.
 ```typescript
 it('rejects a locale other than zh-TW', () => {
   expect(() => parseRuntimeConfig({
-    apiBaseUrl: '/api/v1', sseUrl: '/api/v1/events/stream',
+    apiBaseUrl: '/api/v1',
     locale: 'en-US', timeZone: 'Asia/Taipei'
   })).toThrowError(/zh-TW/);
 });
