@@ -1,0 +1,1410 @@
+openapi: 3.1.0
+info:
+  title: SRE Operator API
+  version: 1.0.0
+  description: The sole versioned REST and realtime boundary used by the operator UI.
+security:
+  - bearerAuth: []
+
+x-common-error-responses: &commonErrorResponses
+  '400':
+    $ref: '#/components/responses/BadRequest'
+  '401':
+    $ref: '#/components/responses/Unauthenticated'
+  '403':
+    $ref: '#/components/responses/Forbidden'
+  '404':
+    $ref: '#/components/responses/NotFound'
+  '409':
+    $ref: '#/components/responses/Conflict'
+  '500':
+    $ref: '#/components/responses/InternalError'
+
+paths:
+  /api/v1/dashboard/summary:
+    get:
+      operationId: getDashboardSummary
+      summary: Get the authorized operator dashboard summary.
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          description: Scope-filtered dashboard counts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardSummary'
+
+  /api/v1/incidents:
+    get:
+      operationId: listIncidents
+      summary: List authorized incidents using cursor pagination.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/IncidentStatus'
+        - name: severity
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/Severity'
+        - name: assigneeId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: search
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 200
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          description: Cursor page of incidents.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CursorPageIncidents'
+
+  /api/v1/incidents/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      operationId: getIncident
+      summary: Get an authorized incident.
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          description: Incident detail at the returned version.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncidentDetail'
+
+  /api/v1/incidents/{id}/timeline:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      operationId: listIncidentTimeline
+      summary: List the immutable incident timeline.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          description: Cursor page of timeline events.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CursorPageTimelineEvents'
+
+  /api/v1/incidents/{id}/acknowledge:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    post:
+      operationId: acknowledgeIncident
+      summary: Acknowledge an incident at a known version.
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          $ref: '#/components/responses/IncidentUpdated'
+
+  /api/v1/incidents/{id}/assign:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    post:
+      operationId: assignIncident
+      summary: Assign an incident at a known version.
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssignIncidentRequest'
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          $ref: '#/components/responses/IncidentUpdated'
+
+  /api/v1/incidents/{id}/resolve:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    post:
+      operationId: resolveIncident
+      summary: Resolve an incident at a known version.
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResolveIncidentRequest'
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          $ref: '#/components/responses/IncidentUpdated'
+
+  /api/v1/incidents/{id}/reopen:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    post:
+      operationId: reopenIncident
+      summary: Reopen a resolved incident at a known version.
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReopenIncidentRequest'
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          $ref: '#/components/responses/IncidentUpdated'
+
+  /api/v1/alerts:
+    get:
+      operationId: listAlerts
+      summary: List authorized alerts using cursor pagination.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - name: state
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/AlertState'
+        - name: severity
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/Severity'
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          description: Cursor page of alerts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CursorPageAlerts'
+
+  /api/v1/alerts/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      operationId: getAlert
+      summary: Get an authorized alert.
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          description: Alert detail without the immutable raw webhook payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertDetail'
+
+  /api/v1/unclassified-alerts:
+    get:
+      operationId: listUnclassifiedAlerts
+      summary: List alerts that require privileged classification.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          description: Cursor page of unclassified alerts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CursorPageAlerts'
+
+  /api/v1/unclassified-alerts/{id}/classify:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    post:
+      operationId: classifyAlert
+      summary: Classify an alert into an authorized scope.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClassifyAlertRequest'
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          description: Classified alert.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertDetail'
+
+  /api/v1/classification-mappings:
+    get:
+      operationId: listClassificationMappings
+      summary: List classification mappings in priority order.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          description: Cursor page of classification mappings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CursorPageClassificationMappings'
+    post:
+      operationId: createClassificationMapping
+      summary: Create a classification mapping idempotently.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClassificationMappingWrite'
+      responses:
+        <<: *commonErrorResponses
+        '201':
+          description: Classification mapping created.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassificationMapping'
+
+  /api/v1/classification-mappings/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    patch:
+      operationId: updateClassificationMapping
+      summary: Update a classification mapping at a known version.
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/merge-patch+json:
+            schema:
+              $ref: '#/components/schemas/ClassificationMappingPatch'
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          description: Classification mapping updated.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClassificationMapping'
+    delete:
+      operationId: deleteClassificationMapping
+      summary: Disable a classification mapping at a known version.
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        <<: *commonErrorResponses
+        '204':
+          description: Classification mapping disabled.
+
+  /api/v1/incidents/{id}/rca-runs:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      operationId: listIncidentRcaRuns
+      summary: List immutable RCA runs for an incident.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          description: Cursor page of RCA runs.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CursorPageRcaRuns'
+    post:
+      operationId: createIncidentRcaRun
+      summary: Start or replay an RCA run idempotently.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRcaRunRequest'
+      responses:
+        <<: *commonErrorResponses
+        '202':
+          description: RCA run accepted or replayed from the same idempotency key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RcaRun'
+
+  /api/v1/rca-runs/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      operationId: getRcaRun
+      summary: Get an RCA run.
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          description: RCA run state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RcaRun'
+
+  /api/v1/rca-runs/{id}/report:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      operationId: getRcaReport
+      summary: Get the immutable report for an RCA run.
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          description: Versioned RCA report.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RcaReport'
+
+  /api/v1/rca-runs/{id}/evidence:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      operationId: listRcaEvidence
+      summary: List evidence summaries and provenance without raw tool results.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          description: Cursor page of evidence metadata and summaries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CursorPageEvidence'
+
+  /api/v1/rca-runs/{id}/hypotheses:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      operationId: listRcaHypotheses
+      summary: List ranked RCA hypotheses and evidence relations.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          description: Cursor page of hypotheses.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CursorPageHypotheses'
+
+  /api/v1/incidents/{id}/messages:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      operationId: listIncidentMessages
+      summary: List immutable incident conversation messages.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          description: Cursor page of incident messages.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CursorPageIncidentMessages'
+    post:
+      operationId: createIncidentMessage
+      summary: Persist an operator message and enqueue an agent response.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateIncidentMessageRequest'
+      responses:
+        <<: *commonErrorResponses
+        '202':
+          description: Persisted user message.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncidentMessage'
+
+  /api/v1/events/stream:
+    get:
+      operationId: streamIncidentEvents
+      summary: Stream authorized incident events with replay support.
+      description: If both replay values are supplied they must identify the same event.
+      parameters:
+        - $ref: '#/components/parameters/AfterEventId'
+        - $ref: '#/components/parameters/LastEventId'
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          description: SSE frames whose JSON data conforms to IncidentEventV1.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: Opaque cursor from the previous page; it is bound to the active filters.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 2048
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+    From:
+      name: from
+      in: query
+      required: true
+      schema:
+        $ref: '#/components/schemas/UtcDateTime'
+    To:
+      name: to
+      in: query
+      required: true
+      schema:
+        $ref: '#/components/schemas/UtcDateTime'
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: Strong ETag returned by the latest representation.
+      schema:
+        type: string
+        pattern: '^"[1-9][0-9]*"$'
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    AfterEventId:
+      name: after
+      in: query
+      required: false
+      description: Browser-compatible replay cursor for EventSource clients.
+      schema:
+        type: string
+        format: uuid
+    LastEventId:
+      name: Last-Event-ID
+      in: header
+      required: false
+      description: Standard SSE replay cursor.
+      schema:
+        type: string
+        format: uuid
+
+  headers:
+    ETag:
+      description: Strong version ETag used by If-Match mutations.
+      required: true
+      schema:
+        type: string
+        pattern: '^"[1-9][0-9]*"$'
+
+  responses:
+    IncidentUpdated:
+      description: Updated incident detail.
+      headers:
+        ETag:
+          $ref: '#/components/headers/ETag'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/IncidentDetail'
+    BadRequest:
+      description: Invalid request, cursor, time range, or replay cursor.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Unauthenticated:
+      description: Authentication is missing or invalid.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Forbidden:
+      description: The subject lacks permission for the requested scope.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    NotFound:
+      description: The resource is absent or invisible to the authorized scope.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Conflict:
+      description: Version, lifecycle, or active-run conflict.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    InternalError:
+      description: An internal or dependency failure occurred.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+  schemas:
+    UtcDateTime:
+      type: string
+      format: date-time
+      pattern: 'Z$'
+      description: UTC timestamp serialized in RFC 3339 Z notation.
+    AlertState:
+      type: string
+      enum: [FIRING, RESOLVED]
+    ClassificationStatus:
+      type: string
+      enum: [CLASSIFIED, UNCLASSIFIED]
+    IncidentStatus:
+      type: string
+      enum: [OPEN, INVESTIGATING, RESOLVED]
+    RcaRunStatus:
+      type: string
+      enum:
+        - WAITING_FOR_CLASSIFICATION
+        - QUEUED
+        - RUNNING
+        - SUCCEEDED
+        - PARTIAL
+        - FAILED
+        - CANCELLED
+    EvidenceRelation:
+      type: string
+      enum: [SUPPORTS, CONTRADICTS, MISSING]
+    MessageRole:
+      type: string
+      enum: [USER, AGENT, SYSTEM]
+    Severity:
+      type: string
+      enum: [CRITICAL, HIGH, MEDIUM, LOW]
+    ProblemCode:
+      type: string
+      enum:
+        - INVALID_REQUEST
+        - INVALID_CURSOR
+        - INVALID_TIME_RANGE
+        - INVALID_EVENT_CURSOR
+        - UNAUTHENTICATED
+        - SCOPE_FORBIDDEN
+        - RESOURCE_NOT_FOUND
+        - INCIDENT_VERSION_CONFLICT
+        - INVALID_INCIDENT_TRANSITION
+        - RCA_ALREADY_RUNNING
+        - MCP_TIMEOUT
+        - INTERNAL_ERROR
+    Problem:
+      type: object
+      description: RFC 9457 problem detail with stable machine-readable extensions.
+      required: [type, title, status, code, correlationId]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri-reference
+        code:
+          $ref: '#/components/schemas/ProblemCode'
+        correlationId:
+          type: string
+          format: uuid
+        activeRcaRunId:
+          type: string
+          format: uuid
+          description: Present for RCA_ALREADY_RUNNING conflicts.
+      additionalProperties: false
+
+    Scope:
+      type: object
+      required: [teamId, projectId, environmentId, serviceId]
+      properties:
+        teamId:
+          type: string
+          format: uuid
+        projectId:
+          type: string
+          format: uuid
+        environmentId:
+          type: string
+          format: uuid
+        serviceId:
+          type: string
+          format: uuid
+      additionalProperties: false
+    Assignee:
+      type: object
+      required: [id, displayName]
+      properties:
+        id:
+          type: string
+          format: uuid
+        displayName:
+          type: string
+          minLength: 1
+      additionalProperties: false
+
+    IncidentSummary:
+      type: object
+      required: &incidentSummaryRequired
+        - id
+        - incidentNumber
+        - title
+        - severity
+        - status
+        - alertState
+        - scope
+        - acknowledged
+        - openedAt
+        - updatedAt
+        - version
+      properties: &incidentSummaryProperties
+        id:
+          type: string
+          format: uuid
+        incidentNumber:
+          type: string
+          pattern: '^INC-[0-9]+$'
+        title:
+          type: string
+          minLength: 1
+        severity:
+          $ref: '#/components/schemas/Severity'
+        status:
+          $ref: '#/components/schemas/IncidentStatus'
+        alertState:
+          $ref: '#/components/schemas/AlertState'
+        scope:
+          $ref: '#/components/schemas/Scope'
+        acknowledged:
+          type: boolean
+        assignee:
+          oneOf:
+            - $ref: '#/components/schemas/Assignee'
+            - type: 'null'
+        openedAt:
+          $ref: '#/components/schemas/UtcDateTime'
+        updatedAt:
+          $ref: '#/components/schemas/UtcDateTime'
+        resolvedAt:
+          oneOf:
+            - $ref: '#/components/schemas/UtcDateTime'
+            - type: 'null'
+        version:
+          type: integer
+          minimum: 1
+      additionalProperties: false
+    IncidentDetail:
+      type: object
+      required:
+        - id
+        - incidentNumber
+        - title
+        - severity
+        - status
+        - alertState
+        - scope
+        - acknowledged
+        - openedAt
+        - updatedAt
+        - version
+        - alertIds
+        - rcaRunIds
+      properties:
+        <<: *incidentSummaryProperties
+        description:
+          type: string
+        alertIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          uniqueItems: true
+        rcaRunIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          uniqueItems: true
+        acknowledgedAt:
+          oneOf:
+            - $ref: '#/components/schemas/UtcDateTime'
+            - type: 'null'
+        acknowledgedBy:
+          type: [string, 'null']
+          format: uuid
+      additionalProperties: false
+
+    AlertSummary:
+      type: object
+      required:
+        - id
+        - sourceId
+        - fingerprint
+        - title
+        - severity
+        - state
+        - classificationStatus
+        - startsAt
+        - updatedAt
+      properties: &alertSummaryProperties
+        id:
+          type: string
+          format: uuid
+        sourceId:
+          type: string
+          format: uuid
+        incidentId:
+          type: [string, 'null']
+          format: uuid
+        fingerprint:
+          type: string
+          minLength: 1
+        title:
+          type: string
+          minLength: 1
+        severity:
+          $ref: '#/components/schemas/Severity'
+        state:
+          $ref: '#/components/schemas/AlertState'
+        classificationStatus:
+          $ref: '#/components/schemas/ClassificationStatus'
+        scope:
+          oneOf:
+            - $ref: '#/components/schemas/Scope'
+            - type: 'null'
+        startsAt:
+          $ref: '#/components/schemas/UtcDateTime'
+        endsAt:
+          oneOf:
+            - $ref: '#/components/schemas/UtcDateTime'
+            - type: 'null'
+        updatedAt:
+          $ref: '#/components/schemas/UtcDateTime'
+      additionalProperties: false
+    AlertDetail:
+      type: object
+      required:
+        - id
+        - sourceId
+        - fingerprint
+        - title
+        - severity
+        - state
+        - classificationStatus
+        - startsAt
+        - updatedAt
+        - labels
+        - annotations
+      properties:
+        <<: *alertSummaryProperties
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        annotations:
+          type: object
+          additionalProperties:
+            type: string
+        generatorUrl:
+          type: string
+          format: uri
+      additionalProperties: false
+
+    RcaRun:
+      type: object
+      required: [id, incidentId, runNumber, status, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        incidentId:
+          type: string
+          format: uuid
+        runNumber:
+          type: integer
+          minimum: 1
+        status:
+          $ref: '#/components/schemas/RcaRunStatus'
+        createdAt:
+          $ref: '#/components/schemas/UtcDateTime'
+        updatedAt:
+          $ref: '#/components/schemas/UtcDateTime'
+        startedAt:
+          oneOf:
+            - $ref: '#/components/schemas/UtcDateTime'
+            - type: 'null'
+        completedAt:
+          oneOf:
+            - $ref: '#/components/schemas/UtcDateTime'
+            - type: 'null'
+        failureCode:
+          oneOf:
+            - $ref: '#/components/schemas/ProblemCode'
+            - type: 'null'
+        reportId:
+          type: [string, 'null']
+          format: uuid
+      additionalProperties: false
+    EvidenceReference:
+      type: object
+      required: [evidenceId, relation]
+      properties:
+        evidenceId:
+          type: string
+          format: uuid
+        relation:
+          $ref: '#/components/schemas/EvidenceRelation'
+      additionalProperties: false
+    ReportClaim:
+      type: object
+      required: [statement, evidence]
+      properties:
+        statement:
+          type: string
+          minLength: 1
+        evidence:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/EvidenceReference'
+      additionalProperties: false
+    RcaReport:
+      type: object
+      required:
+        - id
+        - rcaRunId
+        - incidentId
+        - reportVersion
+        - status
+        - summary
+        - rootCause
+        - impact
+        - recommendations
+        - claims
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        rcaRunId:
+          type: string
+          format: uuid
+        incidentId:
+          type: string
+          format: uuid
+        reportVersion:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          enum: [SUCCEEDED, PARTIAL]
+        summary:
+          type: string
+          minLength: 1
+        rootCause:
+          type: string
+          minLength: 1
+        impact:
+          type: string
+          minLength: 1
+        recommendations:
+          type: array
+          items:
+            type: string
+            minLength: 1
+        claims:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReportClaim'
+        createdAt:
+          $ref: '#/components/schemas/UtcDateTime'
+      additionalProperties: false
+    Evidence:
+      type: object
+      description: Evidence summary and provenance; raw tool results are intentionally excluded.
+      required:
+        - id
+        - rcaRunId
+        - evidenceType
+        - sourceAgent
+        - sourceEndpoint
+        - toolName
+        - observedAt
+        - scope
+        - timeWindowStart
+        - timeWindowEnd
+        - summary
+        - rawAvailable
+      properties:
+        id:
+          type: string
+          format: uuid
+        rcaRunId:
+          type: string
+          format: uuid
+        evidenceType:
+          type: string
+          enum: [METRIC, TRACE, LOG]
+        sourceAgent:
+          type: string
+          enum: [METRICS, TRACE, LOG]
+        sourceEndpoint:
+          type: string
+          format: uri
+        toolName:
+          type: string
+          minLength: 1
+        observedAt:
+          $ref: '#/components/schemas/UtcDateTime'
+        scope:
+          $ref: '#/components/schemas/Scope'
+        timeWindowStart:
+          $ref: '#/components/schemas/UtcDateTime'
+        timeWindowEnd:
+          $ref: '#/components/schemas/UtcDateTime'
+        summary:
+          type: string
+          minLength: 1
+        rawAvailable:
+          type: boolean
+      additionalProperties: false
+    Hypothesis:
+      type: object
+      required: [id, rcaRunId, statement, confidence, rank, evidence, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        rcaRunId:
+          type: string
+          format: uuid
+        statement:
+          type: string
+          minLength: 1
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        rank:
+          type: integer
+          minimum: 1
+        evidence:
+          type: array
+          items:
+            $ref: '#/components/schemas/EvidenceReference'
+        createdAt:
+          $ref: '#/components/schemas/UtcDateTime'
+      additionalProperties: false
+    IncidentMessage:
+      type: object
+      required: [id, incidentId, role, content, actorId, createdAt, evidenceIds]
+      properties:
+        id:
+          type: string
+          format: uuid
+        incidentId:
+          type: string
+          format: uuid
+        role:
+          $ref: '#/components/schemas/MessageRole'
+        content:
+          type: string
+          minLength: 1
+        actorId:
+          type: string
+          format: uuid
+        rcaRunId:
+          type: [string, 'null']
+          format: uuid
+        evidenceIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          uniqueItems: true
+        createdAt:
+          $ref: '#/components/schemas/UtcDateTime'
+      additionalProperties: false
+    TimelineEvent:
+      type: object
+      required: [id, incidentId, type, summary, occurredAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        incidentId:
+          type: string
+          format: uuid
+        resourceId:
+          type: [string, 'null']
+          format: uuid
+        type:
+          type: string
+          enum:
+            - INCIDENT_CREATED
+            - INCIDENT_ACKNOWLEDGED
+            - INCIDENT_ASSIGNED
+            - INCIDENT_RESOLVED
+            - INCIDENT_REOPENED
+            - ALERT_FIRING
+            - ALERT_RESOLVED
+            - ALERT_CLASSIFIED
+            - RCA_RUN_CREATED
+            - RCA_RUN_STATUS_CHANGED
+            - RCA_REPORT_PUBLISHED
+            - MESSAGE_CREATED
+        summary:
+          type: string
+          minLength: 1
+        actorId:
+          type: [string, 'null']
+          format: uuid
+        occurredAt:
+          $ref: '#/components/schemas/UtcDateTime'
+      additionalProperties: false
+
+    ClassificationMatcher:
+      type: object
+      required: [sourceId]
+      anyOf:
+        - required: [ruleName]
+        - required: [folder]
+        - required: [labels]
+      properties:
+        sourceId:
+          type: string
+          format: uuid
+        ruleName:
+          type: string
+          minLength: 1
+        folder:
+          type: string
+          minLength: 1
+        labels:
+          type: object
+          minProperties: 1
+          additionalProperties:
+            type: string
+      additionalProperties: false
+    ClassificationMapping:
+      type: object
+      required: [id, matcher, targetScope, priority, enabled, version, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        matcher:
+          $ref: '#/components/schemas/ClassificationMatcher'
+        targetScope:
+          $ref: '#/components/schemas/Scope'
+        priority:
+          type: integer
+          minimum: 0
+        enabled:
+          type: boolean
+        version:
+          type: integer
+          minimum: 1
+        createdAt:
+          $ref: '#/components/schemas/UtcDateTime'
+        updatedAt:
+          $ref: '#/components/schemas/UtcDateTime'
+      additionalProperties: false
+
+    AssignIncidentRequest:
+      type: object
+      required: [assigneeId]
+      properties:
+        assigneeId:
+          type: string
+          format: uuid
+      additionalProperties: false
+    ResolveIncidentRequest:
+      type: object
+      required: [resolution]
+      properties:
+        resolution:
+          type: string
+          minLength: 1
+          maxLength: 4000
+      additionalProperties: false
+    ReopenIncidentRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 2000
+      additionalProperties: false
+    ClassifyAlertRequest:
+      type: object
+      required: [targetScope, createMapping]
+      properties:
+        targetScope:
+          $ref: '#/components/schemas/Scope'
+        createMapping:
+          type: boolean
+      additionalProperties: false
+    ClassificationMappingWrite:
+      type: object
+      required: [matcher, targetScope, priority, enabled]
+      properties:
+        matcher:
+          $ref: '#/components/schemas/ClassificationMatcher'
+        targetScope:
+          $ref: '#/components/schemas/Scope'
+        priority:
+          type: integer
+          minimum: 0
+        enabled:
+          type: boolean
+      additionalProperties: false
+    ClassificationMappingPatch:
+      type: object
+      minProperties: 1
+      properties:
+        matcher:
+          $ref: '#/components/schemas/ClassificationMatcher'
+        targetScope:
+          $ref: '#/components/schemas/Scope'
+        priority:
+          type: integer
+          minimum: 0
+        enabled:
+          type: boolean
+      additionalProperties: false
+    CreateRcaRunRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 2000
+      additionalProperties: false
+    CreateIncidentMessageRequest:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+          minLength: 1
+          maxLength: 10000
+      additionalProperties: false
+
+    DashboardSummary:
+      type: object
+      required: [openIncidents, criticalIncidents, firingAlerts, activeRcaRuns, generatedAt]
+      properties:
+        openIncidents:
+          type: integer
+          minimum: 0
+        criticalIncidents:
+          type: integer
+          minimum: 0
+        firingAlerts:
+          type: integer
+          minimum: 0
+        activeRcaRuns:
+          type: integer
+          minimum: 0
+        generatedAt:
+          $ref: '#/components/schemas/UtcDateTime'
+      additionalProperties: false
+
+    CursorPageIncidents:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/IncidentSummary'
+        nextCursor:
+          type: [string, 'null']
+      additionalProperties: false
+    CursorPageAlerts:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AlertSummary'
+        nextCursor:
+          type: [string, 'null']
+      additionalProperties: false
+    CursorPageClassificationMappings:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClassificationMapping'
+        nextCursor:
+          type: [string, 'null']
+      additionalProperties: false
+    CursorPageRcaRuns:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/RcaRun'
+        nextCursor:
+          type: [string, 'null']
+      additionalProperties: false
+    CursorPageEvidence:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Evidence'
+        nextCursor:
+          type: [string, 'null']
+      additionalProperties: false
+    CursorPageHypotheses:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Hypothesis'
+        nextCursor:
+          type: [string, 'null']
+      additionalProperties: false
+    CursorPageIncidentMessages:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/IncidentMessage'
+        nextCursor:
+          type: [string, 'null']
+      additionalProperties: false
+    CursorPageTimelineEvents:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/TimelineEvent'
+        nextCursor:
+          type: [string, 'null']
+      additionalProperties: false

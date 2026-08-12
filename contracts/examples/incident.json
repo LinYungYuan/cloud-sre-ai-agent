@@ -1,0 +1,32 @@
+{
+  "id": "e276fdf9-8600-41f7-8c32-fd3cbed55247",
+  "incidentNumber": "INC-1042",
+  "title": "Checkout API error rate elevated",
+  "severity": "CRITICAL",
+  "status": "INVESTIGATING",
+  "alertState": "FIRING",
+  "scope": {
+    "teamId": "0d2d93f1-5439-4616-82aa-283793c4e56d",
+    "projectId": "0b1e90de-b18e-458d-93ce-2e4615889146",
+    "environmentId": "75ec7e03-24bb-4cfa-af0d-b938fb3e2350",
+    "serviceId": "fa5fc9c0-0e15-4a3d-9b58-d69a5a6e8272"
+  },
+  "acknowledged": true,
+  "assignee": {
+    "id": "f8208da3-d3d3-4d67-bf38-a895b37804f8",
+    "displayName": "Lin Yu"
+  },
+  "openedAt": "2026-08-12T02:30:00Z",
+  "updatedAt": "2026-08-12T02:42:12Z",
+  "resolvedAt": null,
+  "version": 4,
+  "description": "Elevated HTTP 5xx responses are affecting checkout traffic.",
+  "alertIds": [
+    "617db51e-113e-4559-af8a-d40fa2629207"
+  ],
+  "rcaRunIds": [
+    "aab5602d-a58f-4617-b4ad-81233ce38125"
+  ],
+  "acknowledgedAt": "2026-08-12T02:33:09Z",
+  "acknowledgedBy": "f8208da3-d3d3-4d67-bf38-a895b37804f8"
+}

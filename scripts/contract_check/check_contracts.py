@@ -51,6 +51,10 @@ def validate_all(root: Path) -> None:
     """Validate all OpenAPI documents, component schemas, and example payloads."""
     contracts_root = root / "contracts"
 
+    for event_contract_path in sorted((contracts_root / "events").glob("*.json")):
+        event_contract = _load_json(event_contract_path)
+        Draft202012Validator.check_schema(event_contract)
+
     for contract_path in sorted((contracts_root / "openapi").glob("*.yaml")):
         contract = _load_yaml(contract_path)
         validate(contract, base_uri=contract_path.as_uri())
@@ -75,6 +79,19 @@ def validate_all(root: Path) -> None:
             _validate_example(
                 _load_json(contracts_root / "examples" / "webhook-accepted.json"),
                 "WebhookAccepted",
+                contract,
+                contract_path,
+            )
+        elif contract_path.name == "operator-api-v1.yaml":
+            _validate_example(
+                _load_json(contracts_root / "examples" / "incident.json"),
+                "IncidentDetail",
+                contract,
+                contract_path,
+            )
+            _validate_example(
+                _load_json(contracts_root / "examples" / "rca-report.json"),
+                "RcaReport",
                 contract,
                 contract_path,
             )
