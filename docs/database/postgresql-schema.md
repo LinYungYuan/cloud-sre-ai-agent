@@ -344,7 +344,7 @@ CREATE TABLE webhook_deliveries (
     partition_timestamp TIMESTAMPTZ NOT NULL,
     received_at TIMESTAMPTZ NOT NULL,
     source_id UUID NOT NULL REFERENCES grafana_sources(id),
-    token_id UUID,
+    token_id TEXT,
     body_hash TEXT NOT NULL,
     raw_payload JSONB NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('RECEIVED', 'PROCESSED', 'DUPLICATE', 'REJECTED', 'FAILED')),

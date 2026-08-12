@@ -55,7 +55,7 @@ class IngestGrafanaAlerts:
     async def execute(
         self,
         source_id: UUID,
-        token_id: UUID,
+        token_id: str,
         raw_body: bytes,
         received_at: datetime,
     ) -> IngestionResult:

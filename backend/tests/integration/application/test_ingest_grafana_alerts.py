@@ -32,7 +32,7 @@ PROJECT_ID = UUID("20000000-0000-0000-0000-000000000001")
 ENVIRONMENT_ID = UUID("30000000-0000-0000-0000-000000000001")
 SERVICE_ID = UUID("40000000-0000-0000-0000-000000000001")
 SOURCE_ID = UUID("50000000-0000-0000-0000-000000000001")
-TOKEN_ID = UUID("60000000-0000-0000-0000-000000000001")
+TOKEN_ID = "current-2026-08"
 RECEIVED_AT = datetime(2026, 8, 12, 4, 0, tzinfo=UTC)
 DATABASE_URL = os.getenv(
     "MIGRATION_TEST_DATABASE_URL",
@@ -183,6 +183,7 @@ async def test_new_firing_is_stored_atomically_with_one_queued_rca_and_outbox(
     assert delivery["status"] == "PROCESSED"
     assert delivery["body_hash"] == hashlib.sha256(raw_body).hexdigest()
     assert delivery["raw_payload"] == json.loads(raw_body)
+    assert delivery["token_id"] == TOKEN_ID
     event = (await _rows(session_factory, "SELECT * FROM alert_events"))[0]
     assert event["raw_payload"] == json.loads(raw_body)["alerts"][0]
     assert event["alert_state"] == "FIRING"

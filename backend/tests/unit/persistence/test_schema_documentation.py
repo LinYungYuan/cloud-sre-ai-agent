@@ -95,3 +95,21 @@ def test_schema_reference_documents_partitions_and_required_indexes() -> None:
         re.findall(r"\b(?:UNIQUE )?INDEX ([a-z_]+)", sql_blocks)
     )
     assert REQUIRED_INDEXES <= documented_indexes
+
+
+def test_schema_reference_matches_delivery_token_identifier_type() -> None:
+    """The public DDL must preserve the authenticator's non-secret string ID."""
+    migration = _load_migration()
+    documentation = DOCUMENTATION_PATH.read_text(encoding="utf-8")
+    documented_delivery = _documented_table_definitions(documentation)[
+        "webhook_deliveries"
+    ]
+    migrated_delivery = next(
+        statement
+        for statement in migration.DDL
+        if statement.startswith("CREATE TABLE webhook_deliveries")
+    )
+
+    assert "token_id TEXT" in migrated_delivery
+    assert "token_id TEXT" in documented_delivery
+    assert "token_id UUID" not in documented_delivery

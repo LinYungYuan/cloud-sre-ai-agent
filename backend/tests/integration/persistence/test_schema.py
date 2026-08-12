@@ -157,6 +157,21 @@ async def test_lifecycle_timestamps_are_timezone_aware(connection):
 
 
 @pytest.mark.asyncio
+async def test_delivery_token_identifier_uses_text_not_a_secret_or_uuid(connection):
+    data_type = await connection.fetchval(
+        """
+        SELECT data_type
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'webhook_deliveries'
+          AND column_name = 'token_id'
+        """
+    )
+
+    assert data_type == "text"
+
+
+@pytest.mark.asyncio
 async def test_partitioned_tables_use_composite_logical_and_partition_key(connection):
     rows = await connection.fetch(
         """
