@@ -1,10 +1,12 @@
+import asyncio
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from time import perf_counter
-from typing import Any
+from types import TracebackType
+from typing import Any, Self, cast
 from uuid import UUID
 
 import httpx
@@ -16,16 +18,30 @@ from sre_agent.api.dependencies import (
     get_ingest_grafana_alerts,
 )
 from sre_agent.api.main import create_app
-from sre_agent.application.alerts.ingest_grafana_alerts import IngestionResult
+from sre_agent.application.alerts.ingest_grafana_alerts import (
+    IngestGrafanaAlerts,
+    IngestionResult,
+)
+from sre_agent.domain.alerts.classification import ClassificationResult
 from sre_agent.integrations.grafana.authenticator import GrafanaUnauthorized
 from sre_agent.integrations.grafana.payloads import (
     GrafanaPayloadInvalid,
     GrafanaPayloadTooLarge,
 )
+from sre_agent.persistence.repositories.alerts import (
+    AlertRepository,
+    SourceScope,
+    StoredAlertEvent,
+)
+from sre_agent.persistence.repositories.incidents import IncidentRepository
+from sre_agent.persistence.repositories.jobs import JobRepository
 
 SOURCE_ID = UUID("50000000-0000-0000-0000-000000000001")
 DELIVERY_ID = UUID("60000000-0000-0000-0000-000000000001")
 ACCEPTED_AT = datetime(2026, 8, 12, 2, 0, 1, tzinfo=UTC)
+TEAM_ID = UUID("10000000-0000-0000-0000-000000000001")
+PROJECT_ID = UUID("20000000-0000-0000-0000-000000000001")
+ENVIRONMENT_ID = UUID("30000000-0000-0000-0000-000000000001")
 VALID_BODY = json.dumps(
     {
         "status": "firing",
@@ -80,10 +96,102 @@ class RecordingIngestion:
         )
 
 
+class FakeAlertRepository:
+    def __init__(self) -> None:
+        self.delivery_finished = False
+
+    async def get_source_scope(self, source_id: UUID) -> SourceScope:
+        assert source_id == SOURCE_ID
+        return SourceScope(TEAM_ID, PROJECT_ID, ENVIRONMENT_ID)
+
+    async def create_delivery(self, **values: Any) -> UUID:
+        assert values["source_id"] == SOURCE_ID
+        assert values["token_id"] == "current-2026-08"
+        return DELIVERY_ID
+
+    async def claim_dedup_key(self, **values: Any) -> bool:
+        assert values["delivery_id"] == DELIVERY_ID
+        return True
+
+    async def add_event(self, **values: Any) -> StoredAlertEvent:
+        assert values["validation_status"] == "VALIDATION_FAILED"
+        return StoredAlertEvent(
+            id=UUID("70000000-0000-0000-0000-000000000001"),
+            partition_timestamp=values["received_at"],
+        )
+
+    async def upsert_instance(self, **values: Any) -> None:
+        raise AssertionError(
+            f"invalid contract payload must not create an instance: {values}"
+        )
+
+    async def finish_delivery(self, **values: Any) -> None:
+        assert values["status"] == "VALIDATION_FAILED"
+        self.delivery_finished = True
+
+
+class UnusedRepository:
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"invalid contract payload must not call {name}")
+
+
+class ObservableFakeUnitOfWork:
+    def __init__(self, *, fail_commit: bool = False) -> None:
+        self.alert_repository = FakeAlertRepository()
+        self.alerts: AlertRepository = cast(AlertRepository, self.alert_repository)
+        self.incidents: IncidentRepository = cast(
+            IncidentRepository, UnusedRepository()
+        )
+        self.jobs: JobRepository = cast(JobRepository, UnusedRepository())
+        self.fail_commit = fail_commit
+        self.commit_started = False
+        self.commit_completed = False
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        del exc_value, traceback
+        if exc_type is not None:
+            return
+        assert self.alert_repository.delivery_finished
+        self.commit_started = True
+        await asyncio.sleep(0.05)
+        if self.fail_commit:
+            raise RuntimeError("fake commit failed with sensitive state")
+        self.commit_completed = True
+
+
+class NeverClassifier:
+    def classify(
+        self,
+        labels: Mapping[str, str],
+        rule_uid: str | None,
+        folder: str | None,
+    ) -> ClassificationResult:
+        raise AssertionError(
+            f"invalid contract labels must not be classified: {labels}, "
+            f"{rule_uid}, {folder}"
+        )
+
+
+def _real_ingestion(uow: ObservableFakeUnitOfWork) -> IngestGrafanaAlerts:
+    return IngestGrafanaAlerts(
+        uow_factory=lambda: uow,
+        classifier=NeverClassifier(),
+        max_body_bytes=1_048_576,
+    )
+
+
 @asynccontextmanager
 async def _client(
     authenticator: RecordingAuthenticator,
-    ingestion: RecordingIngestion,
+    ingestion: Any,
 ) -> AsyncIterator[tuple[httpx.AsyncClient, FastAPI]]:
     app = create_app()
     app.dependency_overrides[get_grafana_authenticator] = lambda: authenticator
@@ -347,7 +455,8 @@ async def test_missing_correlation_id_is_generated_and_echoed() -> None:
 @pytest.mark.asyncio
 async def test_thin_http_boundary_completes_under_two_seconds_with_fakes() -> None:
     authenticator = RecordingAuthenticator()
-    ingestion = RecordingIngestion()
+    uow = ObservableFakeUnitOfWork()
+    ingestion = _real_ingestion(uow)
 
     started_at = perf_counter()
     async with _client(authenticator, ingestion) as (client, _):
@@ -359,4 +468,27 @@ async def test_thin_http_boundary_completes_under_two_seconds_with_fakes() -> No
     elapsed = perf_counter() - started_at
 
     assert response.status_code == 202
+    assert response.json()["deliveryId"] == str(DELIVERY_ID)
+    assert uow.commit_started
+    assert uow.commit_completed
     assert elapsed < 2.0
+
+
+@pytest.mark.asyncio
+async def test_commit_failure_never_returns_an_accepted_response() -> None:
+    authenticator = RecordingAuthenticator()
+    uow = ObservableFakeUnitOfWork(fail_commit=True)
+    ingestion = _real_ingestion(uow)
+
+    async with _client(authenticator, ingestion) as (client, _):
+        response = await client.post(
+            f"/webhooks/v1/grafana/{SOURCE_ID}",
+            content=VALID_BODY,
+            headers=_headers("commit-failure"),
+        )
+
+    problem = _assert_problem(response, status=500, title="Internal server error")
+    assert uow.commit_started
+    assert not uow.commit_completed
+    assert problem["detail"] == "An unexpected error occurred."
+    assert "sensitive state" not in response.text
