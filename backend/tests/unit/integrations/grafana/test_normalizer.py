@@ -1,6 +1,9 @@
 import hashlib
 import json
+from dataclasses import replace
 from uuid import UUID
+
+import pytest
 
 from sre_agent.domain.alerts.models import AlertState
 from sre_agent.integrations.grafana.normalizer import normalize_alerts
@@ -73,3 +76,36 @@ def test_semantically_equal_bodies_have_distinct_delivery_hashes_and_dedup_keys(
     assert pretty.raw_sha256 == hashlib.sha256(pretty_raw).hexdigest()
     assert compact.raw_sha256 != pretty.raw_sha256
     assert compact.dedup_key != pretty.dedup_key
+
+
+def test_normalized_nested_values_are_immutable_and_do_not_alias_the_input():
+    alert = _alert(fingerprint="grafana-api", status="firing", service="api")
+    alert["values"] = {"A": {"samples": [95, 96]}}
+    _, webhook = _parse({"status": "firing", "alerts": [alert]})
+
+    event = normalize_alerts(SOURCE, webhook)[0]
+    original_nested = webhook.alerts[0].values["A"]
+    assert isinstance(original_nested, dict)
+    original_nested["samples"].append(97)
+
+    frozen_nested = event.values["A"]
+    assert frozen_nested == {"samples": (95, 96)}
+    assert isinstance(frozen_nested, dict) is False
+    with pytest.raises(TypeError):
+        frozen_nested["samples"] = (1,)  # type: ignore[index]
+
+
+def test_direct_canonical_event_construction_deep_freezes_nested_values():
+    _, webhook = _parse(
+        {
+            "status": "firing",
+            "alerts": [_alert(fingerprint="grafana-api", status="firing", service="api")],
+        }
+    )
+    event = normalize_alerts(SOURCE, webhook)[0]
+    supplied_values = {"A": {"samples": [95, 96]}}
+
+    directly_constructed = replace(event, values=supplied_values)
+    supplied_values["A"]["samples"].append(97)
+
+    assert directly_constructed.values == {"A": {"samples": (95, 96)}}

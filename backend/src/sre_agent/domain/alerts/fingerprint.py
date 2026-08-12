@@ -5,6 +5,7 @@ from datetime import datetime
 from uuid import UUID
 
 from sre_agent.domain.alerts.models import AlertState
+from sre_agent.domain.common import require_aware_utc
 
 
 def _canonical_sha256(value: object) -> str:
@@ -45,13 +46,15 @@ def make_dedup_key(
     ends_at: datetime,
     raw_sha256: str,
 ) -> str:
+    canonical_starts_at = require_aware_utc(starts_at)
+    canonical_ends_at = require_aware_utc(ends_at)
     return _canonical_sha256(
         {
             "source_id": str(source_id),
             "fingerprint": fingerprint,
             "status": status.value,
-            "starts_at": starts_at.isoformat(),
-            "ends_at": ends_at.isoformat(),
+            "starts_at": canonical_starts_at.isoformat(),
+            "ends_at": canonical_ends_at.isoformat(),
             "raw_sha256": raw_sha256,
         }
     )

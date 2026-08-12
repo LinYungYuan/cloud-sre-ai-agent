@@ -1,5 +1,7 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from uuid import UUID
+
+import pytest
 
 from sre_agent.domain.alerts.fingerprint import (
     make_alert_fingerprint,
@@ -69,3 +71,40 @@ def test_dedup_key_includes_the_alert_lifecycle_identity():
     assert firing == "798867dee00e08f232d34fadde317767e3dc7cd7f90d43af3ed8d3680f1ada76"
     assert resolved == "b6d2398b590ef60d585680c26b563e5d98141c97e5075b45a3491e9a685ed75c"
     assert resolved != firing
+
+
+def test_dedup_key_canonicalizes_equivalent_timestamp_offsets_to_utc():
+    utc = make_dedup_key(
+        SOURCE_ONE,
+        "grafana-fp",
+        AlertState.FIRING,
+        datetime(2026, 8, 12, 2, tzinfo=UTC),
+        datetime(2026, 8, 12, 3, tzinfo=UTC),
+        "a" * 64,
+    )
+    offset = make_dedup_key(
+        SOURCE_ONE,
+        "grafana-fp",
+        AlertState.FIRING,
+        datetime(2026, 8, 12, 10, tzinfo=timezone(timedelta(hours=8))),
+        datetime(2026, 8, 12, 11, tzinfo=timezone(timedelta(hours=8))),
+        "a" * 64,
+    )
+
+    assert offset == utc
+
+
+@pytest.mark.parametrize("naive_field", ["starts_at", "ends_at"])
+def test_dedup_key_rejects_naive_lifecycle_timestamps(naive_field: str):
+    values = {
+        "source_id": SOURCE_ONE,
+        "fingerprint": "grafana-fp",
+        "status": AlertState.FIRING,
+        "starts_at": datetime(2026, 8, 12, 2, tzinfo=UTC),
+        "ends_at": datetime(2026, 8, 12, 3, tzinfo=UTC),
+        "raw_sha256": "a" * 64,
+    }
+    values[naive_field] = datetime(2026, 8, 12, 2)  # noqa: DTZ001
+
+    with pytest.raises(ValueError, match="timestamp must be timezone-aware"):
+        make_dedup_key(**values)  # type: ignore[arg-type]
