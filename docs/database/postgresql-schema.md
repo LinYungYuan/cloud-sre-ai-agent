@@ -28,6 +28,7 @@ UV_CACHE_DIR=.uv-cache uv run alembic upgrade head
 - 識別碼以 `UUID` 表示，預設由 `gen_random_uuid()` 生成。
 - 所有事件與生命週期時間使用 UTC 的 `TIMESTAMPTZ`；不要以無時區 timestamp 解讀資料。
 - 半結構化欄位使用 `JSONB`。`webhook_deliveries.raw_payload` 與 `alert_events.raw_payload` 是已接受原始 payload 的永久保留紀錄，不應覆寫或刪除以取代處理後資料。
+- Alert event 即使驗證失敗仍會保留：`validation_status = 'VALIDATION_FAILED'`，並將結構化失敗原因寫入 `validation_errors` JSONB array；原始 payload 保持不變，以便稽核、重播與修正 parser 後重新處理。通過驗證的 event 使用預設值 `VALID` 與空 array。
 - 六張分割母表以 `(id, partition_timestamp)` 為複合主鍵。參照分割表的外鍵必須同時保存識別碼與 `partition_timestamp`，才能定位到正確資料分區。
 
 ## 關係總覽
@@ -180,12 +181,13 @@ CREATE TABLE classification_mappings (
 
 ### Incident 與 RCA
 
-`incidents` 是處理中的核心記錄，並以 `incident_alerts`、`incident_assignments` 與 `incident_status_history` 保存關聯 alert、指派與狀態變更。每個 `rca_runs` 可擁有專家執行、hypothesis 與版本化報告；evidence 的實際資料位於月分割表。
+`incidents` 是處理中的核心記錄，`identity_key` 保存 canonical incident identity 的 SHA-256；資料庫只允許每個 identity 同時有一筆 `OPEN` 或 `INVESTIGATING` Incident，讓併發 ingest 由 unique index 仲裁，`RESOLVED` 後則可依相同 identity 建立新 Incident。`incident_alerts`、`incident_assignments` 與 `incident_status_history` 保存關聯 alert、指派與狀態變更。每個 `rca_runs` 可擁有專家執行、hypothesis 與版本化報告；evidence 的實際資料位於月分割表。
 
 ```sql
 CREATE TABLE incidents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     incident_number BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
+    identity_key TEXT NOT NULL,
     title TEXT NOT NULL,
     severity TEXT NOT NULL CHECK (severity IN ('SEV1', 'SEV2', 'SEV3', 'SEV4')),
     status TEXT NOT NULL CHECK (status IN ('OPEN', 'INVESTIGATING', 'RESOLVED')),
@@ -293,7 +295,7 @@ CREATE TABLE rca_reports (
 
 ### 非同步工作與事件發布
 
-`outbox_events` 以 idempotency key 確保事件發布可重試；`worker_jobs` 與 `worker_attempts` 記錄 RCA 背景工作及每次執行嘗試。
+`outbox_events` 以 idempotency key 確保事件發布可重試；`worker_jobs` 與 `worker_attempts` 記錄 RCA 背景工作及每次執行嘗試。同一 RCA run 的同一 `job_type` 只能建立一筆 job，避免併發排程重複派送。
 
 ```sql
 CREATE TABLE outbox_events (
@@ -362,6 +364,9 @@ CREATE TABLE alert_events (
     delivery_partition_timestamp TIMESTAMPTZ NOT NULL,
     fingerprint TEXT NOT NULL,
     alert_state TEXT NOT NULL CHECK (alert_state IN ('FIRING', 'RESOLVED')),
+    validation_status TEXT NOT NULL DEFAULT 'VALID'
+        CHECK (validation_status IN ('VALID', 'VALIDATION_FAILED')),
+    validation_errors JSONB NOT NULL DEFAULT '[]'::jsonb,
     starts_at TIMESTAMPTZ,
     ends_at TIMESTAMPTZ,
     labels JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -436,12 +441,18 @@ CREATE TABLE audit_events (
 
 ## 約束與索引
 
-上方 DDL 的 `PRIMARY KEY`、`FOREIGN KEY`、`CHECK` 與 `UNIQUE` 是資料完整性的來源。以下是 migration 建立的 11 個具名 B-tree 索引。`uq_rca_runs_active_incident` 是 partial unique index：同一 Incident 在 `WAITING_FOR_CLASSIFICATION`、`QUEUED` 或 `RUNNING` 狀態僅能有一個活動 RCA run，能在併發建立時由資料庫維持此不變量。
+上方 DDL 的 `PRIMARY KEY`、`FOREIGN KEY`、`CHECK` 與 `UNIQUE` 是資料完整性的來源。以下是 migration 建立的 13 個具名 B-tree 索引。`uq_rca_runs_active_incident` 是 partial unique index：同一 Incident 在 `WAITING_FOR_CLASSIFICATION`、`QUEUED` 或 `RUNNING` 狀態僅能有一個活動 RCA run。`uq_incidents_active_identity` 同樣以 partial unique index 保證 canonical identity 在 `OPEN`、`INVESTIGATING` 之間合計只有一筆活動 Incident；`uq_worker_jobs_run_type` 則保證每個 `(rca_run_id, job_type)` 唯一。這些不變量都由資料庫在併發寫入時仲裁。
 
 ```sql
 CREATE UNIQUE INDEX uq_rca_runs_active_incident
     ON rca_runs (incident_id)
     WHERE status IN ('WAITING_FOR_CLASSIFICATION', 'QUEUED', 'RUNNING')
+
+CREATE UNIQUE INDEX uq_incidents_active_identity
+    ON incidents (identity_key)
+    WHERE status IN ('OPEN', 'INVESTIGATING')
+
+CREATE UNIQUE INDEX uq_worker_jobs_run_type ON worker_jobs (rca_run_id, job_type)
 
 CREATE INDEX ix_webhook_deliveries_source_received ON webhook_deliveries (source_id, received_at)
 CREATE INDEX ix_alert_events_source_fingerprint_observed ON alert_events (source_id, fingerprint, observed_at)

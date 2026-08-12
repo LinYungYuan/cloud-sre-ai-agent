@@ -114,6 +114,9 @@ DDL = (
         delivery_partition_timestamp TIMESTAMPTZ NOT NULL,
         fingerprint TEXT NOT NULL,
         alert_state TEXT NOT NULL CHECK (alert_state IN ('FIRING', 'RESOLVED')),
+        validation_status TEXT NOT NULL DEFAULT 'VALID'
+            CHECK (validation_status IN ('VALID', 'VALIDATION_FAILED')),
+        validation_errors JSONB NOT NULL DEFAULT '[]'::jsonb,
         starts_at TIMESTAMPTZ,
         ends_at TIMESTAMPTZ,
         labels JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -158,6 +161,7 @@ DDL = (
     """CREATE TABLE incidents (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         incident_number BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
+        identity_key TEXT NOT NULL,
         title TEXT NOT NULL,
         severity TEXT NOT NULL CHECK (severity IN ('SEV1', 'SEV2', 'SEV3', 'SEV4')),
         status TEXT NOT NULL CHECK (status IN ('OPEN', 'INVESTIGATING', 'RESOLVED')),
@@ -346,6 +350,10 @@ DDL = (
     """CREATE UNIQUE INDEX uq_rca_runs_active_incident
         ON rca_runs (incident_id)
         WHERE status IN ('WAITING_FOR_CLASSIFICATION', 'QUEUED', 'RUNNING')""",
+    """CREATE UNIQUE INDEX uq_incidents_active_identity
+        ON incidents (identity_key)
+        WHERE status IN ('OPEN', 'INVESTIGATING')""",
+    "CREATE UNIQUE INDEX uq_worker_jobs_run_type ON worker_jobs (rca_run_id, job_type)",
     "CREATE INDEX ix_webhook_deliveries_source_received ON webhook_deliveries (source_id, received_at)",
     "CREATE INDEX ix_alert_events_source_fingerprint_observed ON alert_events (source_id, fingerprint, observed_at)",
     "CREATE INDEX ix_alert_instances_state_last_seen ON alert_instances (state, last_seen_at)",

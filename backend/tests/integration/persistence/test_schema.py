@@ -172,6 +172,156 @@ async def test_delivery_token_identifier_uses_text_not_a_secret_or_uuid(connecti
 
 
 @pytest.mark.asyncio
+async def test_alert_event_validation_columns_are_constrained_and_inherited(connection):
+    columns = await connection.fetch(
+        """
+        SELECT column_name, data_type, is_nullable, column_default
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'alert_events'
+          AND column_name IN ('validation_status', 'validation_errors')
+        """
+    )
+    assert {
+        row["column_name"]: {
+            "data_type": row["data_type"],
+            "is_nullable": row["is_nullable"],
+            "column_default": row["column_default"],
+        }
+        for row in columns
+    } == {
+        "validation_status": {
+            "data_type": "text",
+            "is_nullable": "NO",
+            "column_default": "'VALID'::text",
+        },
+        "validation_errors": {
+            "data_type": "jsonb",
+            "is_nullable": "NO",
+            "column_default": "'[]'::jsonb",
+        },
+    }
+
+    constraint_definition = await connection.fetchval(
+        """
+        SELECT pg_get_constraintdef(con.oid)
+        FROM pg_constraint AS con
+        JOIN pg_class AS c ON c.oid = con.conrelid
+        JOIN pg_namespace AS n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relname = 'alert_events'
+          AND con.contype = 'c'
+          AND con.conkey = ARRAY[
+              (
+                  SELECT attnum
+                  FROM pg_attribute
+                  WHERE attrelid = c.oid AND attname = 'validation_status'
+              )
+          ]::smallint[]
+        """
+    )
+    assert constraint_definition == (
+        "CHECK ((validation_status = ANY "
+        "(ARRAY['VALID'::text, 'VALIDATION_FAILED'::text])))"
+    )
+
+    inherited_columns = await connection.fetch(
+        """
+        SELECT child.relname AS partition_name,
+               attribute.attname AS column_name,
+               format_type(attribute.atttypid, attribute.atttypmod) AS data_type,
+               attribute.attnotnull,
+               attribute.attinhcount
+        FROM pg_inherits
+        JOIN pg_class AS parent ON parent.oid = inhparent
+        JOIN pg_class AS child ON child.oid = inhrelid
+        JOIN pg_attribute AS attribute
+          ON attribute.attrelid = child.oid
+         AND attribute.attname IN ('validation_status', 'validation_errors')
+        WHERE parent.oid = 'public.alert_events'::regclass
+        ORDER BY child.relname, attribute.attname
+        """
+    )
+    assert inherited_columns
+    assert {
+        (row["column_name"], row["data_type"], row["attnotnull"])
+        for row in inherited_columns
+    } == {
+        ("validation_status", "text", True),
+        ("validation_errors", "jsonb", True),
+    }
+    assert all(row["attinhcount"] == 1 for row in inherited_columns)
+
+
+@pytest.mark.asyncio
+async def test_incident_and_worker_job_identity_indexes_are_exact(connection):
+    rows = await connection.fetch(
+        """
+        SELECT index_class.relname AS index_name,
+               table_class.relname AS table_name,
+               index_metadata.indisunique,
+               array_agg(attribute.attname ORDER BY index_key.ordinality) AS columns,
+               pg_get_expr(index_metadata.indpred, index_metadata.indrelid) AS predicate
+        FROM pg_index AS index_metadata
+        JOIN pg_class AS index_class ON index_class.oid = index_metadata.indexrelid
+        JOIN pg_class AS table_class ON table_class.oid = index_metadata.indrelid
+        JOIN pg_namespace AS namespace ON namespace.oid = table_class.relnamespace
+        CROSS JOIN LATERAL unnest(index_metadata.indkey)
+            WITH ORDINALITY AS index_key(attnum, ordinality)
+        JOIN pg_attribute AS attribute
+          ON attribute.attrelid = table_class.oid
+         AND attribute.attnum = index_key.attnum
+        WHERE namespace.nspname = 'public'
+          AND index_class.relname IN (
+              'uq_incidents_active_identity', 'uq_worker_jobs_run_type'
+          )
+        GROUP BY index_class.relname,
+                 table_class.relname,
+                 index_metadata.indisunique,
+                 index_metadata.indpred,
+                 index_metadata.indrelid
+        """
+    )
+    indexes = {
+        row["index_name"]: {
+            "table_name": row["table_name"],
+            "is_unique": row["indisunique"],
+            "columns": row["columns"],
+            "predicate": row["predicate"],
+        }
+        for row in rows
+    }
+    assert indexes == {
+        "uq_incidents_active_identity": {
+            "table_name": "incidents",
+            "is_unique": True,
+            "columns": ["identity_key"],
+            "predicate": (
+                "(status = ANY (ARRAY['OPEN'::text, 'INVESTIGATING'::text]))"
+            ),
+        },
+        "uq_worker_jobs_run_type": {
+            "table_name": "worker_jobs",
+            "is_unique": True,
+            "columns": ["rca_run_id", "job_type"],
+            "predicate": None,
+        },
+    }
+
+    identity_column = await connection.fetchrow(
+        """
+        SELECT data_type, is_nullable
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'incidents'
+          AND column_name = 'identity_key'
+        """
+    )
+    assert identity_column is not None
+    assert dict(identity_column) == {"data_type": "text", "is_nullable": "NO"}
+
+
+@pytest.mark.asyncio
 async def test_partitioned_tables_use_composite_logical_and_partition_key(connection):
     rows = await connection.fetch(
         """

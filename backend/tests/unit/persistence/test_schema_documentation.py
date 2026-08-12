@@ -14,7 +14,9 @@ PARTITION_EXAMPLES = {
     "webhook_deliveries_2031_12",
 }
 REQUIRED_INDEXES = {
+    "uq_incidents_active_identity",
     "uq_rca_runs_active_incident",
+    "uq_worker_jobs_run_type",
     "ix_webhook_deliveries_source_received",
     "ix_alert_events_source_fingerprint_observed",
     "ix_alert_instances_state_last_seen",
@@ -25,6 +27,13 @@ REQUIRED_INDEXES = {
     "ix_audit_events_resource_occurred",
     "ix_worker_jobs_status_available",
     "ix_outbox_events_status_available",
+}
+REQUIRED_COLUMNS = {
+    "alert_events": {
+        "validation_status TEXT NOT NULL DEFAULT 'VALID'",
+        "validation_errors JSONB NOT NULL DEFAULT '[]'::jsonb",
+    },
+    "incidents": {"identity_key TEXT NOT NULL"},
 }
 
 
@@ -113,3 +122,16 @@ def test_schema_reference_matches_delivery_token_identifier_type() -> None:
     assert "token_id TEXT" in migrated_delivery
     assert "token_id TEXT" in documented_delivery
     assert "token_id UUID" not in documented_delivery
+
+
+def test_schema_reference_documents_validation_and_identity_columns() -> None:
+    """Removing validation or identity columns from public DDL must be detected."""
+    table_definitions = _documented_table_definitions(
+        DOCUMENTATION_PATH.read_text(encoding="utf-8")
+    )
+
+    for table_name, required_columns in REQUIRED_COLUMNS.items():
+        assert all(
+            column in table_definitions.get(table_name, "")
+            for column in required_columns
+        )
