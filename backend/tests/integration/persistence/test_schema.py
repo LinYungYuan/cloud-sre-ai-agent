@@ -291,14 +291,42 @@ async def test_alert_event_validation_columns_are_constrained_and_inherited(conn
         """
     )
     assert inherited_columns
-    assert {
-        (row["column_name"], row["data_type"], row["attnotnull"])
-        for row in inherited_columns
-    } == {
-        ("validation_status", "text", True),
-        ("validation_errors", "jsonb", True),
+    current_month = datetime.now(UTC).date().replace(day=1)
+    next_month = (
+        date(current_month.year + 1, 1, 1)
+        if current_month.month == 12
+        else date(current_month.year, current_month.month + 1, 1)
+    )
+    current_partition = (
+        f"alert_events_{current_month.year:04d}_{current_month.month:02d}"
+    )
+    next_partition = f"alert_events_{next_month.year:04d}_{next_month.month:02d}"
+    inherited_by_partition = {
+        partition_name: {
+            row["column_name"]: {
+                "data_type": row["data_type"],
+                "not_null": row["attnotnull"],
+                "inheritance_count": row["attinhcount"],
+            }
+            for row in inherited_columns
+            if row["partition_name"] == partition_name
+        }
+        for partition_name in (current_partition, next_partition)
     }
-    assert all(row["attinhcount"] == 1 for row in inherited_columns)
+    expected_columns = {
+        "validation_errors": {
+            "data_type": "jsonb",
+            "not_null": True,
+            "inheritance_count": 1,
+        },
+        "validation_status": {
+            "data_type": "text",
+            "not_null": True,
+            "inheritance_count": 1,
+        },
+    }
+    assert inherited_by_partition[current_partition] == expected_columns
+    assert inherited_by_partition[next_partition] == expected_columns
 
 
 @pytest.mark.asyncio

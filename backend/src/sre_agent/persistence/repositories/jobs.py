@@ -77,7 +77,7 @@ class SqlAlchemyJobRepository:
                     rca_run_id, job_type, status, payload, available_at,
                     created_at, updated_at
                 ) VALUES (
-                    :run_id, 'RCA_RUN', 'QUEUED', CAST(:payload AS jsonb),
+                    :run_id, 'RCA_ANALYSIS', 'QUEUED', CAST(:payload AS jsonb),
                     :available_at, :available_at, :available_at
                 )
                 ON CONFLICT (rca_run_id, job_type) DO NOTHING

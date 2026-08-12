@@ -5,6 +5,7 @@ import os
 from collections import Counter
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Self
 from uuid import UUID, uuid4
 
@@ -48,6 +49,7 @@ DATABASE_URL = os.getenv(
     "MIGRATION_TEST_DATABASE_URL",
     "postgresql+asyncpg://postgres:postgres@127.0.0.1:55432/sre_agent",
 ).replace("postgresql://", "postgresql+asyncpg://", 1)
+REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 
 CROSS_CLOUD_REQUIRED_LABELS = (
     "alertname",
@@ -73,7 +75,6 @@ GCP_LABELS = {
     "team": "payments",
     "severity": "warning",
     "signal_type": "metric",
-    "project": "checkout",
 }
 
 AWS_LABELS = {
@@ -87,7 +88,6 @@ AWS_LABELS = {
     "team": "payments",
     "severity": "critical",
     "signal_type": "metric",
-    "project": "checkout",
 }
 
 DOWNSTREAM_TABLES = (
@@ -157,9 +157,17 @@ async def session_factory():
 def _classifier() -> AlertClassifier:
     records: dict[tuple[ScopeField, str], UUID] = {
         ("team", "payments"): TEAM_ID,
-        ("project", "checkout"): PROJECT_ID,
+        ("team", "platform"): TEAM_ID,
+        ("team", "commerce"): TEAM_ID,
+        ("project", "checkout-prod"): PROJECT_ID,
+        ("project", "svc-lx-afa-01-uat-1b9a87"): PROJECT_ID,
+        ("project", "123456789012"): PROJECT_ID,
         ("environment", "production"): ENVIRONMENT_ID,
+        ("environment", "uat"): ENVIRONMENT_ID,
+        ("environment", "prod"): ENVIRONMENT_ID,
         ("service", "api"): SERVICE_ID,
+        ("service", "aaaa"): SERVICE_ID,
+        ("service", "orders"): SERVICE_ID,
     }
     return AlertClassifier(SOURCE_ID, KnownScope(records), [])
 
@@ -382,6 +390,66 @@ async def test_new_gcp_firing_is_stored_atomically_with_validation_and_one_rca(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("fixture_name", "expected_provider", "label_severity", "incident_severity"),
+    [
+        ("grafana-firing.json", "gcp", "warning", "SEV3"),
+        ("grafana-firing-aws.json", "aws", "critical", "SEV1"),
+    ],
+)
+async def test_approved_cross_cloud_fixture_without_legacy_project_creates_queued_rca(
+    session_factory,
+    fixture_name: str,
+    expected_provider: str,
+    label_severity: str,
+    incident_severity: str,
+):
+    raw_body = (REPOSITORY_ROOT / "contracts" / "examples" / fixture_name).read_bytes()
+    raw_payload = json.loads(raw_body)
+    raw_alert = raw_payload["alerts"][0]
+    labels = raw_alert["labels"]
+
+    assert labels["cloud_provider"] == expected_provider
+    assert labels["severity"] == label_severity
+    assert "project" not in labels
+
+    result = await _use_case(session_factory).execute(
+        SOURCE_ID, TOKEN_ID, raw_body, RECEIVED_AT
+    )
+
+    assert len(result.incident_ids) == 1
+    delivery = (await _rows(session_factory, "SELECT * FROM webhook_deliveries"))[0]
+    assert delivery["status"] == "PROCESSED"
+    assert delivery["raw_payload"] == raw_payload
+    event = (await _rows(session_factory, "SELECT * FROM alert_events"))[0]
+    assert event["validation_status"] == "VALID"
+    assert event["raw_payload"] == raw_alert
+    incident = (await _rows(session_factory, "SELECT * FROM incidents"))[0]
+    assert incident["severity"] == incident_severity
+    run = (await _rows(session_factory, "SELECT * FROM rca_runs"))[0]
+    assert run["status"] == "QUEUED"
+    job = (await _rows(session_factory, "SELECT * FROM worker_jobs"))[0]
+    outbox = (await _rows(session_factory, "SELECT * FROM outbox_events"))[0]
+    expected_payload = {
+        "incident_id": str(incident["id"]),
+        "rca_run_id": str(run["id"]),
+    }
+    assert job["job_type"] == "RCA_ANALYSIS"
+    assert job["payload"] == expected_payload
+    assert outbox["event_type"] == "RCA_RUN_REQUESTED"
+    assert outbox["payload"] == expected_payload
+    await _assert_table_counts(
+        session_factory,
+        {"incidents": 1, "rca_runs": 1, "worker_jobs": 1, "outbox_events": 1},
+    )
+    if expected_provider == "gcp":
+        assert delivery["raw_payload"]["grafanaTopLevelExtension"] == "retain-me"
+        assert event["raw_payload"]["grafanaExtension"] == {
+            "runbookOwner": "payments"
+        }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("cloud_provider", "severity", "expected_severity"),
     [
         ("gcp", "critical", "SEV1"),
@@ -448,6 +516,50 @@ async def test_identical_redelivery_keeps_delivery_without_repeating_transitions
     )
     instance = (await _rows(session_factory, "SELECT * FROM alert_instances"))[0]
     assert instance["version"] == 1
+
+
+@pytest.mark.asyncio
+async def test_repeated_invalid_delivery_keeps_each_delivery_validation_failed(
+    session_factory,
+):
+    invalid = _alert("repeated-invalid")
+    invalid_labels = invalid["labels"]
+    assert isinstance(invalid_labels, dict)
+    invalid_labels.pop("resource_id")
+    raw_body = _body(invalid)
+
+    first = await _use_case(session_factory).execute(
+        SOURCE_ID, TOKEN_ID, raw_body, RECEIVED_AT
+    )
+    repeated = await _use_case(session_factory).execute(
+        SOURCE_ID,
+        TOKEN_ID,
+        raw_body,
+        RECEIVED_AT + timedelta(seconds=1),
+    )
+
+    assert first.delivery_id != repeated.delivery_id
+    assert first.incident_ids == repeated.incident_ids == ()
+    deliveries = await _rows(
+        session_factory, "SELECT status FROM webhook_deliveries ORDER BY received_at"
+    )
+    assert [row["status"] for row in deliveries] == [
+        "VALIDATION_FAILED",
+        "VALIDATION_FAILED",
+    ]
+    event = (await _rows(session_factory, "SELECT * FROM alert_events"))[0]
+    assert event["validation_status"] == "VALIDATION_FAILED"
+    assert event["validation_errors"] == [
+        {"field": "resource_id", "code": "required"}
+    ]
+    await _assert_table_counts(
+        session_factory,
+        {
+            "ingestion_dedup_keys": 1,
+            "alert_events": 1,
+            **{table_name: 0 for table_name in DOWNSTREAM_TABLES},
+        },
+    )
 
 
 @pytest.mark.asyncio
@@ -738,7 +850,10 @@ async def test_unknown_internal_scope_retains_unknown_scope_error_only(
     session_factory,
     field: str,
 ):
-    alert = _alert("unknown-scope", label_overrides={field: f"unknown-{field}"})
+    label_key = "cloud_scope_id" if field == "project" else field
+    alert = _alert(
+        "unknown-scope", label_overrides={label_key: f"unknown-{field}"}
+    )
 
     result = await _use_case(session_factory).execute(
         SOURCE_ID, TOKEN_ID, _body(alert), RECEIVED_AT

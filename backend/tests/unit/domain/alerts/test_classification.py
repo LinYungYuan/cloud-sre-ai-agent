@@ -14,6 +14,7 @@ SOURCE = UUID("00000000-0000-0000-0000-000000000001")
 OTHER_SOURCE = UUID("00000000-0000-0000-0000-000000000002")
 TEAM = UUID("10000000-0000-0000-0000-000000000001")
 PROJECT = UUID("20000000-0000-0000-0000-000000000001")
+OTHER_PROJECT = UUID("20000000-0000-0000-0000-000000000002")
 ENVIRONMENT = UUID("30000000-0000-0000-0000-000000000001")
 SERVICE = UUID("40000000-0000-0000-0000-000000000001")
 
@@ -71,6 +72,87 @@ def test_complete_known_labels_override_matching_mappings():
     assert result.scope == AlertScope(TEAM, PROJECT, ENVIRONMENT, SERVICE)
     assert result.matched_mapping_id is None
     assert result.missing_fields == ()
+
+
+def test_cloud_scope_id_is_the_canonical_project_label():
+    classifier = AlertClassifier(
+        SOURCE,
+        KnownRecords(
+            {
+                ("team", "payments"): TEAM,
+                ("project", "checkout-prod"): PROJECT,
+                ("environment", "production"): ENVIRONMENT,
+                ("service", "api"): SERVICE,
+            }
+        ),
+        [],
+    )
+
+    result = classifier.classify(
+        labels={
+            "team": "payments",
+            "cloud_scope_id": "checkout-prod",
+            "environment": "production",
+            "service": "api",
+        },
+        rule_uid=None,
+        folder=None,
+    )
+
+    assert result.status is ClassificationStatus.CLASSIFIED
+    assert result.scope == AlertScope(TEAM, PROJECT, ENVIRONMENT, SERVICE)
+    assert result.missing_fields == ()
+
+
+def test_cloud_scope_id_takes_precedence_over_a_legacy_project_label():
+    classifier = AlertClassifier(
+        SOURCE,
+        KnownRecords(
+            {
+                ("team", "payments"): TEAM,
+                ("project", "checkout-prod"): PROJECT,
+                ("project", "checkout"): OTHER_PROJECT,
+                ("environment", "production"): ENVIRONMENT,
+                ("service", "api"): SERVICE,
+            }
+        ),
+        [],
+    )
+
+    result = classifier.classify(
+        labels={
+            "team": "payments",
+            "cloud_scope_id": "checkout-prod",
+            "project": "checkout",
+            "environment": "production",
+            "service": "api",
+        },
+        rule_uid=None,
+        folder=None,
+    )
+
+    assert result.status is ClassificationStatus.CLASSIFIED
+    assert result.scope.project_id == PROJECT
+
+
+def test_unknown_cloud_scope_id_does_not_fallback_to_a_legacy_project_label():
+    classifier = AlertClassifier(SOURCE, _known_records(), [])
+
+    result = classifier.classify(
+        labels={
+            "team": "payments",
+            "cloud_scope_id": "unknown-project",
+            "project": "checkout",
+            "environment": "production",
+            "service": "api",
+        },
+        rule_uid=None,
+        folder=None,
+    )
+
+    assert result.status is ClassificationStatus.UNCLASSIFIED
+    assert result.scope == AlertScope(TEAM, None, ENVIRONMENT, SERVICE)
+    assert result.missing_fields == ("project",)
 
 
 def test_partial_known_labels_are_preserved_and_completed_by_the_winning_mapping():

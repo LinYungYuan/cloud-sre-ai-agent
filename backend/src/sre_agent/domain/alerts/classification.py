@@ -138,7 +138,11 @@ class AlertClassifier:
         labels: Mapping[str, str],
         scope_field: ScopeField,
     ) -> UUID | None:
-        label_value = labels.get(scope_field)
+        label_value = (
+            labels.get("cloud_scope_id")
+            if scope_field == "project" and "cloud_scope_id" in labels
+            else labels.get(scope_field)
+        )
         if label_value is None:
             return None
         return self._resolver.resolve(scope_field, label_value)
