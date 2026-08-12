@@ -315,8 +315,16 @@ def test_operator_boundary_is_rest_only():
 
 
 def test_dashboard_contract_covers_approved_operator_summary():
-    schemas = _operator_contract()["components"]["schemas"]
+    contract = _operator_contract()
+    schemas = contract["components"]["schemas"]
     dashboard = schemas["DashboardSummary"]
+    operation = contract["paths"]["/api/v1/dashboard/summary"]["get"]
+    parameters = {
+        _resolve_local_ref(contract, parameter)["name"]: _resolve_local_ref(
+            contract, parameter
+        )
+        for parameter in operation["parameters"]
+    }
 
     assert {
         "openIncidents",
@@ -341,6 +349,20 @@ def test_dashboard_contract_covers_approved_operator_summary():
         "partial",
         "failed",
     }
+    assert set(parameters) == {
+        "from",
+        "to",
+        "teamId",
+        "projectId",
+        "environmentId",
+    }
+    for scope_filter in ("teamId", "projectId", "environmentId"):
+        assert parameters[scope_filter]["in"] == "query"
+        assert parameters[scope_filter]["required"] is False
+        assert parameters[scope_filter]["schema"] == {
+            "type": "string",
+            "format": "uuid",
+        }
 
 
 def test_incident_list_contract_exposes_scope_filters_sorting_and_rca_status():

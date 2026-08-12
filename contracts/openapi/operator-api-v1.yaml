@@ -28,6 +28,24 @@ paths:
       parameters:
         - $ref: '#/components/parameters/From'
         - $ref: '#/components/parameters/To'
+        - name: teamId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: projectId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: environmentId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
       responses:
         <<: *commonErrorResponses
         '200':
