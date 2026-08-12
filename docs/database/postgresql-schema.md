@@ -28,7 +28,7 @@ UV_CACHE_DIR=.uv-cache uv run alembic upgrade head
 - 識別碼以 `UUID` 表示，預設由 `gen_random_uuid()` 生成。
 - 所有事件與生命週期時間使用 UTC 的 `TIMESTAMPTZ`；不要以無時區 timestamp 解讀資料。
 - 半結構化欄位使用 `JSONB`。`webhook_deliveries.raw_payload` 與 `alert_events.raw_payload` 是已接受原始 payload 的永久保留紀錄，不應覆寫或刪除以取代處理後資料。
-- Alert event 即使驗證失敗仍會保留：`validation_status = 'VALIDATION_FAILED'`，並將結構化失敗原因寫入 `validation_errors` JSONB array；原始 payload 保持不變，以便稽核、重播與修正 parser 後重新處理。通過驗證的 event 使用預設值 `VALID` 與空 array。
+- 任一 alert 驗證失敗時，已接受的 delivery 仍會保留並標記 `status = 'VALIDATION_FAILED'`；同一 webhook 內其他有效 alerts 仍可繼續處理。每筆已取得 dedup claim 的失敗 alert event 也會保留，使用 `validation_status = 'VALIDATION_FAILED'`，並將結構化失敗原因寫入 `validation_errors` JSONB array；原始 payload 保持不變，以便稽核、重播與修正 parser 後重新處理。通過驗證的 event 使用預設值 `VALID` 與空 array。
 - 六張分割母表以 `(id, partition_timestamp)` 為複合主鍵。參照分割表的外鍵必須同時保存識別碼與 `partition_timestamp`，才能定位到正確資料分區。
 
 ## 關係總覽
@@ -349,7 +349,7 @@ CREATE TABLE webhook_deliveries (
     token_id TEXT,
     body_hash TEXT NOT NULL,
     raw_payload JSONB NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('RECEIVED', 'PROCESSED', 'DUPLICATE', 'REJECTED', 'FAILED')),
+    status TEXT NOT NULL CHECK (status IN ('RECEIVED', 'PROCESSED', 'DUPLICATE', 'VALIDATION_FAILED', 'REJECTED', 'FAILED')),
     processed_at TIMESTAMPTZ,
     error_message TEXT,
     PRIMARY KEY (id, partition_timestamp)

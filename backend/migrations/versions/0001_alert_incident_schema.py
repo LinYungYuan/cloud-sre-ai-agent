@@ -89,7 +89,7 @@ DDL = (
         token_id TEXT,
         body_hash TEXT NOT NULL,
         raw_payload JSONB NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('RECEIVED', 'PROCESSED', 'DUPLICATE', 'REJECTED', 'FAILED')),
+        status TEXT NOT NULL CHECK (status IN ('RECEIVED', 'PROCESSED', 'DUPLICATE', 'VALIDATION_FAILED', 'REJECTED', 'FAILED')),
         processed_at TIMESTAMPTZ,
         error_message TEXT,
         PRIMARY KEY (id, partition_timestamp)

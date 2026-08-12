@@ -19,24 +19,27 @@ class IncidentScope:
     service_id: UUID | None
 
 
+@dataclass(frozen=True, slots=True)
+class IncidentSelection:
+    id: UUID
+    created: bool
+
+
 class IncidentRepository(Protocol):
-    async def lock_active_candidate(self, scope: IncidentScope) -> UUID | None: ...
-
-    async def latest_resolved_candidate(self, scope: IncidentScope) -> UUID | None: ...
-
-    async def create(
+    async def get_or_create_active(
         self,
         *,
+        identity_key: str,
         scope: IncidentScope,
         title: str,
         severity: str,
         opened_at: datetime,
         reopened_from_incident_id: UUID | None,
-    ) -> UUID: ...
+    ) -> IncidentSelection: ...
 
-    async def lock_for_alert(
-        self, source_id: UUID, fingerprint: str
-    ) -> UUID | None: ...
+    async def latest_resolved(self, identity_key: str) -> UUID | None: ...
+
+    async def lock_latest(self, identity_key: str) -> UUID | None: ...
 
     async def link_alert(
         self, incident_id: UUID, stored_event: StoredAlertEvent
@@ -51,79 +54,38 @@ class SqlAlchemyIncidentRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def lock_active_candidate(self, scope: IncidentScope) -> UUID | None:
-        return await self._session.scalar(
-            text(
-                """
-                SELECT id
-                FROM incidents
-                WHERE status IN ('OPEN', 'INVESTIGATING')
-                  AND team_id = :team_id
-                  AND project_id = :project_id
-                  AND environment_id = :environment_id
-                  AND service_id IS NOT DISTINCT FROM :service_id
-                ORDER BY opened_at DESC, id
-                LIMIT 1
-                FOR UPDATE
-                """
-            ),
-            {
-                "team_id": scope.team_id,
-                "project_id": scope.project_id,
-                "environment_id": scope.environment_id,
-                "service_id": scope.service_id,
-            },
-        )
-
-    async def latest_resolved_candidate(self, scope: IncidentScope) -> UUID | None:
-        return await self._session.scalar(
-            text(
-                """
-                SELECT id
-                FROM incidents
-                WHERE status = 'RESOLVED'
-                  AND team_id = :team_id
-                  AND project_id = :project_id
-                  AND environment_id = :environment_id
-                  AND service_id IS NOT DISTINCT FROM :service_id
-                ORDER BY resolved_at DESC NULLS LAST, opened_at DESC, id
-                LIMIT 1
-                """
-            ),
-            {
-                "team_id": scope.team_id,
-                "project_id": scope.project_id,
-                "environment_id": scope.environment_id,
-                "service_id": scope.service_id,
-            },
-        )
-
-    async def create(
+    async def get_or_create_active(
         self,
         *,
+        identity_key: str,
         scope: IncidentScope,
         title: str,
         severity: str,
         opened_at: datetime,
         reopened_from_incident_id: UUID | None,
-    ) -> UUID:
-        incident_id = uuid4()
-        await self._session.execute(
+    ) -> IncidentSelection:
+        proposed_id = uuid4()
+        created_id = await self._session.scalar(
             text(
                 """
                 INSERT INTO incidents (
-                    id, title, severity, status, alert_state, team_id, project_id,
-                    environment_id, service_id, opened_at, reopened_from_incident_id,
-                    created_at, updated_at
+                    id, identity_key, title, severity, status, alert_state,
+                    team_id, project_id, environment_id, service_id, opened_at,
+                    reopened_from_incident_id, created_at, updated_at
                 ) VALUES (
-                    :id, :title, :severity, 'OPEN', 'FIRING', :team_id, :project_id,
-                    :environment_id, :service_id, :opened_at, :reopened_from,
-                    :opened_at, :opened_at
+                    :id, :identity_key, :title, :severity, 'OPEN', 'FIRING',
+                    :team_id, :project_id, :environment_id, :service_id, :opened_at,
+                    :reopened_from, :opened_at, :opened_at
                 )
+                ON CONFLICT (identity_key)
+                    WHERE status IN ('OPEN', 'INVESTIGATING')
+                    DO NOTHING
+                RETURNING id
                 """
             ),
             {
-                "id": incident_id,
+                "id": proposed_id,
+                "identity_key": identity_key,
                 "title": title,
                 "severity": severity,
                 "team_id": scope.team_id,
@@ -134,26 +96,55 @@ class SqlAlchemyIncidentRepository:
                 "reopened_from": reopened_from_incident_id,
             },
         )
-        return incident_id
+        if created_id is not None:
+            return IncidentSelection(id=created_id, created=True)
 
-    async def lock_for_alert(self, source_id: UUID, fingerprint: str) -> UUID | None:
+        active_id = await self._session.scalar(
+            text(
+                """
+                SELECT id
+                FROM incidents
+                WHERE identity_key = :identity_key
+                  AND status IN ('OPEN', 'INVESTIGATING')
+                ORDER BY opened_at DESC, id
+                LIMIT 1
+                FOR UPDATE
+                """
+            ),
+            {"identity_key": identity_key},
+        )
+        if active_id is None:
+            raise RuntimeError("active Incident could not be selected")
+        return IncidentSelection(id=active_id, created=False)
+
+    async def latest_resolved(self, identity_key: str) -> UUID | None:
         return await self._session.scalar(
             text(
                 """
-                SELECT incident.id
-                FROM incidents AS incident
-                JOIN incident_alerts AS link ON link.incident_id = incident.id
-                JOIN alert_events AS event
-                  ON event.id = link.alert_event_id
-                 AND event.partition_timestamp = link.alert_event_partition_timestamp
-                WHERE event.source_id = :source_id
-                  AND event.fingerprint = :fingerprint
-                ORDER BY incident.opened_at DESC, incident.id
+                SELECT id
+                FROM incidents
+                WHERE identity_key = :identity_key
+                  AND status = 'RESOLVED'
+                ORDER BY resolved_at DESC NULLS LAST, opened_at DESC, id
                 LIMIT 1
-                FOR UPDATE OF incident
                 """
             ),
-            {"source_id": source_id, "fingerprint": fingerprint},
+            {"identity_key": identity_key},
+        )
+
+    async def lock_latest(self, identity_key: str) -> UUID | None:
+        return await self._session.scalar(
+            text(
+                """
+                SELECT id
+                FROM incidents
+                WHERE identity_key = :identity_key
+                ORDER BY opened_at DESC, id
+                LIMIT 1
+                FOR UPDATE
+                """
+            ),
+            {"identity_key": identity_key},
         )
 
     async def link_alert(

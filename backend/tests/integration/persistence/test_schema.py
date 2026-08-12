@@ -172,6 +172,54 @@ async def test_delivery_token_identifier_uses_text_not_a_secret_or_uuid(connecti
 
 
 @pytest.mark.asyncio
+async def test_webhook_delivery_status_accepts_validation_failure_and_is_inherited(
+    connection,
+):
+    constraint_definition = await connection.fetchval(
+        """
+        SELECT pg_get_constraintdef(con.oid)
+        FROM pg_constraint AS con
+        JOIN pg_class AS c ON c.oid = con.conrelid
+        JOIN pg_namespace AS n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relname = 'webhook_deliveries'
+          AND con.contype = 'c'
+          AND con.conkey = ARRAY[
+              (
+                  SELECT attnum
+                  FROM pg_attribute
+                  WHERE attrelid = c.oid AND attname = 'status'
+              )
+          ]::smallint[]
+        """
+    )
+    assert constraint_definition == (
+        "CHECK ((status = ANY (ARRAY['RECEIVED'::text, 'PROCESSED'::text, "
+        "'DUPLICATE'::text, 'VALIDATION_FAILED'::text, 'REJECTED'::text, "
+        "'FAILED'::text])))"
+    )
+
+    inherited_status_columns = await connection.fetch(
+        """
+        SELECT child.relname AS partition_name,
+               attribute.attnotnull,
+               attribute.attinhcount
+        FROM pg_inherits
+        JOIN pg_class AS parent ON parent.oid = inhparent
+        JOIN pg_class AS child ON child.oid = inhrelid
+        JOIN pg_attribute AS attribute
+          ON attribute.attrelid = child.oid
+         AND attribute.attname = 'status'
+        WHERE parent.oid = 'public.webhook_deliveries'::regclass
+        ORDER BY child.relname
+        """
+    )
+    assert inherited_status_columns
+    assert all(row["attnotnull"] for row in inherited_status_columns)
+    assert all(row["attinhcount"] == 1 for row in inherited_status_columns)
+
+
+@pytest.mark.asyncio
 async def test_alert_event_validation_columns_are_constrained_and_inherited(connection):
     columns = await connection.fetch(
         """

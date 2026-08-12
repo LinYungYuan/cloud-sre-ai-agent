@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sre_agent.domain.alerts.cross_cloud import AlertValidationError
 from sre_agent.integrations.grafana.normalizer import CanonicalAlertEvent
 
 
@@ -27,7 +28,7 @@ class StoredAlertEvent:
 
 
 class AlertRepository(Protocol):
-    async def lock_source_scope(self, source_id: UUID) -> SourceScope: ...
+    async def get_source_scope(self, source_id: UUID) -> SourceScope: ...
 
     async def create_delivery(
         self,
@@ -55,6 +56,8 @@ class AlertRepository(Protocol):
         received_at: datetime,
         event: CanonicalAlertEvent,
         raw_payload: object,
+        validation_status: str,
+        validation_errors: Sequence[AlertValidationError],
     ) -> StoredAlertEvent: ...
 
     async def upsert_instance(
@@ -91,7 +94,7 @@ class SqlAlchemyAlertRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def lock_source_scope(self, source_id: UUID) -> SourceScope:
+    async def get_source_scope(self, source_id: UUID) -> SourceScope:
         row = (
             (
                 await self._session.execute(
@@ -101,7 +104,6 @@ class SqlAlchemyAlertRepository:
                     FROM grafana_sources AS source
                     JOIN projects AS project ON project.id = source.project_id
                     WHERE source.id = :source_id AND source.enabled
-                    FOR UPDATE OF source
                     """
                     ),
                     {"source_id": source_id},
@@ -185,6 +187,8 @@ class SqlAlchemyAlertRepository:
         received_at: datetime,
         event: CanonicalAlertEvent,
         raw_payload: object,
+        validation_status: str,
+        validation_errors: Sequence[AlertValidationError],
     ) -> StoredAlertEvent:
         event_id = uuid4()
         await self._session.execute(
@@ -193,10 +197,12 @@ class SqlAlchemyAlertRepository:
                 INSERT INTO alert_events (
                     id, partition_timestamp, observed_at, source_id, delivery_id,
                     delivery_partition_timestamp, fingerprint, alert_state,
-                    starts_at, ends_at, labels, annotations, raw_payload
+                    validation_status, validation_errors, starts_at, ends_at,
+                    labels, annotations, raw_payload
                 ) VALUES (
                     :id, :received_at, :received_at, :source_id, :delivery_id,
-                    :received_at, :fingerprint, :alert_state, :starts_at, :ends_at,
+                    :received_at, :fingerprint, :alert_state, :validation_status,
+                    CAST(:validation_errors AS jsonb), :starts_at, :ends_at,
                     CAST(:labels AS jsonb), CAST(:annotations AS jsonb),
                     CAST(:raw_payload AS jsonb)
                 )
@@ -209,6 +215,13 @@ class SqlAlchemyAlertRepository:
                 "delivery_id": delivery_id,
                 "fingerprint": event.fingerprint,
                 "alert_state": event.status.value,
+                "validation_status": validation_status,
+                "validation_errors": _json(
+                    [
+                        {"field": error.field, "code": error.code}
+                        for error in validation_errors
+                    ]
+                ),
                 "starts_at": event.starts_at,
                 "ends_at": event.ends_at,
                 "labels": _json(dict(event.labels)),

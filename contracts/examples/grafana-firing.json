@@ -38,7 +38,10 @@
       "fingerprint": "gcp-gke-pod-restart-01",
       "silenceURL": "https://grafana.example.com/alerting/silence/new",
       "dashboardURL": "https://grafana.example.com/d/gke",
-      "panelURL": "https://grafana.example.com/d/gke?viewPanel=12"
+      "panelURL": "https://grafana.example.com/d/gke?viewPanel=12",
+      "grafanaExtension": {
+        "runbookOwner": "payments"
+      }
     }
   ],
   "groupLabels": {
@@ -55,5 +58,6 @@
   "groupKey": "{}:{alertname=\"GkePodRestart\",cloud_provider=\"gcp\",resource_id=\"projects/svc-lx-afa-01-uat-1b9a87/locations/asia-east1/clusters/cluster-a/namespaces/default/pods/aaaa-7b9f\"}",
   "truncatedAlerts": 0,
   "title": "GKE Pod restart",
-  "message": "GKE Pod aaaa 持續重新啟動"
+  "message": "GKE Pod aaaa 持續重新啟動",
+  "grafanaTopLevelExtension": "retain-me"
 }

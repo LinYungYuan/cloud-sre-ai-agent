@@ -124,6 +124,27 @@ def test_schema_reference_matches_delivery_token_identifier_type() -> None:
     assert "token_id UUID" not in documented_delivery
 
 
+def test_schema_reference_documents_delivery_validation_failure_status() -> None:
+    """Accepted invalid deliveries must remain representable in public DDL."""
+    migration = _load_migration()
+    documentation = DOCUMENTATION_PATH.read_text(encoding="utf-8")
+    documented_delivery = _documented_table_definitions(documentation)[
+        "webhook_deliveries"
+    ]
+    migrated_delivery = next(
+        statement
+        for statement in migration.DDL
+        if statement.startswith("CREATE TABLE webhook_deliveries")
+    )
+
+    expected_statuses = (
+        "'RECEIVED', 'PROCESSED', 'DUPLICATE', 'VALIDATION_FAILED', "
+        "'REJECTED', 'FAILED'"
+    )
+    assert expected_statuses in migrated_delivery
+    assert expected_statuses in documented_delivery
+
+
 def test_schema_reference_documents_validation_and_identity_columns() -> None:
     """Removing validation or identity columns from public DDL must be detected."""
     table_definitions = _documented_table_definitions(

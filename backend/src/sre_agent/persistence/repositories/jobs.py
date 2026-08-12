@@ -51,7 +51,7 @@ class SqlAlchemyJobRepository:
             },
         )
         if run_id is None:
-            run_id = await self._session.scalar(
+            existing_run_id = await self._session.scalar(
                 text(
                     """
                     SELECT id FROM rca_runs
@@ -62,8 +62,9 @@ class SqlAlchemyJobRepository:
                 ),
                 {"incident_id": incident_id},
             )
-        if run_id is None:
-            raise RuntimeError("active RCA run could not be created")
+            if existing_run_id is None:
+                raise RuntimeError("active RCA run could not be created")
+            return existing_run_id
 
         payload = json.dumps(
             {"incident_id": str(incident_id), "rca_run_id": str(run_id)},
@@ -79,6 +80,7 @@ class SqlAlchemyJobRepository:
                     :run_id, 'RCA_RUN', 'QUEUED', CAST(:payload AS jsonb),
                     :available_at, :available_at, :available_at
                 )
+                ON CONFLICT (rca_run_id, job_type) DO NOTHING
                 """
             ),
             {"run_id": run_id, "payload": payload, "available_at": available_at},

@@ -64,7 +64,7 @@ def test_cross_cloud_grafana_fixtures_use_the_standard_v1_envelope(
     contract = _contract()
     payload = json.loads((ROOT / "contracts" / "examples" / example_name).read_text())
 
-    assert set(payload) == {
+    assert {
         "receiver",
         "status",
         "orgId",
@@ -78,7 +78,7 @@ def test_cross_cloud_grafana_fixtures_use_the_standard_v1_envelope(
         "truncatedAlerts",
         "title",
         "message",
-    }
+    } <= set(payload)
     assert payload["version"] == "1"
     assert payload["alerts"][0]["labels"]["cloud_provider"] == expected_provider
     assert payload["groupLabels"]["resource_id"] in payload["groupKey"]
