@@ -5,12 +5,22 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 from jsonschema import Draft202012Validator
 from openapi_spec_validator import validate
 from referencing import Registry, Resource
 from referencing.jsonschema import DRAFT202012
+
+
+@Draft202012Validator.FORMAT_CHECKER.checks("uri", raises=ValueError)
+def _is_uri(value: object) -> bool:
+    """Require URI values even when jsonschema's optional URI extra is absent."""
+    if not isinstance(value, str):
+        return False
+    parsed = urlparse(value)
+    return bool(parsed.scheme and (parsed.netloc or parsed.path))
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -30,7 +40,11 @@ def _validate_example(
         contract_path.as_uri(), Resource.from_contents(contract, default_specification=DRAFT202012)
     )
     schema_reference = {"$ref": f"{contract_path.as_uri()}#/components/schemas/{schema_name}"}
-    Draft202012Validator(schema_reference, registry=resolver).validate(example)
+    Draft202012Validator(
+        schema_reference,
+        registry=resolver,
+        format_checker=Draft202012Validator.FORMAT_CHECKER,
+    ).validate(example)
 
 
 def validate_all(root: Path) -> None:

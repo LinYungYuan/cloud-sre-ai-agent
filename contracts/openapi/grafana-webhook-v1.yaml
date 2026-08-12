@@ -35,25 +35,25 @@ paths:
         '400':
           description: Malformed or invalid webhook payload.
           content:
-            application/json:
+            application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '401':
           description: Missing or invalid bearer token.
           content:
-            application/json:
+            application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '413':
           description: Request body exceeds the 1 MiB limit.
           content:
-            application/json:
+            application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
         '500':
           description: Internal server error.
           content:
-            application/json:
+            application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
 components:
@@ -139,9 +139,11 @@ components:
         startsAt:
           type: string
           format: date-time
+          description: Grafana-supplied RFC 3339 timestamp; offsets are accepted and normalized to UTC (`Z`) during ingestion.
         endsAt:
           type: string
           format: date-time
+          description: Grafana-supplied RFC 3339 timestamp; offsets are accepted and normalized to UTC (`Z`) during ingestion.
         values:
           type: object
           additionalProperties: true
@@ -168,6 +170,7 @@ components:
       required:
         - accepted
         - eventId
+        - acceptedAt
       properties:
         accepted:
           type: boolean
@@ -175,6 +178,11 @@ components:
         eventId:
           type: string
           format: uuid
+        acceptedAt:
+          type: string
+          format: date-time
+          pattern: 'Z$'
+          description: UTC acceptance timestamp emitted in RFC 3339 `Z` notation.
       additionalProperties: false
     Problem:
       type: object
