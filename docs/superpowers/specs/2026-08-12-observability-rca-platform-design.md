@@ -273,7 +273,7 @@ FIRING → RESOLVED
 Incident
 OPEN → INVESTIGATING → RESOLVED
   ▲                         │
-  └──────── REOPENED ───────┘
+  └──── reopen command ─────┘
 
 RCA Run
 WAITING_FOR_CLASSIFICATION → QUEUED → RUNNING → SUCCEEDED
@@ -282,7 +282,7 @@ WAITING_FOR_CLASSIFICATION → QUEUED → RUNNING → SUCCEEDED
                                            └─ CANCELLED
 ```
 
-`acknowledged_at`、`acknowledged_by` 與 `assigned_to` 是獨立欄位，不是 Incident status。Grafana 全部恢復時只更新 `alert_state = RESOLVED`；Incident 仍由負責人檢查後手動結案。已結案的相同 fingerprint 再次 firing 時建立新 Incident，並記錄前後 Incident 關聯。
+`acknowledged_at`、`acknowledged_by` 與 `assigned_to` 是獨立欄位，不是 Incident status。重新開啟是一個受稽核的 command/event，執行後 status 回到 `OPEN`，不是額外的 `REOPENED` status。Grafana 全部恢復時只更新 `alert_state = RESOLVED`；Incident 仍由負責人檢查後手動結案。已結案的相同 fingerprint 再次 firing 時建立新 Incident，並記錄前後 Incident 關聯。
 
 每個新 firing Incident 都會自動建立 RCA run。若 team/environment/service 尚未完成分類，run 先進入 `WAITING_FOR_CLASSIFICATION`，不得查詢 MCP；完成分類後由系統自動轉成 `QUEUED`。這個等待狀態不計入五分鐘 RCA 執行期限，期限從進入 `QUEUED` 開始計算。
 
