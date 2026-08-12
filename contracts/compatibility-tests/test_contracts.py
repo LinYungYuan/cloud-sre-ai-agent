@@ -11,6 +11,7 @@ from jsonschema.exceptions import ValidationError
 sys.path.insert(0, str(Path(__file__).parents[2]))
 
 validate_all = import_module("scripts.contract_check.check_contracts").validate_all
+validate_example = import_module("scripts.contract_check.check_contracts")._validate_example
 
 
 ROOT = Path(__file__).parents[2]
@@ -48,6 +49,44 @@ def _write_example(root: Path, name: str, payload: dict) -> None:
 
 def test_all_contracts_and_examples_are_valid():
     validate_all(ROOT)
+
+
+@pytest.mark.parametrize(
+    ("example_name", "expected_provider"),
+    [
+        ("grafana-firing.json", "gcp"),
+        ("grafana-firing-aws.json", "aws"),
+    ],
+)
+def test_cross_cloud_grafana_fixtures_use_the_standard_v1_envelope(
+    example_name: str, expected_provider: str
+):
+    contract = _contract()
+    payload = json.loads((ROOT / "contracts" / "examples" / example_name).read_text())
+
+    assert set(payload) == {
+        "receiver",
+        "status",
+        "orgId",
+        "alerts",
+        "groupLabels",
+        "commonLabels",
+        "commonAnnotations",
+        "externalURL",
+        "version",
+        "groupKey",
+        "truncatedAlerts",
+        "title",
+        "message",
+    }
+    assert payload["version"] == "1"
+    assert payload["alerts"][0]["labels"]["cloud_provider"] == expected_provider
+    validate_example(
+        payload,
+        "GrafanaWebhook",
+        contract,
+        CONTRACT_PATH,
+    )
 
 
 def test_grafana_webhook_contract_locks_platform_boundary():
