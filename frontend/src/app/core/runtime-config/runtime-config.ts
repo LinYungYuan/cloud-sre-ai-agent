@@ -8,6 +8,8 @@ export interface RuntimeConfig {
 
 export const RUNTIME_CONFIG = new InjectionToken<RuntimeConfig>('RUNTIME_CONFIG');
 
+const RUNTIME_CONFIG_KEYS = new Set<PropertyKey>(['apiBaseUrl', 'locale', 'timeZone']);
+
 export async function loadRuntimeConfig(fetchConfig: typeof fetch = fetch): Promise<RuntimeConfig> {
   const response = await fetchConfig('/config.json');
 
@@ -24,6 +26,13 @@ export function parseRuntimeConfig(value: unknown): RuntimeConfig {
   }
 
   const config = value as Record<string, unknown>;
+
+  for (const key of Reflect.ownKeys(config)) {
+    if (!RUNTIME_CONFIG_KEYS.has(key)) {
+      throw new Error(`Runtime configuration property "${String(key)}" is not supported.`);
+    }
+  }
+
   const apiBaseUrl = config['apiBaseUrl'];
 
   if (typeof apiBaseUrl !== 'string' || apiBaseUrl.trim().length === 0) {

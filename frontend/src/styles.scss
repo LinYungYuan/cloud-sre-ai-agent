@@ -1,1 +1,18 @@
-/* You can add global styles to this file, and also import other style files */
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+}
+
+.fatal-startup {
+  max-width: 40rem;
+  margin: 10vh auto;
+  padding: 1.5rem;
+}
+
+.fatal-startup h1 {
+  font-size: 1.5rem;
+}
+
+.fatal-startup p {
+  line-height: 1.6;
+}

@@ -44,6 +44,16 @@ describe('parseRuntimeConfig', () => {
       /Asia\/Taipei/,
     );
   });
+
+  it('rejects an unknown property', () => {
+    expect(() => parseRuntimeConfig({ ...validConfig, unexpected: true })).toThrowError(
+      /unexpected/,
+    );
+  });
+
+  it('rejects the unsupported sseUrl property', () => {
+    expect(() => parseRuntimeConfig({ ...validConfig, sseUrl: '/events' })).toThrowError(/sseUrl/);
+  });
 });
 
 describe('loadRuntimeConfig', () => {
