@@ -1,0 +1,200 @@
+openapi: 3.1.0
+info:
+  title: Grafana Webhook API
+  version: 1.0.0
+  description: Machine-ingestion contract for Grafana alert webhooks.
+paths:
+  /webhooks/v1/grafana/{sourceId}:
+    post:
+      operationId: ingestGrafanaWebhook
+      summary: Accept a Grafana alert webhook.
+      description: The JSON request body must not exceed 1 MiB.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: sourceId
+          in: path
+          required: true
+          description: UUID identifying the registered Grafana source.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GrafanaWebhook'
+      responses:
+        '202':
+          description: Webhook accepted for asynchronous processing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookAccepted'
+        '400':
+          description: Malformed or invalid webhook payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '413':
+          description: Request body exceeds the 1 MiB limit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    GrafanaWebhook:
+      type: object
+      required:
+        - status
+        - alerts
+      properties:
+        receiver:
+          type: string
+        status:
+          type: string
+          enum: [firing, resolved]
+        orgId:
+          type: integer
+        alerts:
+          type: array
+          items:
+            $ref: '#/components/schemas/GrafanaAlert'
+        groupLabels:
+          type: object
+          additionalProperties:
+            type: string
+        commonLabels:
+          type: object
+          additionalProperties:
+            type: string
+        commonAnnotations:
+          type: object
+          additionalProperties:
+            type: string
+        externalURL:
+          type: string
+          format: uri
+        version:
+          type: string
+        groupKey:
+          type: string
+        truncatedAlerts:
+          type: integer
+          minimum: 0
+        title:
+          type: string
+        state:
+          type: string
+        message:
+          type: string
+      additionalProperties: true
+    GrafanaAlert:
+      type: object
+      required:
+        - status
+        - labels
+        - annotations
+        - startsAt
+        - endsAt
+        - values
+        - generatorURL
+        - fingerprint
+        - silenceURL
+        - dashboardURL
+        - panelURL
+        - imageURL
+      properties:
+        status:
+          type: string
+          enum: [firing, resolved]
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        annotations:
+          type: object
+          additionalProperties:
+            type: string
+        startsAt:
+          type: string
+          format: date-time
+        endsAt:
+          type: string
+          format: date-time
+        values:
+          type: object
+          additionalProperties: true
+        generatorURL:
+          type: string
+          format: uri
+        fingerprint:
+          type: string
+        silenceURL:
+          type: string
+          format: uri
+        dashboardURL:
+          type: string
+          format: uri
+        panelURL:
+          type: string
+          format: uri
+        imageURL:
+          type: string
+          format: uri
+      additionalProperties: true
+    WebhookAccepted:
+      type: object
+      required:
+        - accepted
+        - eventId
+      properties:
+        accepted:
+          type: boolean
+          const: true
+        eventId:
+          type: string
+          format: uuid
+      additionalProperties: false
+    Problem:
+      type: object
+      required:
+        - type
+        - title
+        - status
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri-reference
+      additionalProperties: true
