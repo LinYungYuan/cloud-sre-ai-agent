@@ -15,7 +15,7 @@ cd backend
 UV_CACHE_DIR=.uv-cache uv run alembic upgrade head
 ```
 
-`docker-compose.yml` 的本機範例帳密是資料庫 `sre_agent`、使用者 `postgres`、密碼 `postgres`，並透過本機連接埠 `55432` 使用；它們不是正式環境憑證。若要在本機重建至 migration 前狀態，執行：
+`docker-compose.yml` 的本機範例帳密是資料庫 `sre_agent`、使用者 `postgres`、密碼 `postgres`，並透過本機連接埠 `55432` 使用；它們不是正式環境憑證。若要在本機重建至 migration 前狀態，執行下列指令。**警告：`alembic downgrade base` 會刪除本 schema 的資料表與其中所有資料，只能用於可丟棄的本機資料庫。**
 
 ```sh
 cd backend
@@ -40,17 +40,17 @@ flowchart LR
     Environment --> Source
     Source --> Delivery[webhook_deliveries]
     Delivery --> Event[alert_events] --> Instance[alert_instances]
-    Event --> Incident[incidents]
+    Event --> IncidentAlert[incident_alerts] --> Incident[incidents]
     Incident --> RCA[rca_runs] --> Specialist[specialist_runs] --> Evidence[evidence_records]
     RCA --> Report[rca_reports]
     Incident --> Message[incident_messages]
     Incident --> Timeline[incident_timeline_events]
     RCA --> Job[worker_jobs] --> Attempt[worker_attempts]
-    Incident --> Outbox[outbox_events]
+    Incident -. "邏輯工作流／通用 aggregate" .-> Outbox[outbox_events]
     Subject --> Audit[audit_events]
 ```
 
-Scope 的階層為 team、project、environment、service；`scope_grants` 授予 subject 單一層級的存取範圍。Grafana delivery 會產生 alert event，event 可連結 Incident；Incident 再承載指派、狀態歷程、RCA、訊息與時間線。RCA 的專家執行會產生 evidence、hypothesis 與報告；背景工作與 outbox 分別處理非同步工作與事件發布。
+Scope 的階層為 team、project、environment、service；`scope_grants` 授予 subject 單一層級的存取範圍。Grafana delivery 會產生 alert event，event 透過 `incident_alerts` 關聯到 Incident；Incident 再承載指派、狀態歷程、RCA、訊息與時間線。RCA 的專家執行會產生 evidence、hypothesis 與報告；背景工作與 outbox 分別處理非同步工作與事件發布。Incident 到 `outbox_events` 的虛線表示邏輯工作流：outbox 使用通用 `aggregate_type`／`aggregate_id`，並沒有指向 `incidents` 的外鍵。
 
 ## 非分割資料表
 
@@ -489,6 +489,7 @@ JOIN pg_class AS child ON child.oid = inhrelid
 JOIN pg_class AS parent ON parent.oid = inhparent
 JOIN pg_namespace AS n ON n.oid = parent.relnamespace
 WHERE n.nspname = 'public'
+  AND parent.relkind = 'p'
 ORDER BY parent.relname, child.relname;
 
 -- 檢視目前 public schema 的索引定義。

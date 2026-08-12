@@ -43,6 +43,16 @@ def _document_sql_blocks(documentation: str) -> str:
     return "\n".join(re.findall(r"```sql\n(.*?)```", documentation, re.DOTALL))
 
 
+def _documented_table_definitions(documentation: str) -> dict[str, str]:
+    definitions: dict[str, str] = {}
+    for sql_block in re.findall(r"```sql\n(.*?)```", documentation, re.DOTALL):
+        matches = list(re.finditer(r"^CREATE TABLE ([a-z_]+)", sql_block, re.MULTILINE))
+        for position, match in enumerate(matches):
+            end = matches[position + 1].start() if position + 1 < len(matches) else None
+            definitions[match.group(1)] = sql_block[match.start() : end]
+    return definitions
+
+
 def test_schema_reference_covers_every_migration_parent_table() -> None:
     """Removing a documented parent table must be detected before release."""
     assert DOCUMENTATION_PATH.is_file(), "schema reference document is missing"
@@ -74,13 +84,11 @@ def test_schema_reference_documents_partitions_and_required_indexes() -> None:
     migration = _load_migration()
     documentation = DOCUMENTATION_PATH.read_text(encoding="utf-8")
     sql_blocks = _document_sql_blocks(documentation)
+    table_definitions = _documented_table_definitions(documentation)
 
     for table_name in migration.PARTITIONED_TABLES:
-        assert re.search(
-            rf"CREATE TABLE {table_name} \(.*?\) PARTITION BY RANGE "
-            r"\(partition_timestamp\)",
-            sql_blocks,
-            re.DOTALL,
+        assert "PARTITION BY RANGE (partition_timestamp)" in table_definitions.get(
+            table_name, ""
         )
 
     documented_indexes = set(
