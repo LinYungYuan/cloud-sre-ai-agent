@@ -1,5 +1,7 @@
 # Release Hardening Implementation Plan
 
+> **三套件架構修訂：** 本計畫執行時以 `backend/`、`rca-worker/`、`frontend/` 三個獨立套件為準。Worker 程式、依賴、lock、tests、migration 與 Dockerfile 全部位於 `rca-worker/`，不得新增至 `backend/`；資料表 owner/grants 以 `contracts/database/table-ownership.yaml` 為準。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the independently deployable API, RCA worker, and Angular application observable, operable, secure by default, and measurable against the approved timing objectives.
@@ -11,7 +13,8 @@
 ## Global Constraints
 
 - Do not add Terraform, Kubernetes manifests, GKE/Cloud SQL/Pub/Sub provisioning, or an `infrastructure/` directory.
-- API and worker runtime database roles must not require DDL privileges.
+- Backend and Worker use distinct runtime roles and distinct migration roles; runtime roles must not require DDL privileges.
+- Backend and Worker use `alembic_version_backend` and `alembic_version_rca_worker` respectively, and migrations run in that order.
 - Tokens, authorization headers, cookies, secrets, and unredacted sensitive payloads never appear in logs.
 - API, worker, and Angular images build and run independently.
 - Webhook acceptance target is two seconds; Incident visibility target is five seconds; queued RCA terminal target is five minutes.
@@ -25,13 +28,18 @@
 - Create: `backend/src/sre_agent/observability/logging.py`
 - Create: `backend/src/sre_agent/observability/metrics.py`
 - Create: `backend/src/sre_agent/observability/tracing.py`
+- Create: `rca-worker/src/sre_rca_worker/observability/logging.py`
+- Create: `rca-worker/src/sre_rca_worker/observability/metrics.py`
+- Create: `rca-worker/src/sre_rca_worker/observability/tracing.py`
 - Create: `backend/src/sre_agent/policy/redaction.py`
 - Create: `backend/src/sre_agent/api/middleware/request_logging.py`
 - Create: `backend/tests/unit/policy/test_redaction.py`
 - Create: `backend/tests/integration/observability/test_request_trace.py`
+- Create: `rca-worker/tests/unit/policy/test_redaction.py`
+- Create: `rca-worker/tests/integration/observability/test_worker_trace.py`
 
 **Interfaces:**
-- Produces correlation/trace propagation from webhook/API through outbox, worker, specialist, MCP, and database result.
+- Produces contract-defined correlation/trace propagation from webhook/API through outbox to the independent Worker, specialist, MCP, and database result; neither package imports the other's telemetry code.
 
 - [ ] **Step 1: Write redaction tests**
 
@@ -47,11 +55,11 @@ Configure JSON logs, OpenTelemetry spans, and counters/histograms for webhook la
 
 - [ ] **Step 4: Verify and commit**
 
-Run: `cd backend && uv run pytest tests/unit/policy/test_redaction.py tests/integration/observability/test_request_trace.py -v`
+Run: `cd backend && uv run pytest tests/unit/policy/test_redaction.py tests/integration/observability/test_request_trace.py -v`, then `cd ../rca-worker && uv run pytest tests/unit/policy/test_redaction.py tests/integration/observability/test_worker_trace.py -v`
 Expected: PASS.
 
 ```bash
-git add backend/src/sre_agent/observability backend/src/sre_agent/policy/redaction.py backend/src/sre_agent/api/middleware/request_logging.py backend/tests
+git add backend/src/sre_agent/observability backend/src/sre_agent/policy/redaction.py backend/src/sre_agent/api/middleware/request_logging.py backend/tests rca-worker/src/sre_rca_worker/observability rca-worker/tests
 git commit -m "feat: add redacted end-to-end telemetry"
 ```
 
@@ -59,9 +67,9 @@ git commit -m "feat: add redacted end-to-end telemetry"
 
 **Files:**
 - Create: `backend/src/sre_agent/api/routers/health.py`
-- Create: `backend/src/sre_agent/workers/health.py`
+- Create: `rca-worker/src/sre_rca_worker/workers/health.py`
 - Create: `backend/tests/contract/api/test_health.py`
-- Create: `backend/tests/integration/workers/test_worker_readiness.py`
+- Create: `rca-worker/tests/integration/workers/test_worker_readiness.py`
 
 **Interfaces:**
 - Produces API `/health/live`, `/health/ready` and worker health command/module without exposing secrets.
@@ -72,7 +80,7 @@ Liveness succeeds when process loop is responsive. API readiness requires Postgr
 
 - [ ] **Step 2: Run failing tests**
 
-Run: `cd backend && uv run pytest tests/contract/api/test_health.py tests/integration/workers/test_worker_readiness.py -v`
+Run: `cd backend && uv run pytest tests/contract/api/test_health.py -v`, then `cd ../rca-worker && uv run pytest tests/integration/workers/test_worker_readiness.py -v`
 Expected: FAIL/404.
 
 - [ ] **Step 3: Implement bounded probes**
@@ -81,11 +89,11 @@ Each dependency check has a short timeout and returns only stable component/stat
 
 - [ ] **Step 4: Verify and commit**
 
-Run: `cd backend && uv run pytest tests/contract/api/test_health.py tests/integration/workers/test_worker_readiness.py -v`
+Run: `cd backend && uv run pytest tests/contract/api/test_health.py -v`, then `cd ../rca-worker && uv run pytest tests/integration/workers/test_worker_readiness.py -v`
 Expected: PASS.
 
 ```bash
-git add backend/src/sre_agent/api/routers/health.py backend/src/sre_agent/workers/health.py backend/tests
+git add backend/src/sre_agent/api/routers/health.py backend/tests/contract/api/test_health.py rca-worker/src/sre_rca_worker/workers/health.py rca-worker/tests/integration/workers/test_worker_readiness.py
 git commit -m "feat: add application health and readiness"
 ```
 
@@ -128,7 +136,8 @@ git commit -m "feat: add database maintenance and source bootstrap"
 
 **Files:**
 - Create: `backend/Dockerfile.api`
-- Create: `backend/Dockerfile.worker`
+- Create: `rca-worker/Dockerfile`
+- Create: `rca-worker/.dockerignore`
 - Create: `backend/.dockerignore`
 - Create: `frontend/Dockerfile`
 - Create: `frontend/.dockerignore`
@@ -145,7 +154,7 @@ The script builds three images, asserts API image command runs only FastAPI, wor
 
 - [ ] **Step 2: Implement backend multi-stage images**
 
-Use a non-root runtime user, locked `uv.lock`, no compiler/dev dependencies in runtime, read-only application source, and explicit API/worker commands. Do not run migrations automatically on every API/worker startup.
+Build separate Backend and RCA Worker images from their own package roots. Each uses a non-root runtime user, its own locked `uv.lock`, no compiler/dev dependencies in runtime, read-only application source, and an explicit package-local command. Neither image copies the other package's source. Do not run migrations automatically on every API/worker startup.
 
 - [ ] **Step 3: Implement Angular image**
 
@@ -157,7 +166,7 @@ Run: `./scripts/smoke/containers.sh`
 Expected: three builds and smoke checks PASS.
 
 ```bash
-git add backend/Dockerfile.api backend/Dockerfile.worker backend/.dockerignore frontend/Dockerfile frontend/.dockerignore frontend/docker scripts/smoke
+git add backend/Dockerfile.api backend/.dockerignore rca-worker/Dockerfile rca-worker/.dockerignore frontend/Dockerfile frontend/.dockerignore frontend/docker scripts/smoke
 git commit -m "build: add independent application containers"
 ```
 

@@ -40,7 +40,8 @@
 
 ```mermaid
 flowchart LR
-    G["Grafana webhook"] --> A["FastAPI ingestion"]
+    G["Grafana webhook"] --> A["Backend API：ingestion／Operator REST"]
+    U["Angular zh-TW"] -->|"手動重新整理 Operator REST"| A
     A --> N["Provider 判斷與版本化正規化"]
     N --> D["PostgreSQL 18：delivery、alert、Incident、RCA、outbox"]
     D --> O["Outbox publisher"]
@@ -48,7 +49,9 @@ flowchart LR
     P --> W["RCA Worker"]
     W --> M["允許清單內的 MCP"]
     W --> R["Evidence 與 RCA report"]
-    U["Angular zh-TW"] -->|"手動重新整理 REST"| D
+    C["contracts：OpenAPI／JSON Schema／ownership"] -. "格式驗證" .-> A
+    C -. "格式驗證" .-> W
+    C -. "產生 REST client" .-> U
 ```
 
 元件責任：
@@ -58,6 +61,42 @@ flowchart LR
 - Pub/Sub 只負責 at-least-once 工作傳遞，不作為狀態真相來源。
 - RCA Worker 以 PostgreSQL 狀態實現 idempotency、lease、attempt 與 durable settlement。
 - Angular 只透過 Operator REST API 讀取資料，不 import backend models。
+
+### 3.1 Monorepo 套件邊界
+
+Repository 固定包含三個可獨立發布的套件：
+
+```text
+frontend/      Angular SPA
+backend/       FastAPI、Grafana ingestion、Operator REST、transactional outbox
+rca-worker/    Pub/Sub consumer、ADK、MCP、RCA orchestration、evidence/report
+contracts/     三套件共同格式；不是第四個服務
+```
+
+- 三個套件各自擁有 dependency manifest、lock file、tests、Dockerfile、啟動命令、image、CI/build 與版本。
+- `rca-worker/` 不得 import `backend/src`；`backend/` 也不得 import `rca-worker/src`。
+- 可跨套件共享的只有 `contracts/` 內的 OpenAPI、JSON Schema、examples、database ownership manifest 與 compatibility tests。
+- Backend 與 RCA Worker 透過 Pub/Sub message contract、Cloud SQL table contract，以及 Operator 查詢所需的唯讀資料契約協作，不共享 Python domain/application/persistence objects。
+- `contracts/` 不含可執行 business logic，不建置成 container，也不部署。
+
+### 3.2 Cloud SQL ownership 與 roles
+
+兩個 Python 套件使用同一個 Cloud SQL PostgreSQL 18 database，但使用不同 runtime roles 與 migration roles：
+
+- Backend migration role 擁有 core tables 的 DDL。
+- RCA Worker migration role 擁有 RCA/worker tables 的 DDL。
+- Backend runtime role 對 core tables 依職責讀寫；可唯讀 RCA/report tables，並只為同一 ingestion transaction 對 `rca_runs`、`worker_jobs` 取得必要的最小 `INSERT/SELECT` 權限。
+- RCA Worker runtime role 可唯讀 Incident/Alert/source context；可讀寫 RCA/worker/evidence/report tables；若需建立 timeline/outbox audit event，只授予指定 core tables 的 `INSERT`，不得更新 Alert 或 Incident 核心欄位。
+- 兩個 runtime roles 都沒有 DDL、role management 或廣泛 `public` schema create 權限。
+
+`contracts/database/table-ownership.yaml` 是跨套件 ownership/grant contract。Compatibility tests 必須保證每張 table 只有一個 DDL owner，且 runtime grants 不超出 allowlist。
+
+Backend 與 RCA Worker 各自使用 Alembic，但使用不同 version tables：
+
+- `backend/migrations/` → `alembic_version_backend`
+- `rca-worker/migrations/` → `alembic_version_rca_worker`
+
+新環境必須先套用 Backend migrations，再套用 RCA Worker migrations。既有 `0001_alert_incident_schema` 是拆包前的 legacy baseline，已建立部分 RCA tables；後續 RCA table DDL 一律由 `rca-worker/migrations/` 演進，Backend 不再新增或修改 worker-owned columns/constraints。Worker migration 必須在執行前驗證所需 Backend schema revision，不得自行建立或修改 core tables。
 
 ## 4. Grafana webhook 契約
 
@@ -433,6 +472,8 @@ EvidenceReference 必須包含 evidence UUID 與 partition timestamp，才能精
 - normalization rules 保存版本與 audit metadata，歷史 event 不因 rule 更新而改寫。
 - 新增 evidence raw bytes、metadata/hash 與 evidence reference 所需欄位／約束。
 - 所有新 constraint、index、partition 與 downgrade 的資料損失風險同步寫入 PostgreSQL schema reference。
+
+RCA Worker 的 lease、attempt、specialist、evidence、hypothesis 與 report schema 變更不放入 Backend migration；它們由 `rca-worker/migrations/` 與 `alembic_version_rca_worker` 管理。Schema reference 以 table owner 分段，並列出 Backend → RCA Worker 的套用順序與 runtime grants。
 
 ## 17. HTTP 與操作錯誤
 

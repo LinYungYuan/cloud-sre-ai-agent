@@ -22,6 +22,8 @@
 - `resolved` never resolves the human Incident.
 - All ingestion artifacts are committed in one PostgreSQL transaction before `202`.
 - Backend and frontend remain independently buildable, testable, versioned, and deployable.
+- Repository deployment packages are `frontend/`, `backend/`, and future-in-this-sequence `rca-worker/`; none may import another package's source.
+- Backend uses `alembic_version_backend`; RCA Worker will use a separate migration stream and table owner.
 - Angular UI and errors use Traditional Chinese; raw technical strings remain unchanged.
 - No Chat, conversation jobs, SSE, WebSocket, `sre-chat-backend`, or production infrastructure provisioning.
 
@@ -36,6 +38,7 @@
 - `contracts/openapi/grafana-webhook-v1.yaml`: standard Grafana v1 body and unknown-field preservation.
 - `contracts/openapi/operator-api-v1.yaml`: nullable legacy scope plus provider/folder/issue/normalization fields.
 - `contracts/compatibility-tests/test_contracts.py`: executable compatibility and example checks.
+- `contracts/database/table-ownership.yaml`: DDL owner and minimum runtime grant contract.
 
 ### Backend
 
@@ -72,10 +75,12 @@
 - Modify: `contracts/openapi/grafana-webhook-v1.yaml`
 - Modify: `contracts/openapi/operator-api-v1.yaml`
 - Modify: `contracts/compatibility-tests/test_contracts.py`
+- Create: `contracts/database/table-ownership.yaml`
 
 **Interfaces:**
 - Produces: `Provider = GCP | AWS`, `CanonicalSeverity = SEV1 | SEV3 | UNMAPPED`, nullable `Scope`, `AlertIssue`, `NormalizationInfo`, and `EvidenceReference(evidenceId, partitionTimestamp, relation)` schemas.
 - Produces: examples used unchanged by backend contract tests and Angular fixtures.
+- Produces: a unique owner for every existing table and an explicit allowlist for Backend/Worker runtime access.
 
 - [ ] **Step 1: Write failing compatibility assertions**
 
@@ -93,6 +98,8 @@ def test_operator_alert_exposes_normalized_issue() -> None:
     assert {"provider", "folderCode", "alertName", "severityRaw",
             "severity", "issue", "normalizationWarnings"} <= set(schema["required"])
 ```
+
+Add an ownership test that rejects a missing/duplicate `ddlOwner`, unknown grants, or a Backend runtime grant that permits `UPDATE/DELETE` on worker-owned evidence/report tables.
 
 - [ ] **Step 2: Run the focused contract tests and confirm RED**
 
@@ -130,6 +137,8 @@ EvidenceReference:
 
 Remove the Incident message create/list operations from current release scope; do not add SSE paths.
 Allow arbitrary JSON values in raw `labels` so a present non-string `resource.label.project_id` reaches per-alert validation and returns `202`/`VALIDATION_FAILED` instead of becoming an envelope-level `400`. Operator `AlertDetail.labels` must likewise preserve these raw JSON values.
+
+Create `table-ownership.yaml` with Backend as the legacy DDL owner of the initial schema, then designate future ownership: Backend for source/delivery/alert/Incident/outbox/audit tables; RCA Worker for RCA run/specialist/evidence/hypothesis/report/job/attempt tables. Mark `incident_messages` as Backend-owned legacy-reserved and unused in this release. Runtime grants are separate from DDL ownership.
 
 - [ ] **Step 5: Validate examples and both OpenAPI documents**
 
@@ -345,7 +354,7 @@ git commit -m "feat: normalize Grafana alerts with safe versioned rules"
 - Modify: `docs/database/postgresql-schema.md`
 
 **Interfaces:**
-- Consumes: existing revision `0001_alert_incident_schema` without editing it.
+- Consumes: existing revision `0001_alert_incident_schema` without editing it; Backend Alembic uses `alembic_version_backend`.
 - Produces: `normalization_rules`, `folder_scope_mappings`, canonical alert columns, nullable legacy Incident scope, and identity v2 constraints/indexes.
 
 - [ ] **Step 1: Write schema catalog RED tests**
@@ -371,6 +380,8 @@ Expected: FAIL because v2 objects are absent.
 - [ ] **Step 3: Implement revision `0002`**
 
 Use `op.add_column`/`op.create_table` and named constraints. Add `truncated_alerts INTEGER NOT NULL DEFAULT 0 CHECK >= 0` and `incomplete BOOLEAN NOT NULL DEFAULT false` to `webhook_deliveries`. Add to `alert_events`: provider, folder_code, alert_name, severity_raw, severity_canonical, issue JSONB, resource JSONB, normalization status/rule/version/warnings. Add to `incidents`: identity_version, provider, folder_code, alert_name; make legacy scope FKs nullable; expand severity check to include `UNMAPPED`.
+
+This revision modifies only Backend-owned core tables. Do not add lease, attempt, specialist, evidence, hypothesis, report, or Worker-owned DDL; those belong to `rca-worker/migrations/` in the next plan.
 
 Create:
 

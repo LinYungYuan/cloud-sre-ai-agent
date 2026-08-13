@@ -10,7 +10,7 @@
 
 ## 1. 目標
 
-本系統是一套公司內部使用的 SRE AI Agent 平台。它接收 Grafana Alerting webhook，自動建立 Incident，透過 Metrics、Trace、Log specialist agents 收集證據，再由 RCA Agent 產生可追溯的根因分析。工程師可在同一個 Incident session 中查看進度、共享對話、指派處理人、重跑 RCA、結案及重新開啟。
+本系統是一套公司內部使用的 SRE AI Agent 平台。它接收 Grafana Alerting webhook，自動建立 Incident，透過 Metrics、Trace、Log specialist agents 收集證據，再由 RCA Agent 產生可追溯的根因分析。工程師可查看進度、指派處理人、重跑 RCA、結案及重新開啟；共享對話與聊天已移出本階段。
 
 系統的核心原則是：
 
@@ -81,7 +81,7 @@
 
 ## 4. 架構決策
 
-採用「模組化後端、獨立 worker、獨立 Angular SPA」方案。
+採用「三個獨立套件、共同 contracts」方案。
 
 ```text
 Grafana
@@ -104,7 +104,7 @@ Angular SPA
 Backend API
 ```
 
-Backend API 與 RCA Worker 使用相同 codebase，但以不同 process、container image 與 deployment 執行。AI 任務不得占用 API process。Cloud SQL 是 transactional source of truth；Pub/Sub 是 durable work delivery mechanism；transactional outbox 防止資料已提交但工作事件遺失。
+Backend API 與 RCA Worker 是同一 repository 內的兩個獨立 Python packages。兩者各自擁有 `pyproject.toml`、lock file、tests、Dockerfile、啟動命令、image 與發布流程，且不得互相 import source。AI 任務不得占用 API process。Cloud SQL 是 transactional source of truth；Pub/Sub 是 durable work delivery mechanism；transactional outbox 防止資料已提交但工作事件遺失。
 
 Angular 是獨立 project、image、version 與發布流程，只依賴已發布的 OpenAPI contract，不得 import backend source、SQLAlchemy models 或 ADK events。第一版不提供 browser realtime channel；使用者以頁面重新整理或明確的重新載入操作取得最新狀態。
 
@@ -120,36 +120,45 @@ sre-ai-agent-platform/
 │   │   │   └── schemas/
 │   │   ├── application/
 │   │   │   ├── alerts/
-│   │   │   ├── incidents/
-│   │   │   ├── rca/
-│   │   │   └── conversations/
+│   │   │   └── incidents/
 │   │   ├── domain/
 │   │   │   ├── alerts/
 │   │   │   ├── incidents/
-│   │   │   ├── rca/
-│   │   │   ├── evidence/
 │   │   │   └── identity/
-│   │   ├── agents/
-│   │   │   ├── router/
-│   │   │   ├── specialists/
-│   │   │   ├── rca/
-│   │   │   └── skills/
-│   │   │       └── definitions/
-│   │   │           ├── metrics-analysis/SKILL.md
-│   │   │           ├── trace-analysis/SKILL.md
-│   │   │           ├── log-analysis/SKILL.md
-│   │   │           └── rca-analysis/SKILL.md
 │   │   ├── integrations/
 │   │   │   ├── grafana/
-│   │   │   ├── mcp/
 │   │   │   ├── pubsub/
 │   │   │   └── identity/
 │   │   ├── persistence/
 │   │   │   ├── models/
 │   │   │   └── repositories/
-│   │   ├── workers/
 │   │   ├── policy/
 │   │   ├── observability/
+│   │   └── config/
+│   ├── migrations/
+│   ├── tests/
+│   │   ├── unit/
+│   │   ├── integration/
+│   │   └── contract/
+│   ├── pyproject.toml
+│   ├── uv.lock
+│   ├── alembic.ini
+│   └── Dockerfile
+├── rca-worker/
+│   ├── src/sre_rca_worker/
+│   │   ├── agents/
+│   │   │   ├── specialists/
+│   │   │   ├── rca/
+│   │   │   └── skills/definitions/
+│   │   ├── application/rca/
+│   │   ├── domain/
+│   │   │   ├── evidence/
+│   │   │   └── rca/
+│   │   ├── integrations/
+│   │   │   ├── mcp/
+│   │   │   └── pubsub/
+│   │   ├── persistence/
+│   │   ├── workers/
 │   │   └── config/
 │   ├── migrations/
 │   ├── tests/
@@ -160,8 +169,7 @@ sre-ai-agent-platform/
 │   ├── pyproject.toml
 │   ├── uv.lock
 │   ├── alembic.ini
-│   ├── Dockerfile.api
-│   └── Dockerfile.worker
+│   └── Dockerfile
 ├── frontend/
 │   ├── src/app/
 │   │   ├── core/
@@ -188,6 +196,11 @@ sre-ai-agent-platform/
 │   │   ├── grafana-webhook-v1.yaml
 │   │   └── operator-api-v1.yaml
 │   ├── examples/
+│   ├── schemas/
+│   │   ├── rca-job-message-v1.json
+│   │   └── rca-report-v1.json
+│   ├── database/
+│   │   └── table-ownership.yaml
 │   └── compatibility-tests/
 ├── docs/
 │   ├── architecture/
@@ -295,7 +308,7 @@ WAITING_FOR_CLASSIFICATION → QUEUED → RUNNING → SUCCEEDED
 - Log Agent：整理 exception、error pattern、stack trace、first/last seen、frequency 與 event sequence。
 - RCA Agent：建立 evidence timeline、competing hypotheses、supporting/contradicting/missing evidence、leading hypothesis、confidence 與 verification plan。
 
-Production incident 預設並行執行三個 specialists，再由 RCA Agent 綜合。後續共享對話可依問題交給 Router 選擇單一 specialist 或 RCA Agent。
+Production incident 預設並行執行三個 specialists，再由 RCA Agent 綜合。本階段不實作 Router、人工追問或共享對話。
 
 ### 8.2 時間預算
 
@@ -413,7 +426,9 @@ worker_attempts
 - 常用 scope、status、fingerprint 與時間欄位使用 B-tree indexes。
 - 只對確定需要搜尋的 JSONB path 建立 GIN indexes。
 - API 強制 cursor pagination 與時間範圍，禁止無限制全表掃描。
-- Runtime database role 不具 DDL 權限；migration role 與 runtime role 分離。
+- Backend 與 RCA Worker 使用不同 runtime database roles，兩者都不具 DDL 權限。
+- Backend 與 RCA Worker 也使用不同 migration roles 與 Alembic version tables；新環境依序執行 Backend migration，再執行 RCA Worker migration。
+- `contracts/database/table-ownership.yaml` 定義唯一 DDL owner 與最小 runtime grants；兩套 source code 不共享 persistence models。
 
 ## 10. API Contracts
 
@@ -582,7 +597,7 @@ Webhook/API
 - Unit：繁體中文狀態轉換、filter、sorting 與明確重新載入。
 - Component：loading、empty、partial、error、unauthorized。
 - Contract：generated client 與 operator OpenAPI 一致。
-- E2E：告警顯示、確認、指派、共享對話、RCA、結案與重新開啟。
+- E2E：告警顯示、確認、指派、RCA、結案與重新開啟；聊天與共享對話不在本階段。
 - Accessibility：鍵盤操作、焦點順序、非顏色狀態提示。
 
 ## 16. 驗收標準
@@ -595,7 +610,7 @@ Webhook/API
 6. 未授權 scope 無法透過 API 或 raw evidence endpoint 讀取。
 7. 每個 observed fact 能追溯至 specialist、MCP tool、endpoint、time window 與原始 evidence。
 8. Angular 所有系統文字及 AI 說明為繁體中文；原始技術證據不被翻譯或改寫。
-9. Backend API、RCA Worker 與 Angular 可獨立建置、測試、版本化及發布。
+9. `backend/`、`rca-worker/` 與 `frontend/` 是三個不可互相 import source 的獨立套件，且可獨立建置、測試、版本化及發布。
 10. Repository 不包含 infrastructure code。
 11. 未分類 Incident 會自動建立等待中的 RCA run，但在完成 scope 分類前不查詢任何 MCP；完成分類後自動開始執行。
 

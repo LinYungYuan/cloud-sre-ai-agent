@@ -2,7 +2,17 @@
 
 ## 適用範圍與權威來源
 
-本文件是目前 SRE Agent 告警接收、Incident、RCA 與稽核資料模型的**閱讀與審查參考**，適用於 PostgreSQL 18。唯一可執行、可演進的 schema 來源是 Alembic revision `0001_alert_incident_schema`；本文 SQL 不可直接當作 migration 執行，也不取代 `alembic upgrade` 或 `alembic downgrade`。修改 migration 的資料表、約束、索引或分割邏輯時，必須在同一變更同步更新本文件。
+本文件是目前 SRE Agent 告警接收、Incident、RCA 與稽核資料模型的**閱讀與審查參考**，適用於 PostgreSQL 18。現有可執行 baseline 是 Backend Alembic revision `0001_alert_incident_schema`；本文 SQL 不可直接當作 migration 執行，也不取代 `alembic upgrade` 或 `alembic downgrade`。修改 migration 的資料表、約束、索引或分割邏輯時，必須在同一變更同步更新本文件。
+
+核准的拆包目標是 Backend 與 RCA Worker 各自管理 migration：Backend 使用 `alembic_version_backend`，RCA Worker 使用 `alembic_version_rca_worker`，新環境依序套用 Backend、再套用 Worker。`0001_alert_incident_schema` 是拆包前的 legacy baseline，已建立 core 與部分 RCA tables；拆包實作會移轉 Alembic version-table metadata，而不重新執行 baseline DDL。後續 Backend 不得修改 Worker-owned schema，Worker migration 也不得修改 Alert／Incident core schema。
+
+目標 ownership 如下；實作完成後以 `contracts/database/table-ownership.yaml` 的 machine-readable contract 為準：
+
+- Backend DDL owner：scope/source、webhook delivery、alert、Incident、timeline、outbox、audit 與 Operator API 所需 core tables。
+- RCA Worker DDL owner：RCA run、specialist run、evidence、hypothesis、report、worker job 與 attempt tables。
+- `incident_messages` 是 Backend-owned legacy-reserved table，本期不提供聊天功能。
+- Backend runtime 可讀寫 core tables，並只取得原子排程所需的 Worker table 最小 `INSERT`／`SELECT` 權限；RCA Worker runtime 可唯讀 core context、讀寫 Worker-owned tables，且不得更新 Alert／Incident 核心欄位。
+- 兩個 runtime roles 均無 DDL；Backend 與 Worker migration roles 分開且各自只管理自己的 tables。
 
 ## 本機啟動與 migration
 
