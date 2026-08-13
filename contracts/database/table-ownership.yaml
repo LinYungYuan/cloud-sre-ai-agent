@@ -1,0 +1,38 @@
+version: 1
+description: >-
+  Migration source ownership for the shared Cloud SQL schema. Backend, RCA Worker,
+  and both Alembic streams authenticate with the same PostgreSQL application role.
+databaseAccess:
+  applicationRole: shared
+  migrationVersionTables:
+    backend: alembic_version
+    rca-worker: rca_worker_alembic_version
+tables:
+  - {name: teams, migrationOwner: backend}
+  - {name: projects, migrationOwner: backend}
+  - {name: environments, migrationOwner: backend}
+  - {name: services, migrationOwner: backend}
+  - {name: subjects, migrationOwner: backend}
+  - {name: scope_grants, migrationOwner: backend}
+  - {name: grafana_sources, migrationOwner: backend}
+  - {name: webhook_deliveries, migrationOwner: backend}
+  - {name: ingestion_dedup_keys, migrationOwner: backend}
+  - {name: alert_events, migrationOwner: backend}
+  - {name: alert_instances, migrationOwner: backend}
+  - {name: classification_mappings, migrationOwner: backend}
+  - {name: incidents, migrationOwner: backend}
+  - {name: incident_alerts, migrationOwner: backend}
+  - {name: incident_assignments, migrationOwner: backend}
+  - {name: incident_status_history, migrationOwner: backend}
+  - {name: rca_runs, migrationOwner: rca-worker, legacyMigrationOwner: backend}
+  - {name: specialist_runs, migrationOwner: rca-worker, legacyMigrationOwner: backend}
+  - {name: evidence_records, migrationOwner: rca-worker, legacyMigrationOwner: backend}
+  - {name: rca_hypotheses, migrationOwner: rca-worker, legacyMigrationOwner: backend}
+  - {name: hypothesis_evidence, migrationOwner: rca-worker, legacyMigrationOwner: backend}
+  - {name: rca_reports, migrationOwner: rca-worker, legacyMigrationOwner: backend}
+  - {name: incident_messages, migrationOwner: backend, status: legacy-reserved-unused}
+  - {name: incident_timeline_events, migrationOwner: backend}
+  - {name: audit_events, migrationOwner: backend}
+  - {name: outbox_events, migrationOwner: backend}
+  - {name: worker_jobs, migrationOwner: rca-worker, legacyMigrationOwner: backend}
+  - {name: worker_attempts, migrationOwner: rca-worker, legacyMigrationOwner: backend}

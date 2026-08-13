@@ -19,6 +19,7 @@ validate_example = import_module(
 ROOT = Path(__file__).parents[2]
 CONTRACT_PATH = ROOT / "contracts" / "openapi" / "grafana-webhook-v1.yaml"
 OPERATOR_CONTRACT_PATH = ROOT / "contracts" / "openapi" / "operator-api-v1.yaml"
+TABLE_OWNERSHIP_PATH = ROOT / "contracts" / "database" / "table-ownership.yaml"
 LOCAL_COMPOSE_PATH = ROOT / "docker-compose.yml"
 
 
@@ -69,16 +70,10 @@ def test_local_postgres_compose_restricts_passwordless_access_to_loopback():
     assert postgres["ports"] == ["127.0.0.1:55432:5432"]
 
 
-@pytest.mark.parametrize(
-    ("example_name", "expected_provider"),
-    [
-        ("grafana-firing.json", "gcp"),
-        ("grafana-firing-aws.json", "aws"),
-    ],
-)
+@pytest.mark.parametrize("example_name", ["grafana-firing.json", "grafana-firing-aws.json"])
 def test_cross_cloud_grafana_fixtures_use_the_standard_v1_envelope(
-    example_name: str, expected_provider: str
-):
+    example_name: str,
+) -> None:
     contract = _contract()
     payload = json.loads((ROOT / "contracts" / "examples" / example_name).read_text())
 
@@ -98,14 +93,40 @@ def test_cross_cloud_grafana_fixtures_use_the_standard_v1_envelope(
         "message",
     } <= set(payload)
     assert payload["version"] == "1"
-    assert payload["alerts"][0]["labels"]["cloud_provider"] == expected_provider
-    assert payload["groupLabels"]["resource_id"] in payload["groupKey"]
     validate_example(
         payload,
         "GrafanaWebhook",
         contract,
         CONTRACT_PATH,
     )
+
+
+def test_provider_examples_use_only_project_id_presence() -> None:
+    aws = json.loads(
+        (ROOT / "contracts" / "examples" / "grafana-firing-aws.json").read_text()
+    )
+    gcp = json.loads(
+        (ROOT / "contracts" / "examples" / "grafana-firing.json").read_text()
+    )
+
+    aws_labels = aws["alerts"][0]["labels"]
+    gcp_labels = gcp["alerts"][0]["labels"]
+    assert "resource.label.project_id" not in aws_labels
+    assert gcp_labels["resource.label.project_id"].strip()
+    for labels in (aws_labels, gcp_labels):
+        assert "cloud_provider" not in labels
+        assert "team" not in labels
+        assert "environment" not in labels
+        assert "service" not in labels
+        assert labels["folder"] == "COM-LX-BOA-01"
+        assert labels["alertname"] == "High CPU usage"
+        assert labels["severity"] == "ERROR"
+        assert labels["DBInstanceIdentifier"] == "production-rds-01"
+        assert labels["Series"] == "123456789012"
+        assert (
+            aws["alerts"][0]["annotations"]["AlertValues"]
+            == gcp["alerts"][0]["annotations"]["AlertValues"]
+        )
 
 
 def test_grafana_webhook_contract_locks_platform_boundary():
@@ -254,8 +275,6 @@ def test_operator_contract_declares_every_approved_operation():
         ("/api/v1/rca-runs/{id}/report", "get"),
         ("/api/v1/rca-runs/{id}/evidence", "get"),
         ("/api/v1/rca-runs/{id}/hypotheses", "get"),
-        ("/api/v1/incidents/{id}/messages", "get"),
-        ("/api/v1/incidents/{id}/messages", "post"),
     }
     actual_operations = {
         (path, method)
@@ -317,7 +336,6 @@ def test_operator_collection_schemas_are_cursor_pages_without_offsets():
         "/api/v1/incidents/{id}/rca-runs": "CursorPageRcaRuns",
         "/api/v1/rca-runs/{id}/evidence": "CursorPageEvidence",
         "/api/v1/rca-runs/{id}/hypotheses": "CursorPageHypotheses",
-        "/api/v1/incidents/{id}/messages": "CursorPageIncidentMessages",
     }
     for path, page_schema in expected_page_by_path.items():
         operation = contract["paths"][path]["get"]
@@ -405,7 +423,123 @@ def test_operator_errors_are_problem_json_and_timestamps_are_utc_z():
 
 def test_operator_boundary_is_rest_only():
     assert "/api/v1/events/stream" not in _operator_contract()["paths"]
+    assert "/api/v1/incidents/{id}/messages" not in _operator_contract()["paths"]
     assert not (ROOT / "contracts" / "events" / "incident-events-v1.json").exists()
+
+
+def test_operator_alert_exposes_normalized_issue_and_nullable_scope() -> None:
+    schemas = _operator_contract()["components"]["schemas"]
+    alert = schemas["AlertDetail"]
+
+    assert {
+        "provider",
+        "folderCode",
+        "alertName",
+        "severityRaw",
+        "severity",
+        "issue",
+        "normalizationWarnings",
+    } <= set(alert["required"])
+    assert schemas["Provider"]["enum"] == ["GCP", "AWS"]
+    assert schemas["CanonicalSeverity"]["enum"] == ["SEV1", "SEV3", "UNMAPPED"]
+    assert schemas["AlertIssue"]["required"] == [
+        "rawText",
+        "source",
+        "contentType",
+        "untrusted",
+    ]
+    assert schemas["AlertIssue"]["properties"]["source"] == {
+        "const": "grafana.annotations.AlertValues"
+    }
+    assert schemas["AlertIssue"]["properties"]["contentType"] == {
+        "const": "text/plain"
+    }
+    assert schemas["AlertIssue"]["properties"]["untrusted"] == {"const": True}
+    assert all(
+        property_schema["type"] == ["string", "null"]
+        for property_schema in schemas["Scope"]["properties"].values()
+    )
+    assert schemas["AlertDetail"]["properties"]["labels"] == {
+        "type": "object",
+        "additionalProperties": True,
+    }
+    assert schemas["EvidenceReference"]["required"] == [
+        "evidenceId",
+        "partitionTimestamp",
+        "relation",
+    ]
+
+
+def test_every_existing_table_has_one_migration_owner() -> None:
+    manifest = yaml.safe_load(TABLE_OWNERSHIP_PATH.read_text(encoding="utf-8"))
+    table_entries = manifest["tables"]
+    table_names = [entry["name"] for entry in table_entries]
+    expected_tables = {
+        "teams",
+        "projects",
+        "environments",
+        "services",
+        "subjects",
+        "scope_grants",
+        "grafana_sources",
+        "webhook_deliveries",
+        "ingestion_dedup_keys",
+        "alert_events",
+        "alert_instances",
+        "classification_mappings",
+        "incidents",
+        "incident_alerts",
+        "incident_assignments",
+        "incident_status_history",
+        "rca_runs",
+        "specialist_runs",
+        "evidence_records",
+        "rca_hypotheses",
+        "hypothesis_evidence",
+        "rca_reports",
+        "incident_messages",
+        "incident_timeline_events",
+        "audit_events",
+        "outbox_events",
+        "worker_jobs",
+        "worker_attempts",
+    }
+
+    assert len(table_names) == len(set(table_names))
+    assert set(table_names) == expected_tables
+    assert all(entry["migrationOwner"] in {"backend", "rca-worker"} for entry in table_entries)
+    assert manifest["databaseAccess"]["applicationRole"] == "shared"
+
+    by_name = {entry["name"]: entry for entry in table_entries}
+    worker_owned = {
+        "rca_runs",
+        "specialist_runs",
+        "evidence_records",
+        "rca_hypotheses",
+        "hypothesis_evidence",
+        "rca_reports",
+        "worker_jobs",
+        "worker_attempts",
+    }
+    assert all(by_name[name]["migrationOwner"] == "rca-worker" for name in worker_owned)
+    assert all(by_name[name]["legacyMigrationOwner"] == "backend" for name in worker_owned)
+    assert by_name["incident_messages"] == {
+        "name": "incident_messages",
+        "migrationOwner": "backend",
+        "status": "legacy-reserved-unused",
+    }
+
+    future_backend_migrations = [
+        path
+        for path in (ROOT / "backend" / "migrations" / "versions").glob("*.py")
+        if not path.name.startswith("0001_")
+    ]
+    for migration_path in future_backend_migrations:
+        migration = migration_path.read_text(encoding="utf-8")
+        assert not any(
+            f'"{table_name}"' in migration or f"'{table_name}'" in migration
+            for table_name in worker_owned
+        ), f"{migration_path.name} touches an RCA Worker-owned table"
 
 
 def test_dashboard_contract_covers_approved_operator_summary():

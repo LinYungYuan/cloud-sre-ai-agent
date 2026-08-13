@@ -17,10 +17,12 @@
       "evidence": [
         {
           "evidenceId": "985de543-ae04-4758-b9f9-14088354e3a0",
+          "partitionTimestamp": "2026-08-12T10:35:00Z",
           "relation": "SUPPORTS"
         },
         {
           "evidenceId": "117fd644-ab0f-4f32-9881-bb897fa4fe16",
+          "partitionTimestamp": "2026-08-12T10:36:00Z",
           "relation": "SUPPORTS"
         }
       ]

@@ -1,63 +1,46 @@
 {
-  "receiver": "sre-agent-webhook",
+  "receiver": "My Webhook",
   "status": "firing",
   "orgId": 1,
   "alerts": [
     {
       "status": "firing",
       "labels": {
-        "alertname": "GkePodRestart",
-        "cloud_provider": "gcp",
-        "cloud_scope_id": "svc-lx-afa-01-uat-1b9a87",
-        "resource_type": "gke_pod",
-        "resource_id": "projects/svc-lx-afa-01-uat-1b9a87/locations/asia-east1/clusters/cluster-a/namespaces/default/pods/aaaa-7b9f",
-        "environment": "uat",
-        "service": "aaaa",
-        "team": "platform",
-        "severity": "warning",
-        "signal_type": "metric",
-        "region": "asia-east1",
-        "cluster_name": "cluster-a",
-        "namespace": "default",
-        "pod_name": "aaaa-7b9f",
-        "projectid": "svc-lx-afa-01-uat-1b9a87"
+        "alertname": "High CPU usage",
+        "folder": "COM-LX-BOA-01",
+        "severity": "ERROR",
+        "DBInstanceIdentifier": "production-rds-01",
+        "Series": "123456789012",
+        "resource.label.project_id": "svc-lx-afa-01-uat-1b9a87"
       },
       "annotations": {
-        "summary": "GKE Pod aaaa 持續重新啟動",
-        "description": "Pod aaaa-7b9f 在最近 10 分鐘內重新啟動 5 次",
-        "info": "gke pod aaaa 服務重啟",
-        "possible_impact": "aaaa 服務可能短暫不可用",
-        "runbook_url": "https://runbook.example.com/gke/pod-restart"
+        "AlertValues": "Account: 123456789012\nDB Name: production-rds-01\nValue: 85.23%\n<br>"
       },
-      "startsAt": "2026-08-12T10:00:00Z",
+      "startsAt": "2026-08-13T14:30:00+08:00",
       "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "https://grafana.example.com/alerting/grafana/abc123/view",
+      "fingerprint": "c6eadffa33fcdf37",
+      "silenceURL": "https://grafana.example.com/alerting/silence/new?...",
+      "dashboardURL": "",
+      "panelURL": "",
       "values": {
-        "restart_count": 5
-      },
-      "generatorURL": "https://grafana.example.com/alerting/grafana/rules/gke-pod-restart",
-      "fingerprint": "gcp-gke-pod-restart-01",
-      "silenceURL": "https://grafana.example.com/alerting/silence/new",
-      "dashboardURL": "https://grafana.example.com/d/gke",
-      "panelURL": "https://grafana.example.com/d/gke?viewPanel=12",
-      "grafanaExtension": {
-        "runbookOwner": "payments"
+        "B": 85.23
       }
     }
   ],
   "groupLabels": {
-    "cloud_provider": "gcp",
-    "cloud_scope_id": "svc-lx-afa-01-uat-1b9a87",
-    "resource_type": "gke_pod",
-    "resource_id": "projects/svc-lx-afa-01-uat-1b9a87/locations/asia-east1/clusters/cluster-a/namespaces/default/pods/aaaa-7b9f",
-    "alertname": "GkePodRestart"
+    "alertname": "High CPU usage"
   },
-  "commonLabels": {},
+  "commonLabels": {
+    "folder": "COM-LX-BOA-01",
+    "severity": "ERROR"
+  },
   "commonAnnotations": {},
-  "externalURL": "https://grafana.example.com",
+  "externalURL": "https://grafana.example.com/",
   "version": "1",
-  "groupKey": "{}:{alertname=\"GkePodRestart\",cloud_provider=\"gcp\",resource_id=\"projects/svc-lx-afa-01-uat-1b9a87/locations/asia-east1/clusters/cluster-a/namespaces/default/pods/aaaa-7b9f\"}",
+  "groupKey": "{}:{alertname=\"High CPU usage\"}",
   "truncatedAlerts": 0,
-  "title": "GKE Pod restart",
-  "message": "GKE Pod aaaa 持續重新啟動",
-  "grafanaTopLevelExtension": "retain-me"
+  "title": "[FIRING:1] High CPU usage",
+  "state": "alerting",
+  "message": "**Firing**\n\nLabels:\n - alertname = High CPU usage\n - severity = ERROR\n..."
 }
