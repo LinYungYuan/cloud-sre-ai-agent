@@ -6,13 +6,13 @@
 
 核准的拆包目標是 Backend 與 RCA Worker 各自管理 migration：Backend 使用 `alembic_version_backend`，RCA Worker 使用 `alembic_version_rca_worker`，新環境依序套用 Backend、再套用 Worker。`0001_alert_incident_schema` 是拆包前的 legacy baseline，已建立 core 與部分 RCA tables；拆包實作會移轉 Alembic version-table metadata，而不重新執行 baseline DDL。後續 Backend 不得修改 Worker-owned schema，Worker migration 也不得修改 Alert／Incident core schema。
 
-目標 ownership 如下；實作完成後以 `contracts/database/table-ownership.yaml` 的 machine-readable contract 為準：
+Backend、RCA Worker 與兩套 Alembic migrations 共用同一個 application role；Angular 不連 PostgreSQL。共用 role 具備應用程式 DML 與 migrations 所需 DDL，但不具 superuser、role management、database owner 或本系統以外 schema 的權限。目標 ownership 如下；實作完成後以 `contracts/database/table-ownership.yaml` 的 machine-readable migration contract 為準：
 
 - Backend DDL owner：scope/source、webhook delivery、alert、Incident、timeline、outbox、audit 與 Operator API 所需 core tables。
 - RCA Worker DDL owner：RCA run、specialist run、evidence、hypothesis、report、worker job 與 attempt tables。
 - `incident_messages` 是 Backend-owned legacy-reserved table，本期不提供聊天功能。
-- Backend runtime 可讀寫 core tables，並只取得原子排程所需的 Worker table 最小 `INSERT`／`SELECT` 權限；RCA Worker runtime 可唯讀 core context、讀寫 Worker-owned tables，且不得更新 Alert／Incident 核心欄位。
-- 兩個 runtime roles 均無 DDL；Backend 與 Worker migration roles 分開且各自只管理自己的 tables。
+- Backend production code 只讀寫 core tables 及原子排程所需的 Worker tables；RCA Worker production code 只讀 core context 並寫入 Worker-owned tables 與明確允許的 audit records。
+- 資料庫不以不同 login role 強制套件隔離；Backend 與 Worker migration ownership 由分開的 migration 目錄、version tables、compatibility tests 與 code review 強制。
 
 ## 本機啟動與 migration
 

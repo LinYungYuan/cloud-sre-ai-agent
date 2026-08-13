@@ -30,7 +30,7 @@
 
 - Never add an `infrastructure/` directory, Terraform, or Kubernetes manifests.
 - `backend/`, `rca-worker/`, and `frontend/` have separate dependency manifests, locks, build/test commands, Dockerfiles, images, and releases.
-- Backend and Worker use separate runtime/migration database roles, separate Alembic version tables, and `contracts/database/table-ownership.yaml`.
+- Backend, Worker, and Alembic share one application role; Backend and Worker retain separate Alembic version tables and migration ownership in `contracts/database/table-ownership.yaml`.
 - Neither Python package imports the other package's source.
 - Contract changes must pass backward-compatibility checks before backend or frontend merge.
 - PostgreSQL migration tests run against PostgreSQL 18, not SQLite.
@@ -55,4 +55,4 @@
 - **Checkpoint 2:** Grafana webhook demo: accepted within two seconds, Incident queryable within five seconds.
 - **Checkpoint 3:** Fake-MCP RCA demo: completed or partial within five minutes.
 - **Checkpoint 4:** Operator API plus Angular E2E/accessibility review.
-- **Checkpoint 5:** Three-package isolation, database grants, security, containers, and SLO release review.
+- **Checkpoint 5:** Three-package isolation, shared-role boundaries, migration ownership, security, containers, and SLO release review.

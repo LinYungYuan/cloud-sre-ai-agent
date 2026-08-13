@@ -23,7 +23,7 @@
 - All ingestion artifacts are committed in one PostgreSQL transaction before `202`.
 - Backend and frontend remain independently buildable, testable, versioned, and deployable.
 - Repository deployment packages are `frontend/`, `backend/`, and future-in-this-sequence `rca-worker/`; none may import another package's source.
-- Backend uses `alembic_version_backend`; RCA Worker will use a separate migration stream and table owner.
+- Backend, future RCA Worker, and Alembic share one application role; their migration streams, version tables, and table ownership remain separate.
 - Angular UI and errors use Traditional Chinese; raw technical strings remain unchanged.
 - No Chat, conversation jobs, SSE, WebSocket, `sre-chat-backend`, or production infrastructure provisioning.
 
@@ -38,7 +38,7 @@
 - `contracts/openapi/grafana-webhook-v1.yaml`: standard Grafana v1 body and unknown-field preservation.
 - `contracts/openapi/operator-api-v1.yaml`: nullable legacy scope plus provider/folder/issue/normalization fields.
 - `contracts/compatibility-tests/test_contracts.py`: executable compatibility and example checks.
-- `contracts/database/table-ownership.yaml`: DDL owner and minimum runtime grant contract.
+- `contracts/database/table-ownership.yaml`: unique migration owner contract.
 
 ### Backend
 
@@ -80,7 +80,7 @@
 **Interfaces:**
 - Produces: `Provider = GCP | AWS`, `CanonicalSeverity = SEV1 | SEV3 | UNMAPPED`, nullable `Scope`, `AlertIssue`, `NormalizationInfo`, and `EvidenceReference(evidenceId, partitionTimestamp, relation)` schemas.
 - Produces: examples used unchanged by backend contract tests and Angular fixtures.
-- Produces: a unique owner for every existing table and an explicit allowlist for Backend/Worker runtime access.
+- Produces: a unique migration owner for every existing table while all database clients use one application role.
 
 - [ ] **Step 1: Write failing compatibility assertions**
 
@@ -99,7 +99,7 @@ def test_operator_alert_exposes_normalized_issue() -> None:
             "severity", "issue", "normalizationWarnings"} <= set(schema["required"])
 ```
 
-Add an ownership test that rejects a missing/duplicate `ddlOwner`, unknown grants, or a Backend runtime grant that permits `UPDATE/DELETE` on worker-owned evidence/report tables.
+Add an ownership test that rejects a missing/duplicate `migrationOwner` or a Backend migration touching worker-owned evidence/report tables. Do not model separate runtime grants because all database clients share one application role.
 
 - [ ] **Step 2: Run the focused contract tests and confirm RED**
 
@@ -138,7 +138,7 @@ EvidenceReference:
 Remove the Incident message create/list operations from current release scope; do not add SSE paths.
 Allow arbitrary JSON values in raw `labels` so a present non-string `resource.label.project_id` reaches per-alert validation and returns `202`/`VALIDATION_FAILED` instead of becoming an envelope-level `400`. Operator `AlertDetail.labels` must likewise preserve these raw JSON values.
 
-Create `table-ownership.yaml` with Backend as the legacy DDL owner of the initial schema, then designate future ownership: Backend for source/delivery/alert/Incident/outbox/audit tables; RCA Worker for RCA run/specialist/evidence/hypothesis/report/job/attempt tables. Mark `incident_messages` as Backend-owned legacy-reserved and unused in this release. Runtime grants are separate from DDL ownership.
+Create `table-ownership.yaml` with Backend as the legacy migration owner of the initial schema, then designate future ownership: Backend for source/delivery/alert/Incident/outbox/audit tables; RCA Worker for RCA run/specialist/evidence/hypothesis/report/job/attempt tables. Mark `incident_messages` as Backend-owned legacy-reserved and unused in this release. Record that both services and both Alembic streams authenticate with the same application role; this manifest constrains migration source ownership, not PostgreSQL login grants.
 
 - [ ] **Step 5: Validate examples and both OpenAPI documents**
 

@@ -426,9 +426,10 @@ worker_attempts
 - 常用 scope、status、fingerprint 與時間欄位使用 B-tree indexes。
 - 只對確定需要搜尋的 JSONB path 建立 GIN indexes。
 - API 強制 cursor pagination 與時間範圍，禁止無限制全表掃描。
-- Backend 與 RCA Worker 使用不同 runtime database roles，兩者都不具 DDL 權限。
-- Backend 與 RCA Worker 也使用不同 migration roles 與 Alembic version tables；新環境依序執行 Backend migration，再執行 RCA Worker migration。
-- `contracts/database/table-ownership.yaml` 定義唯一 DDL owner 與最小 runtime grants；兩套 source code 不共享 persistence models。
+- Backend、RCA Worker 與 Alembic migrations 共用同一個 application role；Angular 不連 PostgreSQL。
+- 共用 role 具備兩個服務的 DML 與 migrations 所需 DDL，但不具 superuser、role management、database owner 或其他 schema 權限。
+- Backend 與 RCA Worker 仍使用不同 Alembic version tables；新環境以同一 role 依序執行 Backend migration，再執行 RCA Worker migration。
+- `contracts/database/table-ownership.yaml` 定義唯一 migration owner；兩套 source code 不共享 persistence models，ownership 由 compatibility tests 強制。
 
 ## 10. API Contracts
 

@@ -13,7 +13,7 @@
 - This plan depends on `2026-08-13-grafana-normalization-operator-ui-plan.md` being complete.
 - `rca-worker/` has its own `pyproject.toml`, `uv.lock`, tests, Alembic config, Dockerfile, CLI, image, CI/build, and release version.
 - `rca-worker/` and `backend/` must not import each other's source; shared shapes live in `contracts/` and are independently validated by both packages.
-- Backend and RCA Worker use distinct runtime/migration database roles and distinct Alembic version tables.
+- Backend, RCA Worker, and both Alembic streams share one application role while retaining distinct Alembic version tables and migration ownership.
 - Pub/Sub message contains only schema version and work identifiers; never AlertValues, raw webhook, labels, evidence, prompt, token, or credential.
 - Local/CI broker is the official Google Pub/Sub Emulator, not a fake broker; unit tests may use fakes.
 - Production Pub/Sub uses Workload Identity/ADC and never a service-account key.
@@ -36,7 +36,7 @@
 
 - `docker-compose.yml`: local PostgreSQL plus official Pub/Sub Emulator only.
 - `contracts/schemas/rca-job-message-v1.json`: shared Pub/Sub message contract.
-- `contracts/database/table-ownership.yaml`: unique DDL owner and minimum runtime grants.
+- `contracts/database/table-ownership.yaml`: unique migration owner contract.
 - `backend/src/sre_agent/integrations/pubsub/`: Backend publisher adapter only.
 - `backend/src/sre_agent/workers/outbox_worker.py`: publish full RCA identifier message after commit.
 - `rca-worker/src/sre_rca_worker/integrations/pubsub/`: subscriber/bootstrap and worker-side message validator.
@@ -67,11 +67,11 @@
 **Interfaces:**
 - Produces: independent import root `sre_rca_worker` and project commands rooted at `rca-worker/`.
 - Produces: Alembic version table `alembic_version_rca_worker`; Backend remains `alembic_version_backend`.
-- Produces: machine-readable table DDL owner/runtime grant allowlist.
+- Produces: machine-readable table migration ownership contract for the shared application role.
 
 - [ ] **Step 1: Write boundary and ownership RED tests**
 
-Assert `rca-worker/pyproject.toml`, lock, Dockerfile, migrations and package are present; scan worker Python AST imports and reject any `sre_agent` import. Parse `table-ownership.yaml` and assert each catalog table has exactly one `ddlOwner`, runtime grants use allowlisted verbs, and `backendRuntime` cannot update Incident/Alert through worker grants. Assert the root `Makefile` exposes `test-rca-worker` and that `check` depends on it in addition to contracts, Backend, and Frontend gates.
+Assert `rca-worker/pyproject.toml`, lock, Dockerfile, migrations and package are present; scan worker Python AST imports and reject any `sre_agent` import. Parse `table-ownership.yaml` and assert each catalog table has exactly one `migrationOwner`, Backend migrations cannot modify Worker-owned tables, Worker migrations cannot modify core tables, and the manifest declares the shared application role. Assert the root `Makefile` exposes `test-rca-worker` and that `check` depends on it in addition to contracts, Backend, and Frontend gates.
 
 - [ ] **Step 2: Run and confirm RED**
 
@@ -85,9 +85,9 @@ Set project name `sre-rca-worker`, import root `sre_rca_worker`, Python `>=3.11`
 
 Add `make test-rca-worker` to run Worker pytest, Ruff, and Pyright from `rca-worker/`, and make the root `check` target invoke contracts, Backend, Worker, and Frontend without sharing virtual environments. Update README setup and verification commands to match the real targets.
 
-- [ ] **Step 4: Define table ownership and minimum grants**
+- [ ] **Step 4: Define migration ownership for the shared role**
 
-Declare Backend DDL ownership for source/delivery/alert/Incident/outbox/audit tables, and Worker DDL ownership for `rca_runs`, `specialist_runs`, `evidence_records`, `rca_hypotheses`, `hypothesis_evidence`, `rca_reports`, `worker_jobs`, and `worker_attempts`. Backend runtime receives only `INSERT/SELECT` on `rca_runs` and `worker_jobs` for atomic scheduling plus `SELECT` on RCA/report data for Operator reads. Worker runtime receives read-only Incident/Alert/source context, full DML on worker-owned tables, and only explicit `INSERT` on core timeline/outbox audit tables.
+Declare Backend migration ownership for source/delivery/alert/Incident/outbox/audit tables, and Worker migration ownership for `rca_runs`, `specialist_runs`, `evidence_records`, `rca_hypotheses`, `hypothesis_evidence`, `rca_reports`, `worker_jobs`, and `worker_attempts`. Declare one shared application role for Backend runtime, Worker runtime, Backend Alembic, and Worker Alembic. The manifest documents code-level access intent but does not pretend PostgreSQL can distinguish the two services when they use the same credential.
 
 - [ ] **Step 5: Verify package isolation and commit**
 

@@ -1,6 +1,6 @@
 # Release Hardening Implementation Plan
 
-> **三套件架構修訂：** 本計畫執行時以 `backend/`、`rca-worker/`、`frontend/` 三個獨立套件為準。Worker 程式、依賴、lock、tests、migration 與 Dockerfile 全部位於 `rca-worker/`，不得新增至 `backend/`；資料表 owner/grants 以 `contracts/database/table-ownership.yaml` 為準。
+> **三套件架構修訂：** 本計畫執行時以 `backend/`、`rca-worker/`、`frontend/` 三個獨立套件為準。Worker 程式、依賴、lock、tests、migration 與 Dockerfile 全部位於 `rca-worker/`，不得新增至 `backend/`；資料表 migration owner 以 `contracts/database/table-ownership.yaml` 為準，資料庫連線共用同一 application role。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -13,8 +13,8 @@
 ## Global Constraints
 
 - Do not add Terraform, Kubernetes manifests, GKE/Cloud SQL/Pub/Sub provisioning, or an `infrastructure/` directory.
-- Backend and Worker use distinct runtime roles and distinct migration roles; runtime roles must not require DDL privileges.
-- Backend and Worker use `alembic_version_backend` and `alembic_version_rca_worker` respectively, and migrations run in that order.
+- Backend, Worker, and both Alembic streams use one shared application role with application DML and migration DDL, but no superuser, role-management, database-owner, or unrelated-schema privileges.
+- Backend and Worker use `alembic_version_backend` and `alembic_version_rca_worker` respectively, and migrations run in that order with the same credential.
 - Tokens, authorization headers, cookies, secrets, and unredacted sensitive payloads never appear in logs.
 - API, worker, and Angular images build and run independently.
 - Webhook acceptance target is two seconds; Incident visibility target is five seconds; queued RCA terminal target is five minutes.
@@ -111,7 +111,7 @@ git commit -m "feat: add application health and readiness"
 
 - [ ] **Step 1: Write CLI/maintenance tests**
 
-Assert partition command creates current plus requested future monthly partitions idempotently, refuses negative/unbounded values, and uses migration/maintenance DB role. Assert source registration creates/updates source metadata and secret reference only, never accepts or stores the actual bearer token.
+Assert partition command creates current plus requested future monthly partitions idempotently, refuses negative/unbounded values, and uses the shared application role. Assert source registration creates/updates source metadata and secret reference only, never accepts or stores the actual bearer token.
 
 - [ ] **Step 2: Run failing tests**
 
@@ -201,7 +201,7 @@ Expected: all commands exit 0.
 
 - [ ] **Step 5: Document operator-owned dependencies and commit**
 
-README documents required environment variables, PostgreSQL 18 migration command, source bootstrap, partition maintenance, health endpoints, runtime roles, Pub/Sub topic/subscription contract, Secret Provider contract, MCP endpoints, and that resource provisioning is outside repository scope.
+README documents required environment variables, the shared PostgreSQL 18 application role, migration commands/order, source bootstrap, partition maintenance, health endpoints, Pub/Sub topic/subscription contract, Secret Provider contract, MCP endpoints, and that resource provisioning is outside repository scope.
 
 ```bash
 git add backend/tests/acceptance scripts/acceptance Makefile README.md

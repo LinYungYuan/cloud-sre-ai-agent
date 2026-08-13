@@ -79,24 +79,23 @@ contracts/     三套件共同格式；不是第四個服務
 - Backend 與 RCA Worker 透過 Pub/Sub message contract、Cloud SQL table contract，以及 Operator 查詢所需的唯讀資料契約協作，不共享 Python domain/application/persistence objects。
 - `contracts/` 不含可執行 business logic，不建置成 container，也不部署。
 
-### 3.2 Cloud SQL ownership 與 roles
+### 3.2 Cloud SQL ownership 與 role
 
-兩個 Python 套件使用同一個 Cloud SQL PostgreSQL 18 database，但使用不同 runtime roles 與 migration roles：
+Backend、RCA Worker 與兩套 Alembic migrations 共用同一個 Cloud SQL PostgreSQL 18 application role。Angular 不連線至 PostgreSQL，也不取得這組 credential。
 
-- Backend migration role 擁有 core tables 的 DDL。
-- RCA Worker migration role 擁有 RCA/worker tables 的 DDL。
-- Backend runtime role 對 core tables 依職責讀寫；可唯讀 RCA/report tables，並只為同一 ingestion transaction 對 `rca_runs`、`worker_jobs` 取得必要的最小 `INSERT/SELECT` 權限。
-- RCA Worker runtime role 可唯讀 Incident/Alert/source context；可讀寫 RCA/worker/evidence/report tables；若需建立 timeline/outbox audit event，只授予指定 core tables 的 `INSERT`，不得更新 Alert 或 Incident 核心欄位。
-- 兩個 runtime roles 都沒有 DDL、role management 或廣泛 `public` schema create 權限。
+- 共用 application role 具備 Backend 與 RCA Worker 正常執行所需的 DML，並具備兩套 Alembic migrations 所需的 DDL。
+- 共用 role 不具 role management、database owner、superuser 或非本系統 schema 的權限。
+- 因為資料庫無法用不同 login role 強制隔離兩個 Python 套件，禁止修改 Alert／Incident core schema 等邊界改由 migration ownership contract、source boundary tests 與 code review 強制執行。
+- Backend production code 只操作 core tables 與原子排程所需的 `rca_runs`／`worker_jobs`；RCA Worker production code 只讀 core context，並寫入 RCA/worker/evidence/report 及明確允許的 timeline/outbox audit records。
 
-`contracts/database/table-ownership.yaml` 是跨套件 ownership/grant contract。Compatibility tests 必須保證每張 table 只有一個 DDL owner，且 runtime grants 不超出 allowlist。
+`contracts/database/table-ownership.yaml` 是跨套件 migration ownership contract，不是多角色 grant manifest。Compatibility tests 必須保證每張 table 只有一個 migration owner，且 Backend migration 不修改 Worker-owned tables、Worker migration 不修改 core tables。
 
 Backend 與 RCA Worker 各自使用 Alembic，但使用不同 version tables：
 
 - `backend/migrations/` → `alembic_version_backend`
 - `rca-worker/migrations/` → `alembic_version_rca_worker`
 
-新環境必須先套用 Backend migrations，再套用 RCA Worker migrations。既有 `0001_alert_incident_schema` 是拆包前的 legacy baseline，已建立部分 RCA tables；後續 RCA table DDL 一律由 `rca-worker/migrations/` 演進，Backend 不再新增或修改 worker-owned columns/constraints。Worker migration 必須在執行前驗證所需 Backend schema revision，不得自行建立或修改 core tables。
+兩套 Alembic commands 使用相同 application-role credential。新環境必須先套用 Backend migrations，再套用 RCA Worker migrations。既有 `0001_alert_incident_schema` 是拆包前的 legacy baseline，已建立部分 RCA tables；後續 RCA table DDL 一律由 `rca-worker/migrations/` 演進，Backend 不再新增或修改 worker-owned columns/constraints。Worker migration 必須在執行前驗證所需 Backend schema revision，不得自行建立或修改 core tables。
 
 ## 4. Grafana webhook 契約
 
@@ -473,7 +472,7 @@ EvidenceReference 必須包含 evidence UUID 與 partition timestamp，才能精
 - 新增 evidence raw bytes、metadata/hash 與 evidence reference 所需欄位／約束。
 - 所有新 constraint、index、partition 與 downgrade 的資料損失風險同步寫入 PostgreSQL schema reference。
 
-RCA Worker 的 lease、attempt、specialist、evidence、hypothesis 與 report schema 變更不放入 Backend migration；它們由 `rca-worker/migrations/` 與 `alembic_version_rca_worker` 管理。Schema reference 以 table owner 分段，並列出 Backend → RCA Worker 的套用順序與 runtime grants。
+RCA Worker 的 lease、attempt、specialist、evidence、hypothesis 與 report schema 變更不放入 Backend migration；它們由 `rca-worker/migrations/` 與 `alembic_version_rca_worker` 管理。Schema reference 以 table owner 分段，並列出 Backend → RCA Worker 的套用順序與共用 application role。
 
 ## 17. HTTP 與操作錯誤
 

@@ -111,14 +111,16 @@ Grafana bearer-token JSON format, rotation guidance, and the independently
 runnable partition-maintenance command. Invalid backend configuration fails
 startup instead of turning valid webhook requests into generic 500 responses.
 
-Backend and RCA Worker use the same Cloud SQL PostgreSQL 18 instance but separate
-runtime roles, migration roles, and Alembic version tables. New environments run
-Backend migrations (`alembic_version_backend`) before RCA Worker migrations
-(`alembic_version_rca_worker`). The legacy `0001_alert_incident_schema` revision
+Backend, RCA Worker, and both Alembic migration streams use one shared Cloud SQL
+PostgreSQL 18 application role. Angular never connects to PostgreSQL. The role
+has application DML and migration DDL, but no superuser, role-management,
+database-owner, or unrelated-schema privileges. New environments use that role
+to run Backend migrations (`alembic_version_backend`) before RCA Worker
+migrations (`alembic_version_rca_worker`). The legacy `0001_alert_incident_schema` revision
 predates the package split; the implementation plan migrates its version-table
-metadata without rerunning its DDL. Future table ownership and minimum grants are
-defined by `contracts/database/table-ownership.yaml` once that planned contract
-is added.
+metadata without rerunning its DDL. Future migration ownership is defined by
+`contracts/database/table-ownership.yaml` once that planned contract is added;
+it is enforced by compatibility tests rather than separate database login roles.
 
 Before Angular starts, the frontend loads `/config.json`. Deployments must serve
 all of these fields:
