@@ -1,6 +1,6 @@
 # Grafana 告警正規化與 RCA Worker 設計規格
 
-**狀態：** 已核准，待書面審閱
+**狀態：** 已核准
 
 **日期：** 2026-08-13
 
@@ -515,7 +515,7 @@ EvidenceReference 必須包含 evidence UUID 與 partition timestamp，才能精
 
 本設計跨越兩個有順序依賴的子專案，實作時使用兩份計畫：
 
-1. **Grafana normalization 與 schema migration**：契約、provider、rules、identity v2、nullable legacy scope、transactional ingestion、Angular 顯示欄位。
-2. **Pub/Sub Emulator 與 RCA Worker**：官方 Emulator、訊息契約、worker lifecycle、ADK/MCP、evidence 與 report。
+1. [`2026-08-13-grafana-normalization-operator-ui-plan.md`](../plans/2026-08-13-grafana-normalization-operator-ui-plan.md)：契約、provider、rules、identity v2、nullable legacy scope、transactional ingestion、Operator REST 與獨立 Angular 顯示。
+2. [`2026-08-13-pubsub-emulator-rca-worker-plan.md`](../plans/2026-08-13-pubsub-emulator-rca-worker-plan.md)：官方 Emulator、訊息契約、worker lifecycle、ADK/MCP、evidence 與 report。
 
 第二階段依賴第一階段的 canonical alert、Incident identity v2 與資料庫欄位完成。兩階段都不得加入 production infrastructure provisioning。

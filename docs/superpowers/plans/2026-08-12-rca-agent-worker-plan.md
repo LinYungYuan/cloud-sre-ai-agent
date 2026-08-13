@@ -1,5 +1,7 @@
 # RCA Agent Worker Implementation Plan
 
+> **已由新版計畫取代：** 本文件包含舊的 cross-cloud scope 與聊天/Router 工作，不得再執行。請依序使用 [`2026-08-13-grafana-normalization-operator-ui-plan.md`](./2026-08-13-grafana-normalization-operator-ui-plan.md) 與 [`2026-08-13-pubsub-emulator-rca-worker-plan.md`](./2026-08-13-pubsub-emulator-rca-worker-plan.md)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Execute a durable, read-only, evidence-backed RCA within five minutes and persist a Traditional Chinese report with complete provenance.
