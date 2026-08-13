@@ -13,7 +13,7 @@ from sre_agent.workers.partition_worker import (
 
 DATABASE_URL = os.getenv(
     "MIGRATION_TEST_DATABASE_URL",
-    "postgresql://postgres:postgres@127.0.0.1:55432/sre_agent",
+    "postgresql://postgres@127.0.0.1:55432/sre_agent",
 ).replace("postgresql+asyncpg://", "postgresql://", 1)
 
 

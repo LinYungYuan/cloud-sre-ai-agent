@@ -15,7 +15,7 @@ cd backend
 UV_CACHE_DIR=.uv-cache uv run alembic upgrade head
 ```
 
-`docker-compose.yml` 的本機範例帳密是資料庫 `sre_agent`、使用者 `postgres`、密碼 `postgres`，並透過本機連接埠 `55432` 使用；它們不是正式環境憑證。若要在本機重建至 migration 前狀態，執行下列指令。**警告：`alembic downgrade base` 會刪除本 schema 的資料表與其中所有資料，只能用於可丟棄的本機資料庫。**
+`docker-compose.yml` 的本機資料庫是 `sre_agent`、使用者 `postgres`，透過 passwordless 的 `postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent` 連線。Compose 僅將 PostgreSQL 綁定在 loopback，且 `trust` 驗證僅限本機開發；不得複製到正式環境。若要在本機重建至 migration 前狀態，執行下列指令。**警告：`alembic downgrade base` 會刪除本 schema 的資料表與其中所有資料，只能用於可丟棄的本機資料庫。**
 
 ```sh
 cd backend

@@ -19,7 +19,7 @@ SERVICE_ID = UUID("48000000-0000-0000-0000-000000000001")
 HTTP_URL = TypeAdapter(AnyHttpUrl)
 DATABASE_URL = os.getenv(
     "MIGRATION_TEST_DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@127.0.0.1:55432/sre_agent",
+    "postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent",
 ).replace("postgresql://", "postgresql+asyncpg://", 1)
 EXAMPLE = (
     Path(__file__).resolve().parents[4] / "contracts/examples/grafana-firing.json"
