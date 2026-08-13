@@ -5,8 +5,8 @@ description: >-
 databaseAccess:
   applicationRole: shared
   migrationVersionTables:
-    backend: alembic_version
-    rca-worker: rca_worker_alembic_version
+    backend: alembic_version_backend
+    rca-worker: alembic_version_rca_worker
 tables:
   - {name: teams, migrationOwner: backend}
   - {name: projects, migrationOwner: backend}

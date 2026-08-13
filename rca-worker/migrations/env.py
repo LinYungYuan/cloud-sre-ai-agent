@@ -5,11 +5,8 @@ import os
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import pool
+from sqlalchemy import MetaData, pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
-
-from sre_agent.persistence.alembic_versions import reconcile_backend_version_tables
-from sre_agent.persistence.models import Base
 
 config = context.config
 if config.config_file_name is not None:
@@ -19,7 +16,7 @@ database_url = os.getenv("MIGRATION_TEST_DATABASE_URL") or os.getenv("DATABASE_U
 if database_url:
     config.set_main_option("sqlalchemy.url", database_url)
 
-target_metadata = Base.metadata
+target_metadata = MetaData()
 
 
 def run_migrations_offline() -> None:
@@ -28,19 +25,17 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        version_table="alembic_version_backend",
+        version_table="alembic_version_rca_worker",
     )
     with context.begin_transaction():
         context.run_migrations()
 
 
 def do_run_migrations(connection) -> None:
-    reconcile_backend_version_tables(connection)
-    connection.commit()
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
-        version_table="alembic_version_backend",
+        version_table="alembic_version_rca_worker",
     )
     with context.begin_transaction():
         context.run_migrations()

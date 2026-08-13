@@ -634,6 +634,32 @@ def test_incident_list_contract_exposes_scope_filters_sorting_and_rca_status():
     assert parameters["sortOrder"]["schema"]["enum"] == ["asc", "desc"]
 
 
+def test_rca_worker_is_an_independent_package_with_its_own_migration_stream():
+    worker = ROOT / "rca-worker"
+    for relative_path in (
+        "pyproject.toml",
+        "uv.lock",
+        "alembic.ini",
+        "migrations/env.py",
+        "src/sre_rca_worker/__init__.py",
+        "Dockerfile",
+    ):
+        assert (worker / relative_path).is_file(), relative_path
+
+    ownership = yaml.safe_load(
+        (ROOT / "contracts/database/table-ownership.yaml").read_text()
+    )
+    assert ownership["databaseAccess"]["applicationRole"] == "shared"
+    assert ownership["databaseAccess"]["migrationVersionTables"] == {
+        "backend": "alembic_version_backend",
+        "rca-worker": "alembic_version_rca_worker",
+    }
+
+    makefile = (ROOT / "Makefile").read_text()
+    assert "test-rca-worker:" in makefile
+    assert "check: test-contracts test-backend test-rca-worker test-frontend" in makefile
+
+
 def test_mapping_items_publish_etag_for_if_match_updates():
     contract = _operator_contract()
     mapping = contract["components"]["schemas"]["ClassificationMapping"]

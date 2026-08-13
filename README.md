@@ -79,9 +79,8 @@ UV_CACHE_DIR="$PWD/.uv-cache" uv run ruff check src tests
 UV_CACHE_DIR="$PWD/.uv-cache" uv run pyright src
 ```
 
-The directory and commands above are the approved target delivered by the RCA
-Worker implementation plan; they are unavailable until that scaffold task has
-been completed.
+Worker migrations use `alembic_version_rca_worker` and are applied only after
+the Backend migrations have reached their required revision.
 
 ## Contracts
 
