@@ -16,7 +16,7 @@
 - `2026-08-12-observability-rca-platform-design.md` 中以 `team/project/environment/service` 作為告警分類與啟動 RCA 前置條件的規則。
 - `2026-08-12-observability-rca-platform-design.md` 中共享調查對話、工程師追問、conversation worker、incident messages 與 realtime channel 的本期範圍。
 - 既有 RCA plan 中「未分類告警不得建立或執行 RCA」的規則。
-- 既有 RCA plan 中 Router、follow-up worker、conversation API、conversation eval 與任何人工對話工作。
+- 既有 RCA plan 中由 LLM 決定 agent/tool 的 AI Router、follow-up worker、conversation API、conversation eval 與任何人工對話工作。RCA Worker 內部的 deterministic Rule Router 不在排除範圍。
 
 未被本規格明確取代的架構、安全、資料保存及操作介面原則仍然有效。
 
@@ -411,17 +411,70 @@ Worker 從 PostgreSQL 載入 Incident、canonical alert、原始 AlertValues、n
 
 Google ADK dependency 必須由 `uv.lock` 固定版本，並包在平台 adapter 後方，避免 domain code 依賴易變 SDK API。
 
-### 14.2 MCP scope
+### 14.2 詳細 Agent、Route、Skill 與 MCP 架構
+
+```mermaid
+flowchart TD
+    P["Google Pub/Sub"] --> S["Subscriber"]
+    S --> J["RCA Job Handler"]
+    J --> L["PostgreSQL job lease<br/>60 秒／最多 3 次／總 deadline 300 秒"]
+    L --> C["Incident Context Loader<br/>AlertValues／provider／safe scope／time window"]
+    C --> A["RCA Agent<br/>Orchestrator，不直接呼叫 MCP"]
+    A --> R["Rule Router<br/>deterministic code，非 LLM Agent"]
+    R --> K["Skill Registry"]
+
+    K -->|"GCP＋safe scope＋metrics capability"| MA["Metrics Sub-agent"]
+    K -->|"GCP＋safe scope＋trace capability"| TA["Trace Sub-agent"]
+    K -->|"GCP＋safe scope＋log capability"| LA["Log Sub-agent"]
+    K -->|"AWS 或無 safe scope"| NM["No-MCP analysis"]
+
+    MA --> MS["metrics-analysis Skill"]
+    TA --> TS["trace-analysis Skill"]
+    LA --> LS["log-analysis Skill"]
+
+    MS --> MM["GCP Metrics MCP<br/>/agw/gcp-metrics-mcp"]
+    TS --> TM["GCP Trace MCP<br/>/agw/gcp-trace-mcp"]
+    LS --> LM["GCP Log MCP<br/>/agw/gcp-log-mcp"]
+
+    MM --> E["Evidence Validator／Store<br/>BYTEA＋JSONB＋SHA-256＋provenance"]
+    TM --> E
+    LM --> E
+    E --> RA["RCA Agent＋rca-analysis Skill"]
+    NM --> RA
+    RA --> V["Report Validator<br/>每個 claim 必須引用 evidence 或明示 missing evidence"]
+    V --> RP["繁體中文 RCA Report<br/>根因／信心／修復建議／驗證步驟"]
+    RP --> D["Terminal DB commit"]
+    D --> ACK["Pub/Sub ack"]
+```
+
+角色定義：
+
+- **RCA Agent**：唯一的 orchestration 與 synthesis agent。載入 context、呼叫 Rule Router、並行等待選定的 specialists、比較 hypotheses 與反證，最後產生根因、信心程度、修復建議及驗證步驟。RCA Agent 不直接呼叫 MCP。
+- **Rule Router**：一般 deterministic code，不是 LLM agent。只根據 provider、safe scope、Skill required capabilities 與啟動時探索到的 MCP capabilities 決定要啟動哪些 specialists；不得把 AlertValues 當作 routing 指令。
+- **Metrics Sub-agent**：使用 `metrics-analysis` Skill，分析指標異常、趨勢、延遲與錯誤率，只能看 Metrics MCP tools。
+- **Trace Sub-agent**：使用 `trace-analysis` Skill，分析慢節點、錯誤 span 與呼叫鏈，只能看 Trace MCP tools。
+- **Log Sub-agent**：使用 `log-analysis` Skill，分析 exceptions、stack traces、錯誤模式與事件時間線，只能看 Log MCP tools。
+- **RCA synthesis**：RCA Agent 使用 `rca-analysis` Skill 整理三個 specialists 的已保存 evidence。修復建議只供人員審查，不自動執行 restart、rollback、scale、delete 或任何 mutation。
+
+### 14.3 MCP endpoints 與 scope
+
+固定預設 endpoints：
+
+- Metrics：`https://agentgateway.cp.gcubut.gcp.uwccb/agw/gcp-metrics-mcp`
+- Trace：`https://agentgateway.cp.gcubut.gcp.uwccb/agw/gcp-trace-mcp`
+- Log：`https://agentgateway.cp.gcubut.gcp.uwccb/agw/gcp-log-mcp`
+
+三個 endpoints 目前不需要 authentication。URL 只能來自 startup settings 的固定 allowlist；job、AlertValues、labels、prompt 或 MCP output 都不得提供或覆寫 endpoint。Worker 啟動時對每個 endpoint 執行標準 `tools/list`，再依 trusted capability manifest 與 tool input schema 建立各 specialist 可見的工具集合；未在 manifest 允許或具有 mutation 能力的工具不可曝光給 agent。因此實際 tool names 由 endpoint 回傳，不硬編碼於本規格。
 
 - GCP：只有 `resource.label.project_id` 為非空有效字串，且 normalization 建立安全資源範圍時，才提供對應 GCP read-only MCP capabilities。
-- AWS：只有安全 rule 從 labels 建立足夠的 account/resource scope 時，才提供 AWS read-only MCP capabilities。
+- AWS：本期沒有 AWS MCP endpoint。Rule Router 不啟動三個 GCP specialists，也不呼叫任何 MCP；RCA Agent 只根據 AlertValues 與 Incident context 產生 `PARTIAL` 報告，並明示「目前沒有 AWS MCP 證據」。
 - 無法建立 scope 時仍執行 RCA，但 `availableTools` 為空。
 - MCP 使用可信 capability manifest、固定 endpoint identity、允許清單與 input schema。
 - 缺少、模糊或具 mutation 能力的 tool 一律 fail closed。
 - Agent 不可指定任意 endpoint、tool name 或 URL。
-- 正式 MCP auth 使用 Workload Identity／ADC；本機 Bearer 由 SecretProvider 取得，不寫入 log、prompt、report 或 DB。
+- MCP calls 不加入 Authorization header、cookie 或 credential；若未來 authentication 需求改變，必須先更新規格與安全測試。
 
-### 14.3 Evidence
+### 14.4 Evidence
 
 MCP 原始結果永久保存：
 
@@ -435,7 +488,7 @@ EvidenceReference 必須包含 evidence UUID 與 partition timestamp，才能精
 
 每個 observed claim 必須引用 supporting、contradicting 或 missing evidence。Telemetry、logs、traces 與 tool output 永遠是資料，不是指令。
 
-### 14.4 RCA 結果
+### 14.5 RCA 結果
 
 - `COMPLETE`：必要分析成功，結論具有足夠可追溯證據。
 - `PARTIAL`：部分工具失敗、deadline 到期、安全 scope 不足或證據不足。
@@ -497,7 +550,7 @@ RCA Worker 的 lease、attempt、specialist、evidence、hypothesis 與 report s
 - AlertValues 原文，明確標示為「Grafana 告警內容」。
 - Validation／normalization warnings，例如「GCP project ID 空白」、「資源未分類」或「規則衝突」。
 - RCA `COMPLETE/PARTIAL/FAILED` 的繁體中文狀態與 evidence references。
-- 無 MCP scope 的 PARTIAL 報告顯示「目前僅依告警內容分析，尚無可安全查詢的雲端資源範圍」。
+- AWS 的 `PARTIAL` 報告顯示「目前沒有 AWS MCP 證據」；其他無安全 scope 的報告顯示「目前僅依告警內容分析，尚無可安全查詢的雲端資源範圍」。
 
 前端不自行重新分類、不推定 provider、不解析 AlertValues，也不是 authorization boundary。
 前端不提供聊天室、訊息輸入、AI 逐字串流、SSE 或 WebSocket。
@@ -538,7 +591,7 @@ RCA Worker 的 lease、attempt、specialist、evidence、hypothesis 與 report s
 
 ### 19.4 RCA/evaluation tests
 
-- GCP valid scope、AWS valid scope 與無安全 scope 三種路徑。
+- GCP valid scope＋三個 MCP specialists、AWS no-MCP `PARTIAL` 與 GCP 無安全 scope三種路徑。
 - 無 MCP scope 仍產生 `PARTIAL` 且不呼叫任何 MCP。
 - Specialist timeout 或部分失敗仍保存 evidence 與 PARTIAL report。
 - 每個 observed fact 都能追溯 evidence ID/partition timestamp。

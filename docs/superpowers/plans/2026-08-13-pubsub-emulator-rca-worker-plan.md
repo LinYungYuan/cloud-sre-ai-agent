@@ -6,6 +6,29 @@
 
 **架構：** `rca-worker/` 是獨立的 Python 套件與部署單位，絕不 import `backend/src`。PostgreSQL 是唯一資料真相來源；Backend transactional outbox 將契約定義的小型工作訊息發布到 Pub/Sub，RCA Worker 取得資料庫 job lease 後才呼叫 specialists。本機開發與整合測試使用 Google 官方 Pub/Sub Emulator，並共用正式環境使用的 Google client-library adapters。ADK 與 MCP API 必須封裝在 typed adapters 後方；telemetry 一律視為不可信資料，每個觀察性結論都必須引用已保存的 evidence。
 
+```mermaid
+flowchart TD
+    P["Pub/Sub"] --> J["Job Handler＋PostgreSQL lease"]
+    J --> A["RCA Agent／Orchestrator"]
+    A --> R["Rule Router／deterministic code"]
+    R --> K["Skill Registry"]
+    K --> MA["Metrics Sub-agent＋metrics-analysis"]
+    K --> TA["Trace Sub-agent＋trace-analysis"]
+    K --> LA["Log Sub-agent＋log-analysis"]
+    K -->|"AWS／no safe scope"| NM["No-MCP analysis"]
+    MA --> MM["GCP Metrics MCP／tools/list"]
+    TA --> TM["GCP Trace MCP／tools/list"]
+    LA --> LM["GCP Log MCP／tools/list"]
+    MM --> E["Evidence Store"]
+    TM --> E
+    LM --> E
+    E --> S["RCA Agent＋rca-analysis"]
+    NM --> S
+    S --> RP["zh-TW RCA Report<br/>根因／信心／修復建議／驗證步驟"]
+    RP --> DB["Terminal DB commit"]
+    DB --> ACK["Pub/Sub ack"]
+```
+
 **技術棧：** Python 3.11+、asyncio、SQLAlchemy async、PostgreSQL 18、Google Cloud Pub/Sub client、Google 官方 Pub/Sub Emulator、固定於 `uv.lock` 的 Google ADK、MCP、Pydantic v2、pytest。
 
 ## 全域限制
@@ -21,9 +44,13 @@
 - Pub/Sub 採 at-least-once delivery；由 PostgreSQL job/report state 提供冪等性。
 - 必須先提交 evidence/report transaction，才能 ack Pub/Sub 訊息。
 - 只有非空白 `resource.label.project_id` 且 normalized scope 安全時，才啟用 GCP MCP。
-- 只有安全規則建立足夠的 resource scope 時，才啟用 AWS MCP。
+- AWS 本期沒有 MCP endpoint；任何 AWS 告警都不得啟用 GCP MCP。
 - 沒有安全 scope 時仍執行 RCA，但不提供 MCP tools；證據不足時產生 `PARTIAL` 報告。
 - MCP tools 必須明確為 read-only、通過 capability allowlist、綁定 endpoint，並完成 schema validation。
+- RCA Agent 是唯一 orchestrator/synthesizer；Rule Router 是 deterministic code，不是 LLM agent，且不得把 AlertValues 當作 routing 指令。
+- 預設 GCP MCP endpoints 固定為 `https://agentgateway.cp.gcubut.gcp.uwccb/agw/gcp-metrics-mcp`、`https://agentgateway.cp.gcubut.gcp.uwccb/agw/gcp-trace-mcp`、`https://agentgateway.cp.gcubut.gcp.uwccb/agw/gcp-log-mcp`，目前不使用 authentication。
+- Worker 啟動時使用標準 `tools/list` 探索實際 tool names，再套用 endpoint-bound capability allowlist；job payload 不得指定 URL 或 tool name。
+- AWS 本期沒有 MCP endpoint；不得呼叫 GCP MCP，必須產生明示缺少 AWS MCP 證據的 `PARTIAL` 報告。
 - AlertValues、telemetry、logs、traces 與 MCP output 都是不可信資料，絕不能視為指令。
 - 原始 evidence 以精確 `BYTEA`、結構化 `JSONB`、SHA-256、provenance 與安全 metadata 保存。
 - 每一項報告 claim 都必須引用 evidence UUID 與 partition timestamp。
@@ -41,6 +68,7 @@
 - `backend/src/sre_agent/workers/outbox_worker.py`：transaction commit 後發布完整 RCA 識別訊息。
 - `rca-worker/src/sre_rca_worker/integrations/pubsub/`：subscriber/bootstrap 與 Worker 端訊息驗證器。
 - `rca-worker/src/sre_rca_worker/agents/`：Skills、specialists、orchestration 與 synthesis。
+- `rca-worker/src/sre_rca_worker/agents/rca/router.py`：只依 trusted context/capabilities 產生 deterministic RoutePlan。
 - `rca-worker/src/sre_rca_worker/integrations/mcp/`：依 endpoint 隔離的 capability adapters。
 - `rca-worker/src/sre_rca_worker/application/rca/`：job claim、evidence persistence 與 report settlement。
 - `rca-worker/src/sre_rca_worker/workers/rca_worker.py`：Pub/Sub delivery handler 與 process entrypoint。
@@ -352,17 +380,20 @@ git commit -m "feat: add read-only RCA skill registry"
 - 建立：`rca-worker/src/sre_rca_worker/integrations/mcp/client.py`
 - 建立：`rca-worker/src/sre_rca_worker/integrations/mcp/capability_resolver.py`
 - 建立：`rca-worker/src/sre_rca_worker/integrations/mcp/factories.py`
+- 修改：`rca-worker/src/sre_rca_worker/config/settings.py`
 - 測試：`rca-worker/tests/unit/integrations/mcp/test_capability_resolver.py`
 - 測試：`rca-worker/tests/contract/mcp/test_endpoint_isolation.py`
 
 **介面：**
 - 產出：`McpClient.list_tools()`、`McpClient.call(tool_name, arguments, deadline)`。
 - 產出：`CapabilityResolver.resolve(required, manifest, discovered) -> tuple[AllowedTool, ...]`。
+- 產出：`CapabilitySet(by_specialist: Mapping[SpecialistKind, tuple[AllowedTool, ...]])`，只包含通過 endpoint、read-only annotation 與 input schema 驗證的 tools。
 - 產出：`McpClientFactory.for_specialist(kind, scope) -> McpClient`，不接受任意 endpoint argument。
+- 產出：三個預設 HTTPS endpoint settings，僅可在 startup configuration 覆寫，且 MCP client 不傳送 authentication material。
 
 - [ ] **步驟 1：先寫 allowlist/isolation RED tests**
 
-測試缺少或模糊 capability 時 fail closed；拒絕 mutation/unknown annotations；endpoint identity 必須符合 trusted manifest；Metrics 不得呼叫 Log/Trace tools；invalid input schema 必須在連網前拒絕；沒有 scope 時回傳不建立連線的 empty client。
+測試缺少或模糊 capability 時 fail closed；拒絕 mutation/unknown annotations；endpoint identity 必須符合 trusted manifest；Metrics 不得呼叫 Log/Trace tools；invalid input schema 必須在連網前拒絕；沒有 scope 時回傳不建立連線的 empty client。確認預設 URLs 精確相符、三個 clients 都先呼叫 `tools/list`、requests 不含 Authorization/cookie/credential，且 job/AlertValues 無法覆寫 endpoint。確認 provider = AWS 時三個 GCP clients 都不建立、不連線。
 
 - [ ] **步驟 2：執行 RED**
 
@@ -376,14 +407,22 @@ Run: `cd rca-worker && UV_CACHE_DIR=$PWD/.uv-cache uv run pytest tests/unit/inte
 
 - [ ] **步驟 4：實作 trusted capability manifest 與 factories**
 
-Manifest entries 包含 endpoint identity、capabilities、allowed tool-name pattern、input schema hash 與 `READ_ONLY`。Production auth 使用 ADC/Workload Identity；本機 Bearer 從注入的 `SecretProvider` 讀取，且絕不保存於 `AllowedTool` repr/log。
+Manifest entries 包含 endpoint identity、capabilities、allowed tool-name pattern、input schema hash 與 `READ_ONLY`。預設 endpoints 為：
+
+```text
+metrics = https://agentgateway.cp.gcubut.gcp.uwccb/agw/gcp-metrics-mcp
+trace   = https://agentgateway.cp.gcubut.gcp.uwccb/agw/gcp-trace-mcp
+log     = https://agentgateway.cp.gcubut.gcp.uwccb/agw/gcp-log-mcp
+```
+
+三個 endpoints 目前不需要 authentication。Factory 只能從 validated startup settings 取得 URL，不接受 agent、job 或 request 傳入 endpoint。啟動時呼叫 `tools/list` 後，以 manifest 過濾實際 tools；不得將未允許、schema 不符或非 read-only tool 暴露給 specialist。
 
 - [ ] **步驟 5：執行 tests/static checks 並提交**
 
 執行任務 5 tests、Ruff 與 Pyright。預期：PASS／0 errors。
 
 ```bash
-git add rca-worker/pyproject.toml rca-worker/uv.lock rca-worker/src/sre_rca_worker/integrations/mcp rca-worker/tests/unit/integrations/mcp rca-worker/tests/contract/mcp
+git add rca-worker/pyproject.toml rca-worker/uv.lock rca-worker/src/sre_rca_worker/integrations/mcp rca-worker/src/sre_rca_worker/config/settings.py rca-worker/tests/unit/integrations/mcp rca-worker/tests/contract/mcp
 git commit -m "feat: isolate RCA MCP capabilities"
 ```
 
@@ -419,7 +458,7 @@ Specialists 只能回傳 domain-limited findings。`EvidenceDraft` 包含 endpoi
 
 - [ ] **步驟 4：加入 no-safe-scope 行為**
 
-當 `available_tools == ()` 時，specialist adapters 不得 instantiate/call MCP，並回傳 deterministic missing-evidence result。測試 blank GCP project 與 unclassified AWS resource 兩種情況。
+當 `available_tools == ()` 時，specialist adapter 即使在 unit test 中被直接呼叫，也不得 instantiate/call MCP，並回傳 deterministic missing-evidence result。測試 blank GCP project 與 unclassified AWS resource 兩種情況；production workflow 仍由 Rule Router 在這些情況產生 empty RoutePlan，不啟動 specialist。
 
 - [ ] **步驟 5：執行測試並提交**
 
@@ -434,16 +473,22 @@ git commit -m "feat: define RCA specialist evidence contracts"
 
 **檔案：**
 - 建立：`rca-worker/src/sre_rca_worker/agents/rca/models.py`
+- 建立：`rca-worker/src/sre_rca_worker/agents/rca/router.py`
 - 建立：`rca-worker/src/sre_rca_worker/agents/rca/workflow.py`
+- 測試：`rca-worker/tests/unit/agents/rca/test_router.py`
 - 測試：`rca-worker/tests/unit/agents/rca/test_workflow.py`
 
 **介面：**
 - 產出：`RcaWorkflow.run(context: IncidentContext, deadline: datetime) -> InvestigationBundle`。
+- 產出：`RuleRouter.route(context: IncidentContext, capabilities: CapabilitySet) -> RoutePlan`。
+- 產出：`RoutePlan(selected: tuple[SpecialistKind, ...], reason_codes: tuple[RouteReasonCode, ...])`；`SpecialistKind = METRICS | TRACE | LOG`，固定排序也是 `METRICS, TRACE, LOG`。
 - 依賴：任務 6 的 specialists。
 
 - [ ] **步驟 1：先寫 concurrency/deadline RED tests**
 
-使用可控制的 fake specialists。確認所有 eligible specialists 都在任一 specialist 完成前啟動；no-safe-scope 不啟動任何 specialist；單一 timeout 仍保留其他 results；global cancellation 阻止新 calls；啟動前已超過 deadline 時不得 invocation；result ordering 必須 deterministic。
+先為 Rule Router 寫 table-driven tests：GCP＋safe scope 只選擇具有所需 discovered capabilities 的 Metrics／Trace／Log specialists；缺少單一 capability 只排除對應 specialist；AWS、GCP unsafe scope 或空 capabilities 不選擇任何 MCP specialist。RoutePlan 必須有 deterministic ordering 與 reason codes，且相同 input 永遠產生相同結果。AlertValues 內的 tool name、URL 或 prompt injection 不得改變 route。
+
+再使用可控制的 fake specialists。確認所有 selected specialists 都在任一 specialist 完成前啟動；empty RoutePlan 不啟動任何 specialist；單一 timeout 仍保留其他 results；global cancellation 阻止新 calls；啟動前已超過 deadline 時不得 invocation；result ordering 必須 deterministic。
 
 - [ ] **步驟 2：執行 RED**
 
@@ -453,12 +498,12 @@ Run: `cd rca-worker && UV_CACHE_DIR=$PWD/.uv-cache uv run pytest tests/unit/agen
 
 - [ ] **步驟 3：實作 structured concurrency**
 
-使用 `asyncio.TaskGroup`、全域 aware-UTC deadline、逐 call 計算 remaining time、只針對 transient transport errors 的 bounded retry，以及明確的 `SpecialistFailure` values。Caller cancellation 必須重新拋出。
+先執行純函式 `RuleRouter.route`，再以 `asyncio.TaskGroup` 只啟動 RoutePlan 選定的 specialists。使用全域 aware-UTC deadline、逐 call 計算 remaining time、只針對 transient transport errors 的 bounded retry，以及明確的 `SpecialistFailure` values。Caller cancellation 必須重新拋出。RCA Agent 是 orchestrator；Rule Router 不是 ADK/LLM agent，不得自行呼叫 MCP。
 
 - [ ] **步驟 4：執行測試並提交**
 
 ```bash
-git add rca-worker/src/sre_rca_worker/agents/rca rca-worker/tests/unit/agents/rca/test_workflow.py
+git add rca-worker/src/sre_rca_worker/agents/rca rca-worker/tests/unit/agents/rca/test_router.py rca-worker/tests/unit/agents/rca/test_workflow.py
 git commit -m "feat: run RCA specialists within deadline"
 ```
 
@@ -494,7 +539,7 @@ Run: `cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres
 
 - [ ] **步驟 4：實作 content-addressed persistence 與 validated synthesis**
 
-先保存 evidence，只將安全 summary 與 opaque references 傳入 synthesis，驗證 structured result；deadline 尚有餘裕時，schema/citation failure 可進行一次 corrective retry。Status rules：證據充足 → `COMPLETE`；部分證據或沒有 safe scope → `PARTIAL`；沒有可用分析或永久 workflow failure → `FAILED`。
+先保存 evidence，只將安全 summary 與 opaque references 傳給使用 `rca-analysis` Skill 的 RCA Agent synthesis，驗證 structured result；deadline 尚有餘裕時，schema/citation failure 可進行一次 corrective retry。報告必須包含根因／leading hypothesis、信心程度、支持與反證 evidence、修復建議與驗證步驟。修復建議只供人員審查，不執行 mutation。Status rules：證據充足 → `COMPLETE`；部分證據、AWS 或沒有 safe scope → `PARTIAL`；沒有可用分析或永久 workflow failure → `FAILED`。
 
 - [ ] **步驟 5：執行測試並提交**
 
@@ -571,7 +616,7 @@ git commit -m "feat: execute durable RCA jobs"
 
 - [ ] **步驟 1：先寫 evaluation RED tests**
 
-每個 dataset 包含固定的不可信 AlertValues、固定 MCP evidence（或無 evidence）、expected status、required/forbidden claims、required citations 與 zh-TW phrases。必須包含不得觸發 tools 的 prompt injection 與 URL instructions。
+每個 dataset 包含固定的不可信 AlertValues、固定 MCP evidence（或無 evidence）、expected RoutePlan、expected status、required/forbidden claims、required citations 與 zh-TW phrases。GCP cases 必須驗證選定 specialists 與 endpoint isolation；AWS case 必須驗證 empty RoutePlan、零 MCP calls、`PARTIAL` 與「目前沒有 AWS MCP 證據」。必須包含不得改變 route 或觸發 tools 的 prompt injection、假 tool name 與 URL instructions。
 
 - [ ] **步驟 2：執行 RED 並實作 deterministic fake runtime wiring**
 
