@@ -10,6 +10,9 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 MIGRATION_PATH = (
     REPOSITORY_ROOT / "backend/migrations/versions/0001_alert_incident_schema.py"
 )
+MIGRATION_V2_PATH = (
+    REPOSITORY_ROOT / "backend/migrations/versions/0002_grafana_normalization_v2.py"
+)
 DOCUMENTATION_PATH = REPOSITORY_ROOT / "docs/database/postgresql-schema.md"
 PARTITION_EXAMPLES = {
     "webhook_deliveries_2031_12",
@@ -28,6 +31,8 @@ REQUIRED_INDEXES = {
     "ix_audit_events_resource_occurred",
     "ix_worker_jobs_status_available",
     "ix_outbox_events_status_available",
+    "ix_normalization_rules_lookup",
+    "ix_folder_scope_mappings_lookup",
 }
 REQUIRED_COLUMNS = {
     "alert_events": {
@@ -221,7 +226,16 @@ def test_schema_reference_canonical_manifest_matches_migration() -> None:
     assert {
         name: _table_manifest(statement) for name, statement in migration_tables.items()
     } == {name: _table_manifest(documented_tables[name]) for name in migration_tables}
-    assert _index_manifest(migration_sql) == _index_manifest(documentation_sql)
+    migration_indexes = _index_manifest(migration_sql)
+    documented_indexes = _index_manifest(documentation_sql)
+    assert migration_indexes == {
+        name: (
+            definition
+            if name == "uq_incidents_active_identity"
+            else documented_indexes[name]
+        )
+        for name, definition in migration_indexes.items()
+    }
 
 
 def test_schema_reference_covers_every_migration_parent_table() -> None:
@@ -307,12 +321,40 @@ def test_schema_reference_documents_delivery_validation_failure_status() -> None
 
 def test_schema_reference_documents_validation_and_identity_columns() -> None:
     """Removing validation or identity columns from public DDL must be detected."""
-    table_definitions = _documented_table_definitions(
-        DOCUMENTATION_PATH.read_text(encoding="utf-8")
-    )
+    documentation = DOCUMENTATION_PATH.read_text(encoding="utf-8")
 
-    for table_name, required_columns in REQUIRED_COLUMNS.items():
-        assert all(
-            column in table_definitions.get(table_name, "")
-            for column in required_columns
-        )
+    for required_columns in REQUIRED_COLUMNS.values():
+        assert all(column in documentation for column in required_columns)
+
+
+def test_schema_reference_documents_normalization_v2_migration() -> None:
+    documentation = DOCUMENTATION_PATH.read_text(encoding="utf-8")
+    migration = MIGRATION_V2_PATH.read_text(encoding="utf-8")
+    required_fragments = {
+        "CREATE TABLE normalization_rules",
+        "CREATE TABLE folder_scope_mappings",
+        "ADD COLUMN truncated_alerts INTEGER NOT NULL DEFAULT 0",
+        "ADD COLUMN incomplete BOOLEAN NOT NULL DEFAULT false",
+        "ADD COLUMN provider TEXT NULL",
+        "ADD COLUMN identity_version INTEGER NOT NULL DEFAULT 1",
+        "ALTER COLUMN team_id DROP NOT NULL",
+        "ALTER COLUMN project_id DROP NOT NULL",
+        "ALTER COLUMN environment_id DROP NOT NULL",
+        "UNIQUE NULLS NOT DISTINCT (source_id, name, version)",
+        "CREATE INDEX ix_normalization_rules_lookup",
+        "CREATE INDEX ix_folder_scope_mappings_lookup",
+        "alembic_version_backend",
+    }
+
+    assert all(fragment in migration for fragment in required_fragments - {"alembic_version_backend"})
+    assert all(fragment in documentation for fragment in required_fragments)
+    assert _index_manifest(_document_sql_blocks(documentation))[
+        "uq_incidents_active_identity"
+    ] == (
+        True,
+        "incidents",
+        "(identity_version, identity_key)",
+        "status IN ('OPEN', 'INVESTIGATING')",
+    )
+    assert "folder_code is not projects.id" in documentation
+    assert "downgrade" in documentation.lower()

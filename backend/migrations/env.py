@@ -27,13 +27,30 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        version_table="alembic_version_backend",
     )
     with context.begin_transaction():
         context.run_migrations()
 
 
 def do_run_migrations(connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    connection.exec_driver_sql(
+        """
+        DO $$
+        BEGIN
+            IF to_regclass('public.alembic_version') IS NOT NULL
+               AND to_regclass('public.alembic_version_backend') IS NULL THEN
+                ALTER TABLE public.alembic_version RENAME TO alembic_version_backend;
+            END IF;
+        END $$
+        """
+    )
+    connection.commit()
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        version_table="alembic_version_backend",
+    )
     with context.begin_transaction():
         context.run_migrations()
 

@@ -505,6 +505,133 @@ CREATE INDEX ix_worker_jobs_status_available ON worker_jobs (status, available_a
 CREATE INDEX ix_outbox_events_status_available ON outbox_events (status, available_at)
 ```
 
+## Grafana 正規化與 Incident identity v2（revision 0002）
+
+Backend migration 從本 revision 起使用獨立的 `alembic_version_backend`；若部署中仍有舊的 `alembic_version`，migration 啟動時會先在同一資料庫安全重新命名並保留 revision。Backend 與 RCA Worker 的 migration source ownership 不同，但三個應用程式共用同一個 PostgreSQL application role。
+
+`folder_code` 是 Grafana 的專案／系統代碼，**folder_code is not projects.id**。它只用於 identity v2 與可選的 `folder_scope_mappings`；找不到 mapping 時，Incident 的 team、project、environment、service 可以全部為 `NULL`，仍然必須建立 RCA。provider 只看 alert labels 是否存在 `resource.label.project_id`，mapping 不得改寫 provider。
+
+以下是 forward-only migration 的兩張 catalog 表完整 DDL：
+
+```sql
+CREATE TABLE normalization_rules (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_id UUID NULL REFERENCES grafana_sources(id),
+    name TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    priority INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    conditions JSONB NOT NULL,
+    output JSONB NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT true,
+    created_by UUID NULL REFERENCES subjects(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_normalization_rules_source_name_version
+        UNIQUE NULLS NOT DISTINCT (source_id, name, version),
+    CONSTRAINT ck_normalization_rules_version CHECK (version > 0),
+    CONSTRAINT ck_normalization_rules_provider CHECK (provider IN ('GCP', 'AWS')),
+    CONSTRAINT ck_normalization_rules_conditions_array
+        CHECK (jsonb_typeof(conditions) = 'array'),
+    CONSTRAINT ck_normalization_rules_output_object
+        CHECK (jsonb_typeof(output) = 'object')
+);
+
+CREATE TABLE folder_scope_mappings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_id UUID NOT NULL REFERENCES grafana_sources(id),
+    folder_code TEXT NOT NULL,
+    team_id UUID NULL REFERENCES teams(id),
+    project_id UUID NULL REFERENCES projects(id),
+    environment_id UUID NULL REFERENCES environments(id),
+    service_id UUID NULL REFERENCES services(id),
+    enabled BOOLEAN NOT NULL DEFAULT true,
+    created_by UUID NULL REFERENCES subjects(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_folder_scope_source_folder UNIQUE (source_id, folder_code),
+    CONSTRAINT ck_folder_scope_nonempty
+        CHECK (num_nonnulls(team_id, project_id, environment_id, service_id) >= 1),
+    CONSTRAINT ck_folder_scope_team_environment_gap
+        CHECK (team_id IS NULL OR environment_id IS NULL OR project_id IS NOT NULL),
+    CONSTRAINT ck_folder_scope_project_service_gap
+        CHECK (project_id IS NULL OR service_id IS NULL OR environment_id IS NOT NULL),
+    CONSTRAINT ck_folder_scope_team_service_gap
+        CHECK (team_id IS NULL OR service_id IS NULL OR
+               (project_id IS NOT NULL AND environment_id IS NOT NULL)),
+    CONSTRAINT fk_folder_scope_team_project
+        FOREIGN KEY (team_id, project_id) REFERENCES projects(team_id, id),
+    CONSTRAINT fk_folder_scope_project_environment
+        FOREIGN KEY (project_id, environment_id)
+        REFERENCES environments(project_id, id),
+    CONSTRAINT fk_folder_scope_environment_service
+        FOREIGN KEY (environment_id, service_id)
+        REFERENCES services(environment_id, id)
+);
+```
+
+既有 parent table 的 forward-only ALTER 如下。`alert_events` 與 `incidents` 的 canonical 欄位允許 `NULL`，用來保留 revision 0001 的歷史資料；新寫入由 application 明確提供 identity version 2 與正規化欄位。
+
+```sql
+ALTER TABLE webhook_deliveries
+    ADD COLUMN truncated_alerts INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN incomplete BOOLEAN NOT NULL DEFAULT false,
+    ADD CONSTRAINT ck_webhook_deliveries_truncated_alerts
+        CHECK (truncated_alerts >= 0);
+
+ALTER TABLE alert_events
+    ADD COLUMN provider TEXT NULL,
+    ADD COLUMN folder_code TEXT NULL,
+    ADD COLUMN alert_name TEXT NULL,
+    ADD COLUMN severity_raw TEXT NULL,
+    ADD COLUMN severity_canonical TEXT NULL,
+    ADD COLUMN issue JSONB NULL,
+    ADD COLUMN resource JSONB NULL,
+    ADD COLUMN normalization_status TEXT NOT NULL DEFAULT 'UNCLASSIFIED',
+    ADD COLUMN normalization_rule_id UUID NULL REFERENCES normalization_rules(id),
+    ADD COLUMN normalization_rule_version INTEGER NULL,
+    ADD COLUMN normalization_warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+    ADD CONSTRAINT ck_alert_events_provider
+        CHECK (provider IS NULL OR provider IN ('GCP', 'AWS')),
+    ADD CONSTRAINT ck_alert_events_severity_canonical
+        CHECK (severity_canonical IS NULL OR
+               severity_canonical IN ('SEV1', 'SEV3', 'UNMAPPED')),
+    ADD CONSTRAINT ck_alert_events_issue_object
+        CHECK (issue IS NULL OR jsonb_typeof(issue) = 'object'),
+    ADD CONSTRAINT ck_alert_events_resource_object
+        CHECK (resource IS NULL OR jsonb_typeof(resource) = 'object'),
+    ADD CONSTRAINT ck_alert_events_normalization_status
+        CHECK (normalization_status IN ('NORMALIZED', 'UNCLASSIFIED', 'VALIDATION_FAILED')),
+    ADD CONSTRAINT ck_alert_events_normalization_warnings_array
+        CHECK (jsonb_typeof(normalization_warnings) = 'array'),
+    ADD CONSTRAINT ck_alert_events_rule_reference
+        CHECK ((normalization_rule_id IS NULL) = (normalization_rule_version IS NULL));
+
+ALTER TABLE incidents
+    ADD COLUMN identity_version INTEGER NOT NULL DEFAULT 1,
+    ADD COLUMN provider TEXT NULL,
+    ADD COLUMN folder_code TEXT NULL,
+    ADD COLUMN alert_name TEXT NULL,
+    ALTER COLUMN team_id DROP NOT NULL,
+    ALTER COLUMN project_id DROP NOT NULL,
+    ALTER COLUMN environment_id DROP NOT NULL,
+    DROP CONSTRAINT incidents_severity_check,
+    ADD CONSTRAINT ck_incidents_identity_version CHECK (identity_version IN (1, 2)),
+    ADD CONSTRAINT ck_incidents_provider
+        CHECK (provider IS NULL OR provider IN ('GCP', 'AWS')),
+    ADD CONSTRAINT ck_incidents_severity_v2
+        CHECK (severity IN ('SEV1', 'SEV2', 'SEV3', 'SEV4', 'UNMAPPED'));
+
+DROP INDEX uq_incidents_active_identity;
+CREATE UNIQUE INDEX uq_incidents_active_identity
+    ON incidents (identity_version, identity_key)
+    WHERE status IN ('OPEN', 'INVESTIGATING');
+CREATE INDEX ix_normalization_rules_lookup ON normalization_rules (source_id, enabled, priority);
+CREATE INDEX ix_folder_scope_mappings_lookup ON folder_scope_mappings (source_id, enabled, folder_code);
+```
+
+Downgrade 警告：從 revision 0002 降回 0001 會永久刪除 normalization rules、folder mappings 與所有 canonical normalization 欄位；如果已存在 nullable scope 或 `UNMAPPED` Incident，恢復舊的 `NOT NULL`／severity constraint 前必須先修復資料。正式環境不應把 downgrade 當成一般 rollback 策略。
+
 ## Partition 維護
 
 allowlist 僅包含：`webhook_deliveries`、`alert_events`、`evidence_records`、`incident_messages`、`incident_timeline_events` 與 `audit_events`。migration upgrade 會建立當月與下個月的六張分區。執行期的 `ensure_monthly_partitions(connection, month)` 使用明確的 `public` schema 建立月分區，建立後逐一驗證 `relispartition`、正確 parent 與精確 bounds；同名 ordinary table、掛錯 parent 或錯誤 bounds 都會以 partition drift 失敗，不會被 `IF NOT EXISTS` 靜默略過。

@@ -51,6 +51,8 @@ REQUIRED_TABLES = {
     "outbox_events",
     "worker_jobs",
     "worker_attempts",
+    "normalization_rules",
+    "folder_scope_mappings",
 }
 
 TEAM_A = UUID("91000000-0000-0000-0000-000000000001")
@@ -219,6 +221,87 @@ async def test_delivery_token_identifier_uses_text_not_a_secret_or_uuid(connecti
     )
 
     assert data_type == "text"
+
+
+@pytest.mark.asyncio
+async def test_normalization_v2_columns_and_nullable_incident_scope(connection):
+    rows = await connection.fetch(
+        """
+        SELECT table_name, column_name, data_type, udt_name, is_nullable, column_default
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND (
+            (table_name = 'webhook_deliveries'
+             AND column_name IN ('truncated_alerts', 'incomplete'))
+            OR
+            (table_name = 'alert_events'
+             AND column_name IN (
+               'provider', 'folder_code', 'alert_name', 'severity_raw',
+               'severity_canonical', 'issue', 'resource', 'normalization_status',
+               'normalization_rule_id', 'normalization_rule_version',
+               'normalization_warnings'
+             ))
+            OR
+            (table_name = 'incidents'
+             AND column_name IN (
+               'identity_version', 'provider', 'folder_code', 'alert_name',
+               'team_id', 'project_id', 'environment_id', 'service_id'
+             ))
+          )
+        """
+    )
+    columns = {(row["table_name"], row["column_name"]): row for row in rows}
+
+    assert columns[("webhook_deliveries", "truncated_alerts")]["column_default"] == "0"
+    assert columns[("webhook_deliveries", "incomplete")]["column_default"] == "false"
+    assert columns[("alert_events", "provider")]["data_type"] == "text"
+    assert columns[("alert_events", "issue")]["udt_name"] == "jsonb"
+    assert columns[("alert_events", "normalization_warnings")]["udt_name"] == "jsonb"
+    assert columns[("incidents", "identity_version")]["column_default"] == "1"
+    for scope_column in ("team_id", "project_id", "environment_id", "service_id"):
+        assert columns[("incidents", scope_column)]["is_nullable"] == "YES"
+
+
+@pytest.mark.asyncio
+async def test_normalization_catalog_constraints_and_backend_version_table(connection):
+    tables = set(
+        await connection.fetchval(
+            """
+            SELECT array_agg(tablename)
+            FROM pg_tables
+            WHERE schemaname = 'public'
+            """
+        )
+        or []
+    )
+    assert {"normalization_rules", "folder_scope_mappings"} <= tables
+    assert "alembic_version_backend" in tables
+    assert "alembic_version" not in tables
+
+    definitions = await connection.fetch(
+        """
+        SELECT c.relname, con.conname, con.contype, pg_get_constraintdef(con.oid) AS definition
+        FROM pg_constraint AS con
+        JOIN pg_class AS c ON c.oid = con.conrelid
+        JOIN pg_namespace AS n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relname IN ('normalization_rules', 'folder_scope_mappings', 'incidents')
+        """
+    )
+    constraints = {
+        (row["relname"], row["conname"]): (row["contype"], row["definition"])
+        for row in definitions
+    }
+    assert constraints[("normalization_rules", "uq_normalization_rules_source_name_version")][0] == b"u"
+    assert "NULLS NOT DISTINCT" in constraints[
+        ("normalization_rules", "uq_normalization_rules_source_name_version")
+    ][1]
+    assert constraints[("folder_scope_mappings", "uq_folder_scope_source_folder")][0] == b"u"
+    assert "identity_version = ANY" in constraints[
+        ("incidents", "ck_incidents_identity_version")
+    ][1]
+    assert "SEV1" in constraints[("incidents", "ck_incidents_severity_v2")][1]
+    assert "UNMAPPED" in constraints[("incidents", "ck_incidents_severity_v2")][1]
 
 
 @pytest.mark.asyncio
@@ -421,7 +504,7 @@ async def test_incident_and_worker_job_identity_indexes_are_exact(connection):
         "uq_incidents_active_identity": {
             "table_name": "incidents",
             "is_unique": True,
-            "columns": ["identity_key"],
+                "columns": ["identity_version", "identity_key"],
             "predicate": (
                 "(status = ANY (ARRAY['OPEN'::text, 'INVESTIGATING'::text]))"
             ),
