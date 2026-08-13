@@ -605,6 +605,9 @@ def test_incident_list_contract_exposes_scope_filters_sorting_and_rca_status():
     }
 
     assert "rcaStatus" in incident["required"]
+    assert incident["properties"]["severity"] == {
+        "$ref": "#/components/schemas/CanonicalSeverity"
+    }
     assert set(parameters) == {
         "cursor",
         "limit",

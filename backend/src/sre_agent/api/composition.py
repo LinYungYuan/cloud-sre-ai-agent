@@ -8,6 +8,13 @@ from typing import Protocol
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from sre_agent.application.alerts.ingest_grafana_alerts import IngestGrafanaAlerts
+from sre_agent.application.operator.read_models import (
+    LocalOperatorIdentityProvider,
+    OperatorIdentityProvider,
+    OperatorReadService,
+    UnavailableOperatorIdentityProvider,
+    UnavailableOperatorReadService,
+)
 from sre_agent.config.settings import Settings
 from sre_agent.integrations.grafana.authenticator import (
     ConfiguredGrafanaSecretProvider,
@@ -19,6 +26,9 @@ from sre_agent.persistence.repositories.normalization import (
     load_folder_scope_provider,
     load_normalization_rule_provider,
 )
+from sre_agent.persistence.repositories.operator_reads import (
+    SqlAlchemyOperatorReadRepository,
+)
 from sre_agent.persistence.unit_of_work import SqlAlchemyUnitOfWork, UnitOfWork
 
 UnitOfWorkFactory = Callable[[], UnitOfWork]
@@ -29,12 +39,15 @@ class RuntimeResources:
     uow_factory: UnitOfWorkFactory
     normalization_rule_provider: NormalizationRuleProvider
     folder_scope_provider: FolderScopeProvider
+    operator_reads: OperatorReadService | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ApplicationServices:
     authenticator: GrafanaTokenAuthenticator
     ingestion: IngestGrafanaAlerts
+    operator_reads: OperatorReadService
+    operator_identity_provider: OperatorIdentityProvider
 
 
 class ResourceFactory(Protocol):
@@ -57,6 +70,7 @@ async def production_resources(settings: Settings) -> AsyncIterator[RuntimeResou
             uow_factory=lambda: SqlAlchemyUnitOfWork(session_factory),
             normalization_rule_provider=rules,
             folder_scope_provider=folders,
+            operator_reads=SqlAlchemyOperatorReadRepository(session_factory),
         )
     finally:
         await engine.dispose()
@@ -67,6 +81,16 @@ def compose_services(
     resources: RuntimeResources,
 ) -> ApplicationServices:
     secret_provider = ConfiguredGrafanaSecretProvider(settings.grafana_tokens)
+    operator_reads = resources.operator_reads
+    if operator_reads is None:
+        operator_reads = UnavailableOperatorReadService()
+    identity_provider: OperatorIdentityProvider
+    if settings.app_environment == "local":
+        identity_provider = LocalOperatorIdentityProvider(
+            app_environment=settings.app_environment
+        )
+    else:
+        identity_provider = UnavailableOperatorIdentityProvider()
     return ApplicationServices(
         authenticator=GrafanaTokenAuthenticator(secret_provider),
         ingestion=IngestGrafanaAlerts(
@@ -75,6 +99,8 @@ def compose_services(
             folder_scope_provider=resources.folder_scope_provider,
             max_body_bytes=settings.webhook_max_body_bytes,
         ),
+        operator_reads=operator_reads,
+        operator_identity_provider=identity_provider,
     )
 
 

@@ -770,7 +770,7 @@ components:
           type: string
           minLength: 1
         severity:
-          $ref: '#/components/schemas/Severity'
+          $ref: '#/components/schemas/CanonicalSeverity'
         status:
           $ref: '#/components/schemas/IncidentStatus'
         alertState:
