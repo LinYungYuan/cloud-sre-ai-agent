@@ -112,10 +112,11 @@ class RecordingPublisher:
 
 
 class BlockingPublisher(RecordingPublisher):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, outcomes: list[str | BaseException] | None = None) -> None:
+        super().__init__(outcomes)
         self.started = threading.Event()
         self.release = threading.Event()
+        self.completed = threading.Event()
 
     def publish(
         self, topic: str, data: bytes, attributes: Mapping[str, str]
@@ -123,7 +124,10 @@ class BlockingPublisher(RecordingPublisher):
         self.started.set()
         if not self.release.wait(timeout=5):
             raise TimeoutError("test did not release publisher acknowledgement")
-        return super().publish(topic, data, attributes)
+        try:
+            return super().publish(topic, data, attributes)
+        finally:
+            self.completed.set()
 
 
 @pytest.mark.asyncio
@@ -275,6 +279,75 @@ async def test_cancelled_publish_is_not_swallowed_or_marked_failed(session_facto
     assert row["status"] == "PENDING"
     assert row["available_at"] == CREATED_AT
     assert row["published_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_outer_cancellation_waits_for_ack_commit_and_keeps_row_claimed(
+    session_factory,
+):
+    await _insert_event(session_factory)
+    blocking_publisher = BlockingPublisher()
+    duplicate_publisher = RecordingPublisher()
+    worker = OutboxPublisher(
+        session_factory, blocking_publisher, TOPIC, clock=lambda: NOW
+    )
+    duplicate_worker = OutboxPublisher(
+        session_factory, duplicate_publisher, TOPIC, clock=lambda: NOW
+    )
+
+    publishing = asyncio.create_task(worker.publish_batch(limit=1))
+    assert await asyncio.to_thread(blocking_publisher.started.wait, 2)
+    try:
+        publishing.cancel()
+        await asyncio.sleep(0)
+        publishing.cancel()
+        await asyncio.sleep(0)
+
+        assert not publishing.done()
+        assert await duplicate_worker.publish_batch(limit=1) == 0
+        assert duplicate_publisher.calls == []
+    finally:
+        blocking_publisher.release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await publishing
+    assert blocking_publisher.completed.is_set()
+    row = await _event_row(session_factory)
+    assert row["status"] == "PUBLISHED"
+    assert row["published_at"] == NOW
+    assert await duplicate_worker.publish_batch(limit=1) == 0
+    assert len(blocking_publisher.calls) == 1
+    assert duplicate_publisher.calls == []
+
+
+@pytest.mark.asyncio
+async def test_outer_cancellation_waits_for_failed_attempt_commit(session_factory):
+    await _insert_event(session_factory)
+    publisher = BlockingPublisher(
+        [RuntimeError("token=must-not-be-persisted-after-cancellation")]
+    )
+    worker = OutboxPublisher(
+        session_factory,
+        publisher,
+        TOPIC,
+        retry_delay=timedelta(seconds=30),
+        clock=lambda: NOW,
+    )
+
+    publishing = asyncio.create_task(worker.publish_batch(limit=1))
+    assert await asyncio.to_thread(publisher.started.wait, 2)
+    publishing.cancel()
+    await asyncio.sleep(0)
+    assert not publishing.done()
+    publisher.release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await publishing
+    row = await _event_row(session_factory)
+    assert row["status"] == "FAILED"
+    assert row["published_at"] is None
+    assert row["available_at"] == NOW + timedelta(seconds=30)
+    assert "must-not-be-persisted" not in json.dumps(row, default=str)
 
 
 class StubFuture:

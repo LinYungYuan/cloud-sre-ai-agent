@@ -61,6 +61,23 @@ class OutboxPublisher:
         if limit <= 0:
             raise ValueError("limit must be positive")
 
+        settlement = asyncio.create_task(self._publish_and_settle_batch(limit))
+        cancellation_requested = False
+        while True:
+            try:
+                published = await asyncio.shield(settlement)
+            except asyncio.CancelledError:
+                if settlement.done():
+                    raise
+                cancellation_requested = True
+                continue
+            break
+
+        if cancellation_requested:
+            raise asyncio.CancelledError
+        return published
+
+    async def _publish_and_settle_batch(self, limit: int) -> int:
         attempted_at = _utc(self._clock())
         published = 0
         async with self._session_factory.begin() as session:
