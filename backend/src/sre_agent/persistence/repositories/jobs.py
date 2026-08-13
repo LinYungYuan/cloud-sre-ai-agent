@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from sre_agent.integrations.pubsub.messages import RcaJobMessage
 
 
 class JobRepository(Protocol):
@@ -66,24 +67,54 @@ class SqlAlchemyJobRepository:
                 raise RuntimeError("active RCA run could not be created")
             return existing_run_id
 
-        payload = json.dumps(
-            {"incident_id": str(incident_id), "rca_run_id": str(run_id)},
-            separators=(",", ":"),
-        )
-        await self._session.execute(
+        proposed_job_id = uuid4()
+        worker_job_id = await self._session.scalar(
             text(
                 """
                 INSERT INTO worker_jobs (
-                    rca_run_id, job_type, status, payload, available_at,
+                    id, rca_run_id, job_type, status, payload, available_at,
                     created_at, updated_at
                 ) VALUES (
-                    :run_id, 'RCA_ANALYSIS', 'QUEUED', CAST(:payload AS jsonb),
+                    :job_id, :run_id, 'RCA_ANALYSIS', 'QUEUED', '{}'::jsonb,
                     :available_at, :available_at, :available_at
                 )
                 ON CONFLICT (rca_run_id, job_type) DO NOTHING
+                RETURNING id
                 """
             ),
-            {"run_id": run_id, "payload": payload, "available_at": available_at},
+            {
+                "job_id": proposed_job_id,
+                "run_id": run_id,
+                "available_at": available_at,
+            },
+        )
+        if worker_job_id is None:
+            worker_job_id = await self._session.scalar(
+                text(
+                    """SELECT id FROM worker_jobs
+                       WHERE rca_run_id = :run_id AND job_type = 'RCA_ANALYSIS'"""
+                ),
+                {"run_id": run_id},
+            )
+        if worker_job_id is None:
+            raise RuntimeError("RCA worker job could not be created")
+
+        message = RcaJobMessage.from_mapping(
+            {
+                "schemaVersion": 1,
+                "workerJobId": worker_job_id,
+                "rcaRunId": run_id,
+                "incidentId": incident_id,
+                "attempt": 1,
+            }
+        )
+        payload = message.to_bytes().decode()
+        await self._session.execute(
+            text(
+                """UPDATE worker_jobs SET payload = CAST(:payload AS jsonb)
+                   WHERE id = :job_id"""
+            ),
+            {"job_id": worker_job_id, "payload": payload},
         )
         await self._session.execute(
             text(

@@ -229,6 +229,17 @@ async def test_approved_aws_body_persists_exact_issue_and_always_creates_rca(
     assert run["status"] == "QUEUED"
     assert job["job_type"] == "RCA_ANALYSIS"
     assert outbox["event_type"] == "RCA_RUN_REQUESTED"
+    assert (
+        job["payload"]
+        == outbox["payload"]
+        == {
+            "schemaVersion": 1,
+            "workerJobId": str(job["id"]),
+            "rcaRunId": str(run["id"]),
+            "incidentId": str(incident["id"]),
+            "attempt": 1,
+        }
+    )
 
 
 @pytest.mark.asyncio

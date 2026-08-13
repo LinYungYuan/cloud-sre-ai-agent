@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from sre_agent.integrations.pubsub.publisher import GooglePubSubPublisher
-from sre_agent.workers.outbox_worker import OutboxPublisher
+from sre_agent.workers.outbox_worker import OutboxInvariantError, OutboxPublisher
 
 DATABASE_URL = os.getenv(
     "MIGRATION_TEST_DATABASE_URL",
@@ -27,6 +27,7 @@ DATABASE_URL = os.getenv(
 ).replace("postgresql://", "postgresql+asyncpg://", 1)
 EVENT_ID = UUID("60000000-0000-0000-0000-000000000001")
 RESOURCE_ID = UUID("70000000-0000-0000-0000-000000000001")
+WORKER_JOB_ID = UUID("80000000-0000-0000-0000-000000000001")
 CREATED_AT = datetime(2026, 8, 13, 1, 2, 3, 456789, tzinfo=UTC)
 NOW = datetime(2026, 8, 13, 2, 0, tzinfo=UTC)
 TOPIC = "projects/sre-agent/topics/rca-jobs"
@@ -72,8 +73,11 @@ async def _insert_event(
                 "resource_id": resource_id,
                 "payload": json.dumps(
                     {
-                        "incident_id": str(resource_id),
-                        "rca_run_id": idempotency_key.removeprefix("rca-run:"),
+                        "schemaVersion": 1,
+                        "workerJobId": str(WORKER_JOB_ID),
+                        "rcaRunId": idempotency_key.removeprefix("rca-run:"),
+                        "incidentId": str(resource_id),
+                        "attempt": 1,
                     }
                 ),
                 "idempotency_key": idempotency_key,
@@ -100,9 +104,7 @@ class RecordingPublisher:
         self._lock = threading.Lock()
         self.calls: list[tuple[str, bytes, dict[str, str]]] = []
 
-    def publish(
-        self, topic: str, data: bytes, attributes: Mapping[str, str]
-    ) -> str:
+    def publish(self, topic: str, data: bytes, attributes: Mapping[str, str]) -> str:
         with self._lock:
             self.calls.append((topic, data, dict(attributes)))
             outcome = self._outcomes.pop(0) if self._outcomes else "message-ack"
@@ -118,9 +120,7 @@ class BlockingPublisher(RecordingPublisher):
         self.release = threading.Event()
         self.completed = threading.Event()
 
-    def publish(
-        self, topic: str, data: bytes, attributes: Mapping[str, str]
-    ) -> str:
+    def publish(self, topic: str, data: bytes, attributes: Mapping[str, str]) -> str:
         self.started.set()
         if not self.release.wait(timeout=5):
             raise TimeoutError("test did not release publisher acknowledgement")
@@ -196,7 +196,7 @@ async def test_retry_uses_the_same_outbox_idempotency_key(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_publish_uses_exact_canonical_json_envelope(session_factory):
+async def test_publish_uses_exact_persisted_rca_job_message(session_factory):
     await _insert_event(session_factory)
     publisher = RecordingPublisher()
     worker = OutboxPublisher(session_factory, publisher, TOPIC, clock=lambda: NOW)
@@ -207,19 +207,41 @@ async def test_publish_uses_exact_canonical_json_envelope(session_factory):
         (
             TOPIC,
             (
-                b'{"eventId":"60000000-0000-0000-0000-000000000001",'
-                b'"eventType":"RCA_RUN_REQUESTED",'
-                b'"occurredAt":"2026-08-13T01:02:03.456789Z",'
-                b'"resourceId":"70000000-0000-0000-0000-000000000001",'
-                b'"version":1}'
+                b'{"attempt":1,'
+                b'"incidentId":"70000000-0000-0000-0000-000000000001",'
+                b'"rcaRunId":"90000000-0000-0000-0000-000000000001",'
+                b'"schemaVersion":1,'
+                b'"workerJobId":"80000000-0000-0000-0000-000000000001"}'
             ),
-            {
-                "idempotencyKey": (
-                    "rca-run:90000000-0000-0000-0000-000000000001"
-                )
-            },
+            {"idempotencyKey": ("rca-run:90000000-0000-0000-0000-000000000001")},
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_invalid_persisted_rca_payload_is_an_invariant_failure_and_rolls_back(
+    session_factory,
+):
+    await _insert_event(session_factory)
+    async with session_factory.begin() as session:
+        await session.execute(
+            text(
+                """UPDATE outbox_events
+                   SET payload = '{"AlertValues":"must-not-publish"}'::jsonb
+                   WHERE id = :id"""
+            ),
+            {"id": EVENT_ID},
+        )
+    publisher = RecordingPublisher()
+    worker = OutboxPublisher(session_factory, publisher, TOPIC, clock=lambda: NOW)
+
+    with pytest.raises(OutboxInvariantError):
+        await worker.publish_batch(limit=1)
+
+    assert publisher.calls == []
+    row = await _event_row(session_factory)
+    assert row["status"] == "PENDING"
+    assert row["available_at"] == CREATED_AT
 
 
 @pytest.mark.asyncio
@@ -229,9 +251,7 @@ async def test_two_sessions_skip_a_row_already_claimed_by_another_publisher(
     await _insert_event(session_factory)
     first_publisher = BlockingPublisher()
     second_publisher = RecordingPublisher()
-    first = OutboxPublisher(
-        session_factory, first_publisher, TOPIC, clock=lambda: NOW
-    )
+    first = OutboxPublisher(session_factory, first_publisher, TOPIC, clock=lambda: NOW)
     second = OutboxPublisher(
         session_factory, second_publisher, TOPIC, clock=lambda: NOW
     )
