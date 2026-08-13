@@ -18,6 +18,9 @@ dependencies = [
     "pyyaml",
 ]
 
+[project.scripts]
+sre-agent-ensure-partitions = "sre_agent.workers.partition_worker:main"
+
 [dependency-groups]
 dev = [
     "pytest",

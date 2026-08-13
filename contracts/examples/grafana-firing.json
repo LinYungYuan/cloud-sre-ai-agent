@@ -1,48 +1,63 @@
 {
-  "receiver": "platform-oncall",
+  "receiver": "sre-agent-webhook",
   "status": "firing",
   "orgId": 1,
   "alerts": [
     {
       "status": "firing",
       "labels": {
-        "alertname": "HighErrorRate",
-        "service": "checkout",
-        "severity": "critical"
+        "alertname": "GkePodRestart",
+        "cloud_provider": "gcp",
+        "cloud_scope_id": "svc-lx-afa-01-uat-1b9a87",
+        "resource_type": "gke_pod",
+        "resource_id": "projects/svc-lx-afa-01-uat-1b9a87/locations/asia-east1/clusters/cluster-a/namespaces/default/pods/aaaa-7b9f",
+        "environment": "uat",
+        "service": "aaaa",
+        "team": "platform",
+        "severity": "warning",
+        "signal_type": "metric",
+        "region": "asia-east1",
+        "cluster_name": "cluster-a",
+        "namespace": "default",
+        "pod_name": "aaaa-7b9f",
+        "projectid": "svc-lx-afa-01-uat-1b9a87"
       },
       "annotations": {
-        "summary": "Checkout error rate is above 5%"
+        "summary": "GKE Pod aaaa 持續重新啟動",
+        "description": "Pod aaaa-7b9f 在最近 10 分鐘內重新啟動 5 次",
+        "info": "gke pod aaaa 服務重啟",
+        "possible_impact": "aaaa 服務可能短暫不可用",
+        "runbook_url": "https://runbook.example.com/gke/pod-restart"
       },
-      "startsAt": "2026-08-12T02:00:00Z",
-      "endsAt": "2026-08-12T03:00:00Z",
+      "startsAt": "2026-08-12T10:00:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
       "values": {
-        "B": 7.2
+        "restart_count": 5
       },
-      "generatorURL": "https://grafana.example.com/alerting/grafana/abc/view",
-      "fingerprint": "a9f2b7cd0e1a",
+      "generatorURL": "https://grafana.example.com/alerting/grafana/rules/gke-pod-restart",
+      "fingerprint": "gcp-gke-pod-restart-01",
       "silenceURL": "https://grafana.example.com/alerting/silence/new",
-      "dashboardURL": "",
-      "panelURL": "",
+      "dashboardURL": "https://grafana.example.com/d/gke",
+      "panelURL": "https://grafana.example.com/d/gke?viewPanel=12",
       "grafanaExtension": {
         "runbookOwner": "payments"
       }
     }
   ],
   "groupLabels": {
-    "alertname": "HighErrorRate"
+    "cloud_provider": "gcp",
+    "cloud_scope_id": "svc-lx-afa-01-uat-1b9a87",
+    "resource_type": "gke_pod",
+    "resource_id": "projects/svc-lx-afa-01-uat-1b9a87/locations/asia-east1/clusters/cluster-a/namespaces/default/pods/aaaa-7b9f",
+    "alertname": "GkePodRestart"
   },
-  "commonLabels": {
-    "service": "checkout"
-  },
-  "commonAnnotations": {
-    "summary": "Checkout error rate is above 5%"
-  },
-  "externalURL": "https://grafana.example.com/",
+  "commonLabels": {},
+  "commonAnnotations": {},
+  "externalURL": "https://grafana.example.com",
   "version": "1",
-  "groupKey": "{}:{alertname=\"HighErrorRate\"}",
+  "groupKey": "{}:{alertname=\"GkePodRestart\",cloud_provider=\"gcp\",resource_id=\"projects/svc-lx-afa-01-uat-1b9a87/locations/asia-east1/clusters/cluster-a/namespaces/default/pods/aaaa-7b9f\"}",
   "truncatedAlerts": 0,
-  "title": "[FIRING:1] HighErrorRate",
-  "state": "alerting",
-  "message": "Checkout error rate is above 5%",
+  "title": "GKE Pod restart",
+  "message": "GKE Pod aaaa 持續重新啟動",
   "grafanaTopLevelExtension": "retain-me"
 }
