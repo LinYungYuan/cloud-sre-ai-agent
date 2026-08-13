@@ -1,6 +1,6 @@
 # Grafana 告警正規化與 RCA Worker 設計規格
 
-**狀態：** 已核准，待修訂後書面審閱
+**狀態：** 已核准，待書面審閱
 
 **日期：** 2026-08-13
 
@@ -14,8 +14,9 @@
 
 - `2026-08-12-cross-cloud-grafana-alert-design.md` 中要求 Grafana 提供 `cloud_provider`、`cloud_scope_id`、`resource_type`、`resource_id`、`team`、`environment`、`service` 的規則。
 - `2026-08-12-observability-rca-platform-design.md` 中以 `team/project/environment/service` 作為告警分類與啟動 RCA 前置條件的規則。
+- `2026-08-12-observability-rca-platform-design.md` 中共享調查對話、工程師追問、conversation worker、incident messages 與 realtime channel 的本期範圍。
 - 既有 RCA plan 中「未分類告警不得建立或執行 RCA」的規則。
-- 既有平台規格中「第一版完全不提供 browser realtime channel」的規則；新版只對正在產生 AI 回覆的聊天室提供 job-scoped SSE，其他畫面仍不使用長連線。
+- 既有 RCA plan 中 Router、follow-up worker、conversation API、conversation eval 與任何人工對話工作。
 
 未被本規格明確取代的架構、安全、資料保存及操作介面原則仍然有效。
 
@@ -31,8 +32,8 @@
 - 未分類或資料不完整的告警仍建立 Incident、RCA、worker job 與 outbox。
 - Provider 或安全資源範圍無法確認時，RCA 不查 MCP，但仍產生 `PARTIAL` 報告。
 - Grafana `resolved` 只更新機器告警狀態，不自動關閉人工 Incident。
-- Incident 列表與一般操作畫面不建立長連線，使用者重新整理取得最新資料。
-- Incident 聊天室必須以 job-scoped SSE 即時顯示 AI 分析進度、evidence 引用與文字片段；不使用 WebSocket。
+- Angular 不建立 SSE、WebSocket 或其他長連線；使用者重新整理取得最新資料。
+- 聊天室與 AI 對話不在本階段範圍。
 - Webhook 在 2 秒內完成接收；完整 RCA 目標在 5 分鐘內完成。
 
 ## 3. 系統資料流與邊界
@@ -47,9 +48,7 @@ flowchart LR
     P --> W["RCA Worker"]
     W --> M["允許清單內的 MCP"]
     W --> R["Evidence 與 RCA report"]
-    U["Angular zh-TW"] -->|"一般畫面：手動重新整理 REST"| D
-    W --> C["Durable conversation job events"]
-    C -->|"聊天室：job-scoped SSE"| U
+    U["Angular zh-TW"] -->|"手動重新整理 REST"| D
 ```
 
 元件責任：
@@ -58,7 +57,7 @@ flowchart LR
 - Outbox publisher 只發布已提交的工作識別資訊。
 - Pub/Sub 只負責 at-least-once 工作傳遞，不作為狀態真相來源。
 - RCA Worker 以 PostgreSQL 狀態實現 idempotency、lease、attempt 與 durable settlement。
-- Angular 只透過 Operator REST API 與已發布的聊天室 SSE contract 讀取資料，不 import backend models。
+- Angular 只透過 Operator REST API 讀取資料，不 import backend models。
 
 ## 4. Grafana webhook 契約
 
@@ -406,80 +405,19 @@ EvidenceReference 必須包含 evidence UUID 與 partition timestamp，才能精
 
 報告使用繁體中文；service 名稱、metric、trace/span ID、exception、log、labels、AlertValues 與 evidence 保持原文。
 
-## 15. Incident 聊天室與即時 AI 回覆
+## 15. 未來功能：獨立聊天服務（本階段保留）
 
-### 15.1 對話工作
+聊天室、人工追問、逐字 AI 回覆與 SSE 全部移出本階段，不建立 API、資料表、migration、Pub/Sub topic/subscription、worker、Angular 畫面或測試。
 
-人工追問與自動 RCA 共用 Incident session，但使用獨立 `conversation_jobs`：
+未來若重新啟動此需求，重新進行獨立的設計與核准流程。已確認但尚未成為實作需求的方向只有：
 
-- `incident_id` 與 session pointer 必填。
-- `rca_run_id` 可為 `NULL`；一般追問不必偽裝成一次 RCA run。
-- 對話 job 也透過 durable outbox/Pub/Sub 傳遞，並遵守相同的 idempotency、lease、evidence citation 與安全工具規則。
-- 使用者送出訊息後，REST API 先持久化 user message、conversation job 與 outbox，再回傳 `202` 和 `jobId`。
-- AI 最終回覆永久保存為 `incident_messages`；完成事件只有在最終訊息 commit 後才能送出。
+- 同一 repository 新增獨立專案 `sre-chat-backend/`。
+- Chat service 擁有獨立 image、process、發布流程、資料庫 role 與 `sre_chat` schema。
+- Chat service 不 import `backend` 的 application/persistence 程式，也不直接讀寫核心 Incident、RCA 或 Evidence tables。
+- Chat service 透過版本化 internal API 取得已授權的 Incident/RCA context。
+- Chat service 未來可自行擁有 chat REST、SSE、outbox、Pub/Sub consumer 與 AI chat worker。
 
-### 15.2 SSE 範圍
-
-聊天室需要即時顯示 AI 回覆，因此只在某個 conversation job 執行期間建立 SSE：
-
-```http
-POST /operator/v1/incidents/{incidentId}/messages
-GET  /operator/v1/conversation-jobs/{jobId}/events
-```
-
-- 使用者送訊息走一般 REST；伺服器向瀏覽器推送 AI 結果走 SSE。
-- 不使用 WebSocket，因為目前不需要任意雙向 socket protocol。
-- 每個 SSE 只能訂閱一個 `jobId`，完成、失敗、取消或達 deadline 後立即關閉。
-- Incident 列表、dashboard、告警清單與一般 RCA 頁面仍不建立長連線。
-- SSE endpoint 使用 Operator authentication，並再次驗證使用者是否可查看該 job 所屬 Incident；前端傳入的 incident/job 關係不可信。
-- Angular 使用支援 `Authorization` 與 `Last-Event-ID` headers 的 fetch-based SSE client；不使用無法附帶自訂 Bearer header 的原生 `EventSource`，也不得把 access token 放入 query string。
-
-### 15.3 Durable event stream
-
-為了支援重新整理、短暫斷線與多個 API instances，不把 SSE 連線記憶體當成事件真相來源。Worker 依序寫入 `conversation_job_events`，每筆包含：
-
-- `job_id`
-- 單調遞增 `sequence`，同一 job 唯一
-- `event_type`
-- 經 schema 驗證的 payload
-- `created_at`
-
-文字不要求每一個 token 寫一次資料庫；Worker 將相鄰 token 合併為短小 `text-delta` chunks，在約 250–500 ms 內持久化並送出，以兼顧即時感與 PostgreSQL 寫入量。
-
-SSE API 以資料庫 sequence 讀取尚未送出的 events。沒有新事件時採 bounded async polling；每次讀取使用短查詢並立即釋放 connection，不維持長時間資料庫 transaction、row lock 或專用 connection。瀏覽器重連時使用 `Last-Event-ID`，API 從下一個 sequence 重播，因此不需要 Redis 或另一套 stream store。SSE 連線可送不持久化的 heartbeat comment，heartbeat 不改變 event sequence。
-
-### 15.4 Event contract
-
-| Event | 用途 | 重要限制 |
-|---|---|---|
-| `queued` | 工作已排隊 | 不含內部 queue 資訊 |
-| `running` | AI 開始分析 | 可含安全的階段名稱 |
-| `tool-progress` | 正在查詢 Metrics／Logs／Trace 等進度 | 只顯示允許公開的 capability 名稱，不含 query、credential 或 raw result |
-| `text-delta` | AI 回覆文字片段 | `delta` 為不完整顯示內容，不是 durable final message |
-| `citation` | Evidence 引用可供 UI 連結 | 只含 evidence UUID、partition timestamp 與安全摘要 |
-| `completed` | 最終訊息已 commit | 包含 final `messageId`，送出後關閉 SSE |
-| `failed` | 工作失敗 | 只含安全繁體中文訊息與 correlation ID，送出後關閉 SSE |
-| `timed-out` | 工作超過 deadline | 可指向已保存的 partial result，送出後關閉 SSE |
-| `cancelled` | 工作被取消 | 送出後關閉 SSE |
-
-事件 envelope：
-
-```text
-id: <sequence>
-event: <event-type>
-data: {"schemaVersion":1,"jobId":"...",...}
-```
-
-同一 job 的事件必須依 sequence 傳送。收到 `completed` 後，Angular 以 `messageId` 讀取或核對永久訊息；SSE delta 不取代 PostgreSQL 中的 final message。
-
-### 15.5 斷線與錯誤行為
-
-- 瀏覽器在非 terminal job 斷線時，以 exponential backoff 重連並帶 `Last-Event-ID`。
-- 若 job 已 terminal 且 client 遺漏 terminal event，API 重播未讀事件後正常關閉。
-- 無權限或 job 不屬於可見 Incident：`404`，避免洩漏 job 是否存在。
-- 無效或超出範圍的 `Last-Event-ID`：`400`；不得跳到其他 job 的 sequence。
-- Proxy／API 必須停用 SSE response buffering，並保留 heartbeat 與 idle timeout 所需設定。
-- Worker 失敗前已送出的文字只能顯示為「未完成回覆」，不能存成成功的 agent message 或被當作正式 RCA 結論。
+上述內容只是未來討論起點，不得被目前 implementation plan、acceptance criteria 或 release scope 引用。現有 schema 若已包含 `incident_messages` 等預留資料表，本階段不得據此推導或實作聊天功能。
 
 ## 16. 資料庫遷移與相容性
 
@@ -493,8 +431,7 @@ data: {"schemaVersion":1,"jobId":"...",...}
 - Folder 可透過獨立、可稽核的 source-specific mapping 連到內部 authorization scope；沒有 mapping 時仍可建立 RCA，但只允許中央 SRE／具全域權限者查看。
 - Source/folder authorization mapping 不得影響 provider 或 Incident identity。
 - normalization rules 保存版本與 audit metadata，歷史 event 不因 rule 更新而改寫。
-- 新增 evidence raw bytes、metadata/hash，以及 conversation job/session pointer 所需欄位／約束。
-- 新增 `conversation_job_events`，以 `(job_id, sequence)` 保證順序與重播唯一性，並為 job/sequence 查詢建立索引；event payload 不得保存 credential、raw MCP result 或未遮罩內部錯誤。
+- 新增 evidence raw bytes、metadata/hash 與 evidence reference 所需欄位／約束。
 - 所有新 constraint、index、partition 與 downgrade 的資料損失風險同步寫入 PostgreSQL schema reference。
 
 ## 17. HTTP 與操作錯誤
@@ -522,17 +459,8 @@ data: {"schemaVersion":1,"jobId":"...",...}
 - RCA `COMPLETE/PARTIAL/FAILED` 的繁體中文狀態與 evidence references。
 - 無 MCP scope 的 PARTIAL 報告顯示「目前僅依告警內容分析，尚無可安全查詢的雲端資源範圍」。
 
-Incident 詳情提供簡易聊天室：
-
-- 顯示該 Incident session 的 user、agent、system messages 與時間。
-- 送出訊息後立即顯示 user message 及「AI 排隊中」。
-- Conversation job 執行時透過 SSE 即時顯示分析階段、Metrics／Logs／Trace 等安全進度、evidence 引用與 `text-delta`。
-- SSE terminal event 後，以永久 `messageId` 取代暫存中的串流文字。
-- 斷線時顯示「正在重新連線」，並以 `Last-Event-ID` 恢復，不重複顯示已收到的 delta。
-- 使用者離開 Incident 或取消等待時關閉該 SSE；不影響 Worker 繼續產生 durable 最終結果。
-- SSE 使用 authenticated fetch client，不在 URL、browser history、proxy log 或 analytics 中暴露 access token。
-
 前端不自行重新分類、不推定 provider、不解析 AlertValues，也不是 authorization boundary。
+前端不提供聊天室、訊息輸入、AI 逐字串流、SSE 或 WebSocket。
 
 ## 19. 測試策略與驗收條件
 
@@ -577,25 +505,10 @@ Incident 詳情提供簡易聊天室：
 - 沒有 evidence 時不產生虛構 root cause。
 - 報告與 UI 是繁體中文，技術原文保持不變。
 
-### 19.5 Chat/SSE tests
-
-- REST message creation 先 commit user message/job/outbox，再回 `202 + jobId`。
-- SSE 只能讀取已授權 Incident 的 job；不存在與無權限都回 `404`。
-- Angular fetch-based SSE 能附帶 Bearer 與 `Last-Event-ID`；contract test 禁止 URL query token。
-- `queued/running/tool-progress/text-delta/citation/completed` 依 sequence 傳送。
-- `tool-progress` 與錯誤事件不洩漏 query、credential、raw evidence、prompt 或內部 exception。
-- `Last-Event-ID` 可在重新整理、API instance 切換及短暫斷線後精確重播，且不重複 delta。
-- `completed` 一定晚於 final message commit；commit 失敗不得送出 completed。
-- failed/cancelled/timed-out 都會產生對應 terminal event 並關閉 SSE。
-- Worker 失敗前的 partial deltas 不會成為成功的永久 agent message。
-- Angular component 測試覆蓋即時文字、進度、citation、重連、terminal replacement 與 teardown 關閉連線。
-- 整合測試使用真 PostgreSQL 與官方 Pub/Sub Emulator，不能只用 in-memory event fake。
-
-### 19.6 服務目標
+### 19.5 服務目標
 
 - 合法 webhook transaction 與 `202` 在 2 秒內完成。
 - Incident 在 commit 後可立即由 REST 查詢，使用者重新整理即可看到。
-- Conversation event 在 Worker 持久化後 1 秒內送到已連線的聊天室；文字 chunks 約每 250–500 ms 產生一次。
 - 完整 RCA 目標在進入 `QUEUED` 後 300 秒內完成；逾時必須產生 durable PARTIAL/FAILED 狀態。
 
 ## 20. 實作分解
@@ -603,6 +516,6 @@ Incident 詳情提供簡易聊天室：
 本設計跨越兩個有順序依賴的子專案，實作時使用兩份計畫：
 
 1. **Grafana normalization 與 schema migration**：契約、provider、rules、identity v2、nullable legacy scope、transactional ingestion、Angular 顯示欄位。
-2. **Pub/Sub Emulator、RCA Worker 與 Chat SSE**：官方 Emulator、訊息契約、worker lifecycle、ADK/MCP、evidence、report、conversation jobs、durable job events 與 Angular SSE client。
+2. **Pub/Sub Emulator 與 RCA Worker**：官方 Emulator、訊息契約、worker lifecycle、ADK/MCP、evidence 與 report。
 
 第二階段依賴第一階段的 canonical alert、Incident identity v2 與資料庫欄位完成。兩階段都不得加入 production infrastructure provisioning。

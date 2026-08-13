@@ -1,5 +1,7 @@
 # Observability RCA Multi-Agent Platform 設計規格
 
+> **部分內容已由新版規格取代：** Grafana provider/identity、未分類 RCA 及本期聊天功能範圍，請以 [`2026-08-13-grafana-normalization-rca-worker-design.md`](./2026-08-13-grafana-normalization-rca-worker-design.md) 為準。聊天室、共享調查對話、人工追問、conversation worker 與 realtime channel 已保留至未來獨立設計，不屬於目前 release scope。
+
 **狀態：** 已核准
 
 **日期：** 2026-08-12
