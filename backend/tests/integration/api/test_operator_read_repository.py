@@ -179,11 +179,12 @@ async def repository():
             ),
             (
                 """INSERT INTO rca_reports (
-                    id, rca_run_id, version, summary, report, created_at
+                    id, rca_run_id, version, summary, report, created_at,
+                    result_status
                 ) VALUES (
                     $1, $2, 1, 'CPU 使用率過高',
                     '{"status":"PARTIAL","rootCause":"尚待確認","impact":"資料庫延遲","recommendations":["確認慢查詢"],"claims":[]}'::jsonb,
-                    $3
+                    $3, 'PARTIAL'
                 )""",
                 (REPORT_ID, RUN_ID, AT),
             ),

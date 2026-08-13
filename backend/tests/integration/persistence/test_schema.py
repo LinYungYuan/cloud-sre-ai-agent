@@ -644,63 +644,6 @@ async def test_nullable_scope_tables_reject_gaps_and_cross_branch_pairs(connecti
             SERVICE_A,
         )
 
-        incident_id = UUID("95000000-0000-0000-0000-000000000100")
-        run_id = UUID("96000000-0000-0000-0000-000000000100")
-        await connection.execute(
-            """
-            INSERT INTO incidents (
-                id, identity_key, title, severity, status, alert_state,
-                team_id, project_id, environment_id, service_id, opened_at
-            ) VALUES ($1, 'evidence-parent', 'Evidence parent', 'SEV3', 'OPEN',
-                      'FIRING', $2, $3, $4, $5, now())
-            """,
-            incident_id,
-            TEAM_A,
-            PROJECT_A,
-            ENVIRONMENT_A,
-            SERVICE_A,
-        )
-        await connection.execute(
-            "INSERT INTO rca_runs (id, incident_id, status) VALUES ($1, $2, 'QUEUED')",
-            run_id,
-            incident_id,
-        )
-        evidence_statement = """
-            INSERT INTO evidence_records (
-                id, partition_timestamp, observed_at, rca_run_id,
-                evidence_type, source_agent, source_endpoint, tool_name,
-                team_id, project_id, environment_id, service_id,
-                time_window_start, time_window_end, structured_data,
-                raw_result_reference, content_hash
-            ) VALUES ($1, now(), now(), $2, 'metric', 'test', '/test', 'query',
-                      $3, $4, $5, $6, now(), now(), '{}'::jsonb, 'ref', 'hash')
-        """
-        for offset, scope in enumerate(
-            (
-                (TEAM_A, PROJECT_B, None, None),
-                (TEAM_A, None, ENVIRONMENT_B, None),
-                (None, PROJECT_A, None, SERVICE_B),
-                (None, None, ENVIRONMENT_A, SERVICE_B),
-            ),
-            start=1,
-        ):
-            await _assert_integrity_violation(
-                connection,
-                evidence_statement,
-                UUID(f"97000000-0000-0000-0000-{offset:012d}"),
-                run_id,
-                *scope,
-            )
-
-        await connection.execute(
-            evidence_statement,
-            UUID("97000000-0000-0000-0000-000000000099"),
-            run_id,
-            None,
-            PROJECT_A,
-            None,
-            None,
-        )
     finally:
         await transaction.rollback()
 

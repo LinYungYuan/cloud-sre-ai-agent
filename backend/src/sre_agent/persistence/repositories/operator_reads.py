@@ -347,7 +347,7 @@ class SqlAlchemyOperatorReadRepository:
                             """
                             SELECT run.id, run.incident_id, run.status, run.started_at,
                                    run.completed_at, run.created_at, run.updated_at,
-                                   run.error_message,
+                                   run.failure_code,
                                    row_number() OVER (
                                        PARTITION BY run.incident_id
                                        ORDER BY run.created_at, run.id
@@ -394,7 +394,7 @@ class SqlAlchemyOperatorReadRepository:
                 "updated_at": row["updated_at"],
                 "started_at": row["started_at"],
                 "completed_at": row["completed_at"],
-                "failure_code": None,
+                "failure_code": row["failure_code"],
                 "report_id": row["report_id"],
             }
             for row in page_rows
