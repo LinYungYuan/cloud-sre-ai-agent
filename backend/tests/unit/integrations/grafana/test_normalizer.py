@@ -6,10 +6,19 @@ from uuid import UUID
 import pytest
 
 from sre_agent.domain.alerts.models import AlertState
+from sre_agent.domain.alerts.normalization import (
+    NormalizationRule,
+    NormalizationStatus,
+    RuleCondition,
+    RuleOutput,
+    SafeRuleEngine,
+)
+from sre_agent.domain.alerts.provider import Provider
 from sre_agent.integrations.grafana.normalizer import normalize_alerts
 from sre_agent.integrations.grafana.payloads import parse_grafana_body
 
 SOURCE = UUID("00000000-0000-0000-0000-000000000001")
+RULE_ID = UUID("10000000-0000-0000-0000-000000000001")
 
 
 def _alert(*, fingerprint: str, status: str, service: str) -> dict[str, object]:
@@ -109,3 +118,71 @@ def test_direct_canonical_event_construction_deep_freezes_nested_values():
     supplied_values["A"]["samples"].append(97)
 
     assert directly_constructed.values == {"A": {"samples": (95, 96)}}
+
+
+def test_approved_alert_values_becomes_exact_untrusted_issue() -> None:
+    issue = "Account: 123456789012\nValue: 85.23%\n<br>"
+    alert = _alert(fingerprint="fp", status="firing", service="api")
+    alert["labels"] = {
+        "folder": "COM-LX-BOA-01",
+        "alertname": "High CPU usage",
+        "severity": "ERROR",
+        "Series": "123456789012",
+    }
+    alert["annotations"] = {"AlertValues": issue}
+    _, webhook = _parse({"status": "firing", "alerts": [alert]})
+
+    event = normalize_alerts(SOURCE, webhook)[0]
+
+    assert event.provider is Provider.AWS
+    assert event.folder_code == "COM-LX-BOA-01"
+    assert event.alert_name == "High CPU usage"
+    assert event.severity.canonical == "SEV1"
+    assert event.issue.raw_text == issue
+    assert event.issue.source == "grafana.annotations.AlertValues"
+    assert event.issue.content_type == "text/plain"
+    assert event.issue.untrusted is True
+
+
+def test_multiple_alerts_receive_independent_provider_and_rule_results() -> None:
+    aws = _alert(fingerprint="aws", status="firing", service="api")
+    aws["labels"] = {
+        "folder": "COM-LX-BOA-01",
+        "alertname": "High CPU usage",
+        "severity": "WARNING",
+        "Series": "123456789012",
+    }
+    aws["annotations"] = {"AlertValues": "AWS issue"}
+    gcp = _alert(fingerprint="gcp", status="firing", service="worker")
+    gcp["labels"] = {
+        "folder": "COM-LX-BOA-01",
+        "alertname": "High CPU usage",
+        "severity": "ERROR",
+        "resource.label.project_id": "project-123",
+    }
+    gcp["annotations"] = {"AlertValues": "GCP issue"}
+    rules = SafeRuleEngine(
+        (
+            NormalizationRule(
+                id=RULE_ID,
+                name="aws-series",
+                version=1,
+                priority=1,
+                conditions=(
+                    RuleCondition(path="labels.Series", operator="exists"),
+                ),
+                output=RuleOutput(provider=Provider.AWS, resource_type="aws_resource"),
+            ),
+        )
+    )
+    _, webhook = _parse({"status": "firing", "alerts": [aws, gcp]})
+
+    aws_event, gcp_event = normalize_alerts(SOURCE, webhook, rules)
+
+    assert aws_event.provider is Provider.AWS
+    assert aws_event.normalization_status is NormalizationStatus.NORMALIZED
+    assert aws_event.normalization_rule_id == RULE_ID
+    assert aws_event.issue.raw_text == "AWS issue"
+    assert gcp_event.provider is Provider.GCP
+    assert gcp_event.normalization_status is NormalizationStatus.UNCLASSIFIED
+    assert gcp_event.issue.raw_text == "GCP issue"
