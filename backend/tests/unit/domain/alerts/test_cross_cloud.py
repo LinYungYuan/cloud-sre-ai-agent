@@ -92,9 +92,80 @@ def test_validator_reports_invalid_values_for_enumerated_labels(field: str, valu
     result = CrossCloudAlertValidator().validate(labels)
 
     assert result.is_valid is False
-    assert result.errors == (
-        AlertValidationError(field=field, code="invalid_value"),
+    assert result.errors == (AlertValidationError(field=field, code="invalid_value"),)
+
+
+@pytest.mark.parametrize(
+    "resource_type",
+    ["GKE_POD", "gke-pod", "gke__pod", "_gke_pod", "gke_pod_", "gke pod"],
+)
+def test_validator_rejects_noncanonical_resource_type_tokens(resource_type: str):
+    result = CrossCloudAlertValidator().validate(
+        dict(GCP_LABELS, resource_type=resource_type)
     )
+
+    assert result.is_valid is False
+    assert result.errors == (
+        AlertValidationError(field="resource_type", code="invalid_value"),
+    )
+
+
+@pytest.mark.parametrize(
+    "resource_id",
+    [
+        "svc-lx-afa-01-uat-1b9a87",
+        "projects/svc-lx-afa-01-uat-1b9a87",
+        "projects/svc-lx-afa-01-uat-1b9a87/",
+        "projects/other-project/locations/asia-east1/services/api",
+        "projects/svc-lx-afa-01-uat-1b9a87/services",
+    ],
+)
+def test_validator_rejects_incomplete_or_cross_scope_gcp_resource_names(
+    resource_id: str,
+):
+    result = CrossCloudAlertValidator().validate(
+        dict(GCP_LABELS, resource_id=resource_id)
+    )
+
+    assert result.is_valid is False
+    assert result.errors == (
+        AlertValidationError(field="resource_id", code="invalid_value"),
+    )
+
+
+@pytest.mark.parametrize(
+    "resource_id",
+    [
+        "123456789012",
+        "arn:aws:rds:ap-northeast-1:123456789012:",
+        "arn:aws:rds:ap-northeast-1:210987654321:db:orders-prod",
+        "arn:aws:rds:ap-northeast-1::db:orders-prod",
+        "rds:ap-northeast-1:123456789012:db:orders-prod",
+    ],
+)
+def test_validator_rejects_incomplete_or_cross_account_aws_resource_ids(
+    resource_id: str,
+):
+    result = CrossCloudAlertValidator().validate(
+        dict(AWS_LABELS, resource_id=resource_id)
+    )
+
+    assert result.is_valid is False
+    assert result.errors == (
+        AlertValidationError(field="resource_id", code="invalid_value"),
+    )
+
+
+def test_validator_keeps_resource_types_extensible_across_providers():
+    gcp = CrossCloudAlertValidator().validate(
+        dict(GCP_LABELS, resource_type="future_accelerator_pool")
+    )
+    aws = CrossCloudAlertValidator().validate(
+        dict(AWS_LABELS, resource_type="future_vector_store")
+    )
+
+    assert gcp.is_valid is True
+    assert aws.is_valid is True
 
 
 @pytest.mark.parametrize(
@@ -118,7 +189,11 @@ def test_validator_rejects_aws_scope_ids_that_are_not_twelve_digits(scope_id: st
 )
 def test_validator_accepts_gcp_scope_ids_at_the_exact_length_boundaries(scope_id: str):
     result = CrossCloudAlertValidator().validate(
-        dict(GCP_LABELS, cloud_scope_id=scope_id)
+        dict(
+            GCP_LABELS,
+            cloud_scope_id=scope_id,
+            resource_id=f"projects/{scope_id}/zones/asia-east1-a/instances/vm-1",
+        )
     )
 
     assert result.is_valid is True
@@ -181,7 +256,9 @@ def test_incident_identity_is_canonical_and_ignores_label_input_order():
     identity = make_incident_identity(SOURCE_ONE, GCP_LABELS)
     reordered = make_incident_identity(SOURCE_ONE, dict(reversed(GCP_LABELS.items())))
 
-    assert identity == "6ad1e874633e960f554aec2bb32a092f04eaa3e63c1870d047709c527b275c98"
+    assert (
+        identity == "6ad1e874633e960f554aec2bb32a092f04eaa3e63c1870d047709c527b275c98"
+    )
     assert reordered == identity
 
 
@@ -189,10 +266,23 @@ def test_incident_identity_is_canonical_and_ignores_label_input_order():
     ("source_id", "labels"),
     [
         (SOURCE_TWO, GCP_LABELS),
-        (SOURCE_ONE, dict(GCP_LABELS, cloud_provider="aws", cloud_scope_id="123456789012")),
-        (SOURCE_ONE, dict(GCP_LABELS, cloud_scope_id="another-project")),
+        (SOURCE_ONE, AWS_LABELS),
+        (
+            SOURCE_ONE,
+            dict(
+                GCP_LABELS,
+                cloud_scope_id="another-project",
+                resource_id="projects/another-project/zones/asia-east1-a/instances/vm-1",
+            ),
+        ),
         (SOURCE_ONE, dict(GCP_LABELS, resource_type="gce_instance")),
-        (SOURCE_ONE, dict(GCP_LABELS, resource_id="projects/p/zones/asia-east1-a/instances/vm-1")),
+        (
+            SOURCE_ONE,
+            dict(
+                GCP_LABELS,
+                resource_id="projects/svc-lx-afa-01-uat-1b9a87/zones/asia-east1-a/instances/vm-1",
+            ),
+        ),
         (SOURCE_ONE, dict(GCP_LABELS, alertname="GkePodCrashLoop")),
     ],
     ids=["source", "provider", "scope", "resource-type", "resource-id", "alertname"],
@@ -202,7 +292,9 @@ def test_incident_identity_changes_for_each_canonical_component(
 ):
     identity = make_incident_identity(source_id, labels)
 
-    assert identity != "6ad1e874633e960f554aec2bb32a092f04eaa3e63c1870d047709c527b275c98"
+    assert (
+        identity != "6ad1e874633e960f554aec2bb32a092f04eaa3e63c1870d047709c527b275c98"
+    )
 
 
 def test_incident_identity_ignores_noncanonical_labels_and_annotations():

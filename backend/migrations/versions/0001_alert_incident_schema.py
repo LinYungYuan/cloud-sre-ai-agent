@@ -34,7 +34,8 @@ DDL = (
         name TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        UNIQUE (team_id, name)
+        UNIQUE (team_id, name),
+        UNIQUE (team_id, id)
     )""",
     """CREATE TABLE environments (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -42,7 +43,8 @@ DDL = (
         name TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        UNIQUE (project_id, name)
+        UNIQUE (project_id, name),
+        UNIQUE (project_id, id)
     )""",
     """CREATE TABLE services (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -50,7 +52,8 @@ DDL = (
         name TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        UNIQUE (environment_id, name)
+        UNIQUE (environment_id, name),
+        UNIQUE (environment_id, id)
     )""",
     """CREATE TABLE subjects (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -79,7 +82,9 @@ DDL = (
         enabled BOOLEAN NOT NULL DEFAULT true,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        UNIQUE (project_id, environment_id, name)
+        UNIQUE (project_id, environment_id, name),
+        FOREIGN KEY (project_id, environment_id)
+            REFERENCES environments(project_id, id)
     )""",
     """CREATE TABLE webhook_deliveries (
         id UUID NOT NULL DEFAULT gen_random_uuid(),
@@ -88,6 +93,7 @@ DDL = (
         source_id UUID NOT NULL REFERENCES grafana_sources(id),
         token_id TEXT,
         body_hash TEXT NOT NULL,
+        raw_body BYTEA NOT NULL,
         raw_payload JSONB NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('RECEIVED', 'PROCESSED', 'DUPLICATE', 'VALIDATION_FAILED', 'REJECTED', 'FAILED')),
         processed_at TIMESTAMPTZ,
@@ -156,7 +162,16 @@ DDL = (
         created_by UUID REFERENCES subjects(id),
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        CHECK (num_nonnulls(team_id, project_id, environment_id, service_id) >= 1)
+        CHECK (num_nonnulls(team_id, project_id, environment_id, service_id) >= 1),
+        CHECK (team_id IS NULL OR environment_id IS NULL OR project_id IS NOT NULL),
+        CHECK (project_id IS NULL OR service_id IS NULL OR environment_id IS NOT NULL),
+        CHECK (team_id IS NULL OR service_id IS NULL OR
+               (project_id IS NOT NULL AND environment_id IS NOT NULL)),
+        FOREIGN KEY (team_id, project_id) REFERENCES projects(team_id, id),
+        FOREIGN KEY (project_id, environment_id)
+            REFERENCES environments(project_id, id),
+        FOREIGN KEY (environment_id, service_id)
+            REFERENCES services(environment_id, id)
     )""",
     """CREATE TABLE incidents (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -178,7 +193,12 @@ DDL = (
         reopened_from_incident_id UUID REFERENCES incidents(id),
         version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        FOREIGN KEY (team_id, project_id) REFERENCES projects(team_id, id),
+        FOREIGN KEY (project_id, environment_id)
+            REFERENCES environments(project_id, id),
+        FOREIGN KEY (environment_id, service_id)
+            REFERENCES services(environment_id, id)
     )""",
     """CREATE TABLE incident_alerts (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -250,7 +270,16 @@ DDL = (
         raw_result_reference TEXT NOT NULL,
         content_hash TEXT NOT NULL,
         PRIMARY KEY (id, partition_timestamp),
-        CHECK (time_window_end >= time_window_start)
+        CHECK (time_window_end >= time_window_start),
+        CHECK (team_id IS NULL OR environment_id IS NULL OR project_id IS NOT NULL),
+        CHECK (project_id IS NULL OR service_id IS NULL OR environment_id IS NOT NULL),
+        CHECK (team_id IS NULL OR service_id IS NULL OR
+               (project_id IS NOT NULL AND environment_id IS NOT NULL)),
+        FOREIGN KEY (team_id, project_id) REFERENCES projects(team_id, id),
+        FOREIGN KEY (project_id, environment_id)
+            REFERENCES environments(project_id, id),
+        FOREIGN KEY (environment_id, service_id)
+            REFERENCES services(environment_id, id)
     ) PARTITION BY RANGE (partition_timestamp)""",
     """CREATE TABLE rca_hypotheses (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

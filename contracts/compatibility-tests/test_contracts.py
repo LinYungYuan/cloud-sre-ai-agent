@@ -11,7 +11,9 @@ from jsonschema.exceptions import ValidationError
 sys.path.insert(0, str(Path(__file__).parents[2]))
 
 validate_all = import_module("scripts.contract_check.check_contracts").validate_all
-validate_example = import_module("scripts.contract_check.check_contracts")._validate_example
+validate_example = import_module(
+    "scripts.contract_check.check_contracts"
+)._validate_example
 
 
 ROOT = Path(__file__).parents[2]
@@ -93,11 +95,14 @@ def test_cross_cloud_grafana_fixtures_use_the_standard_v1_envelope(
 def test_grafana_webhook_contract_locks_platform_boundary():
     operation = _contract()["paths"]["/webhooks/v1/grafana/{sourceId}"]["post"]
     schemas = _contract()["components"]["schemas"]
+    assert schemas["GrafanaWebhook"]["properties"]["alerts"]["minItems"] == 1
 
     assert operation["security"] == [{"bearerAuth": []}]
     assert "1 MiB" in operation["description"]
     for status in ("400", "401", "413", "500"):
-        assert set(operation["responses"][status]["content"]) == {"application/problem+json"}
+        assert set(operation["responses"][status]["content"]) == {
+            "application/problem+json"
+        }
 
     expected_alert_fields = {
         "status",
@@ -264,15 +269,21 @@ def test_operator_mutations_declare_a_concurrency_or_idempotency_header():
                     if _resolve_local_ref(contract, parameter)["name"]
                     in {"Idempotency-Key", "If-Match"}
                 ]
-                assert all(parameter["in"] == "header" for parameter in safety_parameters)
-                assert all(parameter["required"] is True for parameter in safety_parameters)
+                assert all(
+                    parameter["in"] == "header" for parameter in safety_parameters
+                )
+                assert all(
+                    parameter["required"] is True for parameter in safety_parameters
+                )
 
 
 def test_operator_collection_schemas_are_cursor_pages_without_offsets():
     contract = _operator_contract()
     schemas = contract["components"]["schemas"]
     cursor_pages = {
-        name: schema for name, schema in schemas.items() if name.startswith("CursorPage")
+        name: schema
+        for name, schema in schemas.items()
+        if name.startswith("CursorPage")
     }
 
     assert cursor_pages
@@ -294,12 +305,10 @@ def test_operator_collection_schemas_are_cursor_pages_without_offsets():
     }
     for path, page_schema in expected_page_by_path.items():
         operation = contract["paths"][path]["get"]
-        response_schema = operation["responses"]["200"]["content"][
-            "application/json"
-        ]["schema"]
-        assert response_schema == {
-            "$ref": f"#/components/schemas/{page_schema}"
-        }, path
+        response_schema = operation["responses"]["200"]["content"]["application/json"][
+            "schema"
+        ]
+        assert response_schema == {"$ref": f"#/components/schemas/{page_schema}"}, path
         assert "offset" not in {
             _resolve_local_ref(contract, parameter)["name"]
             for parameter in operation.get("parameters", [])

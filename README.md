@@ -73,6 +73,13 @@ make test-contracts
 
 ## Runtime configuration
 
+The backend ASGI entry point is `sre_agent.api.main:app`. Backend settings are
+validated during application lifespan startup rather than module import. See
+[`backend/README.md`](backend/README.md) for the required `DATABASE_URL`, opaque
+Grafana bearer-token JSON format, rotation guidance, and the independently
+runnable partition-maintenance command. Invalid backend configuration fails
+startup instead of turning valid webhook requests into generic 500 responses.
+
 Before Angular starts, the frontend loads `/config.json`. Deployments must serve
 all of these fields:
 

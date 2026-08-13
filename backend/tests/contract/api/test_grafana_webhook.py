@@ -21,6 +21,7 @@ from sre_agent.api.main import create_app
 from sre_agent.application.alerts.ingest_grafana_alerts import (
     IngestGrafanaAlerts,
     IngestionResult,
+    StaticClassifierProvider,
 )
 from sre_agent.domain.alerts.classification import ClassificationResult
 from sre_agent.integrations.grafana.authenticator import GrafanaUnauthorized
@@ -60,6 +61,7 @@ VALID_BODY = json.dumps(
     },
     separators=(",", ":"),
 ).encode()
+MAX_BODY_BYTES = 1_048_576
 
 
 class RecordingAuthenticator:
@@ -183,7 +185,7 @@ class NeverClassifier:
 def _real_ingestion(uow: ObservableFakeUnitOfWork) -> IngestGrafanaAlerts:
     return IngestGrafanaAlerts(
         uow_factory=lambda: uow,
-        classifier=NeverClassifier(),
+        classifier_provider=StaticClassifierProvider(NeverClassifier()),
         max_body_bytes=1_048_576,
     )
 
@@ -320,6 +322,74 @@ async def test_authentication_failure_never_calls_ingestion_or_leaks_credentials
     assert ingestion.calls == []
     assert supplied_credential not in response.text
     assert "sensitive auth error" not in problem.get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_authentication_failure_does_not_consume_request_body() -> None:
+    authenticator = RecordingAuthenticator(GrafanaUnauthorized("invalid"))
+    ingestion = RecordingIngestion()
+    receive_count = 0
+
+    async def body_that_must_not_be_received() -> AsyncIterator[bytes]:
+        nonlocal receive_count
+        receive_count += 1
+        raise AssertionError("unauthorized request body was consumed")
+        yield b"unreachable"
+
+    async with _client(authenticator, ingestion) as (client, _):
+        response = await client.post(
+            f"/webhooks/v1/grafana/{SOURCE_ID}",
+            content=body_that_must_not_be_received(),
+            headers=_headers(),
+        )
+
+    _assert_problem(response, status=401, title="Unauthorized")
+    assert receive_count == 0
+    assert ingestion.calls == []
+
+
+@pytest.mark.asyncio
+async def test_authenticated_body_one_byte_over_limit_stops_receiving_immediately() -> (
+    None
+):
+    authenticator = RecordingAuthenticator()
+    ingestion = RecordingIngestion()
+    yielded_chunks = 0
+
+    async def oversized_body() -> AsyncIterator[bytes]:
+        nonlocal yielded_chunks
+        for chunk in (b"x" * MAX_BODY_BYTES, b"y"):
+            yielded_chunks += 1
+            yield chunk
+        raise AssertionError("receiver read beyond max_bytes + 1")
+
+    async with _client(authenticator, ingestion) as (client, _):
+        response = await client.post(
+            f"/webhooks/v1/grafana/{SOURCE_ID}",
+            content=oversized_body(),
+            headers=_headers(),
+        )
+
+    _assert_problem(response, status=413, title="Payload too large")
+    assert yielded_chunks == 2
+    assert ingestion.calls == []
+
+
+@pytest.mark.asyncio
+async def test_authenticated_body_at_exact_limit_is_accepted() -> None:
+    authenticator = RecordingAuthenticator()
+    ingestion = RecordingIngestion()
+    exact_body = b"x" * MAX_BODY_BYTES
+
+    async with _client(authenticator, ingestion) as (client, _):
+        response = await client.post(
+            f"/webhooks/v1/grafana/{SOURCE_ID}",
+            content=exact_body,
+            headers=_headers(),
+        )
+
+    assert response.status_code == 202
+    assert ingestion.calls[0][2] == exact_body
 
 
 @pytest.mark.asyncio

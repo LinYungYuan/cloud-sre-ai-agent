@@ -37,6 +37,7 @@ class AlertRepository(Protocol):
         token_id: str,
         received_at: datetime,
         body_hash: str,
+        raw_body: bytes,
         raw_payload: object,
     ) -> UUID: ...
 
@@ -125,6 +126,7 @@ class SqlAlchemyAlertRepository:
         token_id: str,
         received_at: datetime,
         body_hash: str,
+        raw_body: bytes,
         raw_payload: object,
     ) -> UUID:
         delivery_id = uuid4()
@@ -133,10 +135,10 @@ class SqlAlchemyAlertRepository:
                 """
                 INSERT INTO webhook_deliveries (
                     id, partition_timestamp, received_at, source_id, token_id,
-                    body_hash, raw_payload, status
+                    body_hash, raw_body, raw_payload, status
                 ) VALUES (
                     :id, :received_at, :received_at, :source_id, :token_id,
-                    :body_hash, CAST(:raw_payload AS jsonb), 'RECEIVED'
+                    :body_hash, :raw_body, CAST(:raw_payload AS jsonb), 'RECEIVED'
                 )
                 """
             ),
@@ -146,6 +148,7 @@ class SqlAlchemyAlertRepository:
                 "source_id": source_id,
                 "token_id": token_id,
                 "body_hash": body_hash,
+                "raw_body": raw_body,
                 "raw_payload": _json(raw_payload),
             },
         )

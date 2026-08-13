@@ -34,7 +34,9 @@ class GrafanaAlert(BaseModel):
         default=None, validation_alias="silenceURL", serialization_alias="silenceURL"
     )
     dashboard_url: AnyUrl | Literal[""] | None = Field(
-        default=None, validation_alias="dashboardURL", serialization_alias="dashboardURL"
+        default=None,
+        validation_alias="dashboardURL",
+        serialization_alias="dashboardURL",
     )
     panel_url: AnyUrl | Literal[""] | None = Field(
         default=None, validation_alias="panelURL", serialization_alias="panelURL"
@@ -52,12 +54,14 @@ class GrafanaWebhook(BaseModel):
     org_id: int | None = Field(
         default=None, validation_alias="orgId", serialization_alias="orgId"
     )
-    alerts: list[GrafanaAlert]
+    alerts: list[GrafanaAlert] = Field(min_length=1)
     group_labels: dict[str, str] | None = Field(
         default=None, validation_alias="groupLabels", serialization_alias="groupLabels"
     )
     common_labels: dict[str, str] | None = Field(
-        default=None, validation_alias="commonLabels", serialization_alias="commonLabels"
+        default=None,
+        validation_alias="commonLabels",
+        serialization_alias="commonLabels",
     )
     common_annotations: dict[str, str] | None = Field(
         default=None,
@@ -89,7 +93,9 @@ class GrafanaWebhook(BaseModel):
 
 def parse_grafana_body(raw_body: bytes, max_bytes: int) -> GrafanaWebhook:
     if len(raw_body) > max_bytes:
-        raise GrafanaPayloadTooLarge("Grafana webhook body exceeds the configured limit")
+        raise GrafanaPayloadTooLarge(
+            "Grafana webhook body exceeds the configured limit"
+        )
 
     try:
         webhook = GrafanaWebhook.model_validate_json(raw_body)

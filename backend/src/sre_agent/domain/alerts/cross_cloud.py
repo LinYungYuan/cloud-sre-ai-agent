@@ -30,6 +30,9 @@ INCIDENT_IDENTITY_FIELDS = (
 
 _GCP_PROJECT_ID = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
 _AWS_ACCOUNT_ID = re.compile(r"^[0-9]{12}$")
+_RESOURCE_TYPE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+_GCP_RESOURCE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._~+%-]*$")
+_AWS_ARN_FIELD = re.compile(r"^[a-z0-9-]+$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +55,12 @@ class CrossCloudAlertValidator:
             if not isinstance(value, str) or not value.strip():
                 errors.append(AlertValidationError(field=field, code="required"))
                 continue
-            if self._is_invalid_value(field, value, labels.get("cloud_provider")):
+            if self._is_invalid_value(
+                field,
+                value,
+                labels.get("cloud_provider"),
+                labels.get("cloud_scope_id"),
+            ):
                 errors.append(AlertValidationError(field=field, code="invalid_value"))
 
         return CrossCloudValidationResult(
@@ -65,14 +73,30 @@ class CrossCloudAlertValidator:
         field: str,
         value: str,
         cloud_provider: str | None,
+        cloud_scope_id: str | None,
     ) -> bool:
         return (
-            field == "cloud_provider" and value not in ALLOWED_CLOUD_PROVIDERS
-        ) or (
-            field == "cloud_scope_id"
-            and not CrossCloudAlertValidator._is_valid_scope_id(cloud_provider, value)
-        ) or (field == "severity" and value not in ALLOWED_SEVERITIES) or (
-            field == "signal_type" and value not in ALLOWED_SIGNAL_TYPES
+            (field == "cloud_provider" and value not in ALLOWED_CLOUD_PROVIDERS)
+            or (
+                field == "cloud_scope_id"
+                and not CrossCloudAlertValidator._is_valid_scope_id(
+                    cloud_provider, value
+                )
+            )
+            or (
+                field == "resource_type"
+                and (len(value) > 64 or _RESOURCE_TYPE.fullmatch(value) is None)
+            )
+            or (
+                field == "resource_id"
+                and not CrossCloudAlertValidator._is_valid_resource_id(
+                    cloud_provider,
+                    cloud_scope_id,
+                    value,
+                )
+            )
+            or (field == "severity" and value not in ALLOWED_SEVERITIES)
+            or (field == "signal_type" and value not in ALLOWED_SIGNAL_TYPES)
         )
 
     @staticmethod
@@ -81,6 +105,50 @@ class CrossCloudAlertValidator:
             return _AWS_ACCOUNT_ID.fullmatch(scope_id) is not None
         if cloud_provider == "gcp":
             return _GCP_PROJECT_ID.fullmatch(scope_id) is not None
+        return True
+
+    @staticmethod
+    def _is_valid_resource_id(
+        cloud_provider: str | None,
+        cloud_scope_id: str | None,
+        resource_id: str,
+    ) -> bool:
+        if cloud_provider == "gcp":
+            if (
+                cloud_scope_id is None
+                or _GCP_PROJECT_ID.fullmatch(cloud_scope_id) is None
+            ):
+                return True
+            segments = resource_id.split("/")
+            return (
+                cloud_scope_id is not None
+                and len(segments) >= 4
+                and len(segments) % 2 == 0
+                and segments[:2] == ["projects", cloud_scope_id]
+                and all(
+                    _GCP_RESOURCE_SEGMENT.fullmatch(segment) is not None
+                    for segment in segments[2:]
+                )
+            )
+        if cloud_provider == "aws":
+            if (
+                cloud_scope_id is None
+                or _AWS_ACCOUNT_ID.fullmatch(cloud_scope_id) is None
+            ):
+                return True
+            arn = resource_id.split(":", 5)
+            return (
+                cloud_scope_id is not None
+                and len(arn) == 6
+                and arn[0] == "arn"
+                and arn[1].startswith("aws")
+                and _AWS_ARN_FIELD.fullmatch(arn[1]) is not None
+                and _AWS_ARN_FIELD.fullmatch(arn[2]) is not None
+                and (not arn[3] or _AWS_ARN_FIELD.fullmatch(arn[3]) is not None)
+                and arn[4] == cloud_scope_id
+                and bool(arn[5])
+                and not any(character.isspace() for character in arn[5])
+            )
         return True
 
 

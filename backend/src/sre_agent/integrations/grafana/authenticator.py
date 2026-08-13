@@ -22,7 +22,9 @@ class GrafanaTokenAuthenticator:
         credential = self._parse_bearer_credential(authorization)
         matching_token_id: str | None = None
 
-        for token_id, token in self._secret_provider.get_grafana_tokens(source_id).items():
+        for token_id, token in self._secret_provider.get_grafana_tokens(
+            source_id
+        ).items():
             token_matches = hmac.compare_digest(credential, token.get_secret_value())
             if token_matches and matching_token_id is None:
                 matching_token_id = token_id
@@ -46,3 +48,17 @@ class GrafanaTokenAuthenticator:
             raise GrafanaUnauthorized("invalid Grafana authorization")
 
         return credential
+
+
+class ConfiguredGrafanaSecretProvider:
+    def __init__(
+        self,
+        tokens: Mapping[UUID, Mapping[str, SecretStr]],
+    ) -> None:
+        self._tokens = {
+            source_id: dict(source_tokens)
+            for source_id, source_tokens in tokens.items()
+        }
+
+    def get_grafana_tokens(self, source_id: UUID) -> Mapping[str, SecretStr]:
+        return self._tokens.get(source_id, {})

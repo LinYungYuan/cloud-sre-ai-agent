@@ -11,9 +11,13 @@ from sre_agent.api.dependencies import (
 )
 from sre_agent.application.alerts.ingest_grafana_alerts import IngestGrafanaAlerts
 from sre_agent.integrations.grafana.authenticator import GrafanaTokenAuthenticator
-from sre_agent.integrations.grafana.payloads import GrafanaPayloadInvalid
+from sre_agent.integrations.grafana.payloads import (
+    GrafanaPayloadInvalid,
+    GrafanaPayloadTooLarge,
+)
 
 router = APIRouter(prefix="/webhooks/v1/grafana", tags=["grafana-webhook"])
+MAX_BODY_BYTES = 1_048_576
 
 
 class WebhookAccepted(BaseModel):
@@ -43,11 +47,11 @@ async def ingest_grafana_webhook(
     if _media_type(request.headers.get("content-type")) != "application/json":
         raise GrafanaPayloadInvalid("Grafana webhook Content-Type must be JSON")
 
-    raw_body = await request.body()
     token_id = authenticator.verify(
         source_id,
         request.headers.get("authorization"),
     )
+    raw_body = await _read_bounded_body(request, MAX_BODY_BYTES)
     result = await ingestion.execute(
         source_id=source_id,
         token_id=token_id,
@@ -64,3 +68,17 @@ def _media_type(content_type: str | None) -> str:
     if content_type is None:
         return ""
     return content_type.partition(";")[0].strip().lower()
+
+
+async def _read_bounded_body(request: Request, max_bytes: int) -> bytes:
+    body = bytearray()
+    async for chunk in request.stream():
+        remaining = max_bytes + 1 - len(body)
+        if remaining <= 0:
+            break
+        body.extend(chunk[:remaining])
+        if len(body) > max_bytes:
+            raise GrafanaPayloadTooLarge(
+                "Grafana webhook body exceeds the configured limit"
+            )
+    return bytes(body)

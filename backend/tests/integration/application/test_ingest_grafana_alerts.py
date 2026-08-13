@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import (
 from sre_agent.application.alerts.ingest_grafana_alerts import (
     IngestGrafanaAlerts,
     IngestionResult,
+    StaticClassifierProvider,
 )
 from sre_agent.domain.alerts.classification import (
     AlertClassifier,
@@ -179,7 +180,7 @@ def _use_case(
 ) -> IngestGrafanaAlerts:
     return IngestGrafanaAlerts(
         uow_factory=uow_factory or (lambda: SqlAlchemyUnitOfWork(session_factory)),
-        classifier=_classifier(),
+        classifier_provider=StaticClassifierProvider(_classifier()),
         max_body_bytes=1_048_576,
     )
 
@@ -389,6 +390,28 @@ async def test_new_gcp_firing_is_stored_atomically_with_validation_and_one_rca(
 
 
 @pytest.mark.asyncio
+async def test_delivery_round_trips_exact_webhook_bytes(session_factory):
+    raw_alert = json.dumps(_alert("exact-wire-body"), separators=(",", ":"))
+    raw_body = (
+        "{\n"
+        '  "receiver": "sre-agent",\n'
+        '  "status": "firing",\n'
+        '  "wireNumber": 1.00,\n'
+        '  "wireEscape": "\\u0061",\n'
+        '  "duplicate": "first",\n'
+        '  "duplicate": "second",\n'
+        f'  "alerts": [{raw_alert}]\n'
+        "}\n"
+    ).encode()
+
+    await _use_case(session_factory).execute(SOURCE_ID, TOKEN_ID, raw_body, RECEIVED_AT)
+
+    delivery = (await _rows(session_factory, "SELECT * FROM webhook_deliveries"))[0]
+    assert delivery["raw_body"] == raw_body
+    assert delivery["raw_payload"] == json.loads(raw_body)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("fixture_name", "expected_provider", "label_severity", "incident_severity"),
     [
@@ -443,9 +466,7 @@ async def test_approved_cross_cloud_fixture_without_legacy_project_creates_queue
     )
     if expected_provider == "gcp":
         assert delivery["raw_payload"]["grafanaTopLevelExtension"] == "retain-me"
-        assert event["raw_payload"]["grafanaExtension"] == {
-            "runbookOwner": "payments"
-        }
+        assert event["raw_payload"]["grafanaExtension"] == {"runbookOwner": "payments"}
 
 
 @pytest.mark.asyncio
@@ -549,9 +570,7 @@ async def test_repeated_invalid_delivery_keeps_each_delivery_validation_failed(
     ]
     event = (await _rows(session_factory, "SELECT * FROM alert_events"))[0]
     assert event["validation_status"] == "VALIDATION_FAILED"
-    assert event["validation_errors"] == [
-        {"field": "resource_id", "code": "required"}
-    ]
+    assert event["validation_errors"] == [{"field": "resource_id", "code": "required"}]
     await _assert_table_counts(
         session_factory,
         {
@@ -845,15 +864,76 @@ async def test_invalid_enum_retains_stable_validation_error_only(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cloud_provider", "cloud_scope_id", "resource_type", "resource_id"),
+    [
+        (
+            "gcp",
+            "checkout-prod",
+            "gke-service",
+            "projects/checkout-prod/locations/asia-east1/services/api",
+        ),
+        ("gcp", "checkout-prod", "gke_service", "projects/checkout-prod"),
+        (
+            "gcp",
+            "checkout-prod",
+            "gke_service",
+            "projects/other-project/locations/asia-east1/services/api",
+        ),
+        ("aws", "123456789012", "rds_instance", "123456789012"),
+        (
+            "aws",
+            "123456789012",
+            "rds_instance",
+            "arn:aws:rds:ap-northeast-1:210987654321:db:orders-prod",
+        ),
+    ],
+)
+async def test_invalid_resource_identity_is_retained_without_downstream_work(
+    session_factory,
+    cloud_provider: str,
+    cloud_scope_id: str,
+    resource_type: str,
+    resource_id: str,
+):
+    alert = _alert(
+        "invalid-resource-identity",
+        cloud_provider=cloud_provider,
+        label_overrides={
+            "cloud_scope_id": cloud_scope_id,
+            "resource_type": resource_type,
+            "resource_id": resource_id,
+        },
+    )
+
+    result = await _use_case(session_factory).execute(
+        SOURCE_ID, TOKEN_ID, _body(alert), RECEIVED_AT
+    )
+
+    expected_field = (
+        "resource_type" if resource_type == "gke-service" else "resource_id"
+    )
+    await _assert_validation_retention(
+        session_factory,
+        result,
+        alert,
+        [{"field": expected_field, "code": "invalid_value"}],
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("field", ("team", "project", "environment", "service"))
 async def test_unknown_internal_scope_retains_unknown_scope_error_only(
     session_factory,
     field: str,
 ):
     label_key = "cloud_scope_id" if field == "project" else field
-    alert = _alert(
-        "unknown-scope", label_overrides={label_key: f"unknown-{field}"}
-    )
+    label_overrides = {label_key: f"unknown-{field}"}
+    if field == "project":
+        label_overrides["resource_id"] = (
+            "projects/unknown-project/locations/asia-east1/services/api"
+        )
+    alert = _alert("unknown-scope", label_overrides=label_overrides)
 
     result = await _use_case(session_factory).execute(
         SOURCE_ID, TOKEN_ID, _body(alert), RECEIVED_AT

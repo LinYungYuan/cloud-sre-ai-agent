@@ -7,11 +7,15 @@ import pytest
 from sre_agent.integrations.grafana.payloads import (
     GrafanaPayloadInvalid,
     GrafanaPayloadTooLarge,
+    GrafanaWebhook,
     parse_grafana_body,
 )
 
 EXAMPLE_PATH = (
-    Path(__file__).resolve().parents[5] / "contracts" / "examples" / "grafana-firing.json"
+    Path(__file__).resolve().parents[5]
+    / "contracts"
+    / "examples"
+    / "grafana-firing.json"
 )
 
 
@@ -22,7 +26,9 @@ def test_parse_grafana_body_preserves_the_exact_original_bytes_and_extensions():
 
     assert webhook.raw_body is raw_body
     assert webhook.model_extra == {"grafanaTopLevelExtension": "retain-me"}
-    assert webhook.alerts[0].model_extra == {"grafanaExtension": {"runbookOwner": "payments"}}
+    assert webhook.alerts[0].model_extra == {
+        "grafanaExtension": {"runbookOwner": "payments"}
+    }
 
 
 def test_parse_grafana_body_normalizes_offset_timestamps_to_aware_utc():
@@ -56,6 +62,15 @@ def test_parse_grafana_body_rejects_invalid_json_without_revealing_the_raw_body(
 
     assert supplied_raw_body.decode() not in str(error.value)
     assert "do-not-log-me" not in str(error.value)
+
+
+def test_parse_grafana_body_rejects_empty_alerts_and_schema_requires_one_item():
+    raw_body = b'{"status":"firing","alerts":[]}'
+
+    with pytest.raises(GrafanaPayloadInvalid):
+        parse_grafana_body(raw_body, max_bytes=1_048_576)
+
+    assert GrafanaWebhook.model_json_schema()["properties"]["alerts"]["minItems"] == 1
 
 
 def test_parse_grafana_body_rejects_a_body_over_one_mebibyte_without_revealing_it():
@@ -93,7 +108,7 @@ def test_parse_grafana_body_accepts_a_valid_body_at_exactly_one_mebibyte():
 
 
 def test_parse_grafana_body_rejects_naive_timestamps_without_revealing_the_raw_body():
-    supplied_raw_body = b'''{
+    supplied_raw_body = b"""{
         "status": "firing",
         "alerts": [{
             "status": "firing",
@@ -105,7 +120,7 @@ def test_parse_grafana_body_rejects_naive_timestamps_without_revealing_the_raw_b
             "generatorURL": "https://grafana.example.com/alert/1",
             "fingerprint": "do-not-log-me"
         }]
-    }'''
+    }"""
 
     with pytest.raises(GrafanaPayloadInvalid) as error:
         parse_grafana_body(supplied_raw_body, max_bytes=1_048_576)

@@ -38,6 +38,19 @@ class Classifier(Protocol):
     ) -> ClassificationResult: ...
 
 
+class ClassifierProvider(Protocol):
+    def for_source(self, source_id: UUID) -> Classifier: ...
+
+
+class StaticClassifierProvider:
+    def __init__(self, classifier: Classifier) -> None:
+        self._classifier = classifier
+
+    def for_source(self, source_id: UUID) -> Classifier:
+        del source_id
+        return self._classifier
+
+
 @dataclass(frozen=True, slots=True)
 class IngestionResult:
     delivery_id: UUID
@@ -50,11 +63,11 @@ class IngestGrafanaAlerts:
         self,
         *,
         uow_factory: Callable[[], UnitOfWork],
-        classifier: Classifier,
+        classifier_provider: ClassifierProvider,
         max_body_bytes: int,
     ) -> None:
         self._uow_factory = uow_factory
-        self._classifier = classifier
+        self._classifier_provider = classifier_provider
         self._max_body_bytes = max_body_bytes
 
     async def execute(
@@ -65,6 +78,7 @@ class IngestGrafanaAlerts:
         received_at: datetime,
     ) -> IngestionResult:
         accepted_at = require_aware_utc(received_at)
+        classifier = self._classifier_provider.for_source(source_id)
         webhook = parse_grafana_body(raw_body, self._max_body_bytes)
         canonical_events = normalize_alerts(source_id, webhook)
         raw_document = json.loads(raw_body)
@@ -81,6 +95,7 @@ class IngestGrafanaAlerts:
                 token_id=token_id,
                 received_at=accepted_at,
                 body_hash=body_hash,
+                raw_body=raw_body,
                 raw_payload=raw_document,
             )
 
@@ -91,7 +106,7 @@ class IngestGrafanaAlerts:
                 validation_errors = list(validation.errors)
                 classification: ClassificationResult | None = None
                 if validation.is_valid:
-                    classification = self._classify(event)
+                    classification = self._classify(classifier, event)
                     if classification.status is not ClassificationStatus.CLASSIFIED:
                         validation_errors.extend(
                             AlertValidationError(field=field, code="unknown_scope")
@@ -178,8 +193,12 @@ class IngestGrafanaAlerts:
 
         return IngestionResult(delivery_id, accepted_at, tuple(incident_ids))
 
-    def _classify(self, event: CanonicalAlertEvent) -> ClassificationResult:
-        return self._classifier.classify(
+    @staticmethod
+    def _classify(
+        classifier: Classifier,
+        event: CanonicalAlertEvent,
+    ) -> ClassificationResult:
+        return classifier.classify(
             event.labels,
             rule_uid=event.labels.get("grafana_rule_uid")
             or event.labels.get("rule_uid"),

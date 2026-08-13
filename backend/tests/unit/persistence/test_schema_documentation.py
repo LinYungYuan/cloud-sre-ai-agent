@@ -2,6 +2,7 @@
 
 import importlib.util
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 
@@ -62,6 +63,167 @@ def _documented_table_definitions(documentation: str) -> dict[str, str]:
     return definitions
 
 
+def _normalize_sql(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().rstrip(";"))
+
+
+def _split_top_level(value: str) -> tuple[str, ...]:
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    quoted = False
+    index = 0
+    while index < len(value):
+        character = value[index]
+        if character == "'":
+            if quoted and index + 1 < len(value) and value[index + 1] == "'":
+                index += 2
+                continue
+            quoted = not quoted
+        elif not quoted:
+            if character == "(":
+                depth += 1
+            elif character == ")":
+                depth -= 1
+            elif character == "," and depth == 0:
+                parts.append(value[start:index])
+                start = index + 1
+        index += 1
+    parts.append(value[start:])
+    return tuple(part for part in parts if part.strip())
+
+
+def _create_table_statements(sql: str) -> dict[str, str]:
+    statements: dict[str, str] = {}
+    pattern = re.compile(r"\bCREATE TABLE ([a-z_]+)\s*\(")
+    for match in pattern.finditer(sql):
+        depth = 1
+        quoted = False
+        index = match.end()
+        while index < len(sql) and depth:
+            character = sql[index]
+            if character == "'":
+                if quoted and index + 1 < len(sql) and sql[index + 1] == "'":
+                    index += 2
+                    continue
+                quoted = not quoted
+            elif not quoted:
+                if character == "(":
+                    depth += 1
+                elif character == ")":
+                    depth -= 1
+            index += 1
+        suffix_end = sql.find("\nCREATE ", index)
+        if suffix_end == -1:
+            suffix_end = len(sql)
+        statements[match.group(1)] = sql[match.start() : suffix_end].strip()
+    return statements
+
+
+@dataclass(frozen=True)
+class TableManifest:
+    columns: tuple[tuple[str, str], ...]
+    primary_keys: tuple[str, ...]
+    uniques: tuple[str, ...]
+    foreign_keys: tuple[str, ...]
+    checks: tuple[str, ...]
+    partition_clause: str | None
+
+
+def _table_manifest(statement: str) -> TableManifest:
+    opening = statement.index("(")
+    depth = 1
+    quoted = False
+    index = opening + 1
+    while index < len(statement) and depth:
+        character = statement[index]
+        if character == "'":
+            if quoted and index + 1 < len(statement) and statement[index + 1] == "'":
+                index += 2
+                continue
+            quoted = not quoted
+        elif not quoted:
+            if character == "(":
+                depth += 1
+            elif character == ")":
+                depth -= 1
+        index += 1
+
+    columns: list[tuple[str, str]] = []
+    primary_keys: list[str] = []
+    uniques: list[str] = []
+    foreign_keys: list[str] = []
+    checks: list[str] = []
+    for raw_entry in _split_top_level(statement[opening + 1 : index - 1]):
+        entry = _normalize_sql(raw_entry)
+        if entry.startswith("PRIMARY KEY"):
+            primary_keys.append(entry)
+        elif entry.startswith("UNIQUE"):
+            uniques.append(entry)
+        elif entry.startswith("FOREIGN KEY"):
+            foreign_keys.append(entry)
+        elif entry.startswith("CHECK"):
+            checks.append(entry)
+        else:
+            name, definition = entry.split(maxsplit=1)
+            columns.append((name, definition))
+            if " PRIMARY KEY" in f" {definition}":
+                primary_keys.append(f"{name} PRIMARY KEY")
+            if " UNIQUE" in f" {definition}":
+                uniques.append(f"{name} UNIQUE")
+            reference = re.search(r"REFERENCES [a-z_]+\s*\([^)]*\)", definition)
+            if reference:
+                foreign_keys.append(f"{name} {reference.group(0)}")
+            check_start = definition.find("CHECK (")
+            if check_start >= 0:
+                checks.append(f"{name} {definition[check_start:]}")
+
+    suffix = _normalize_sql(statement[index:])
+    partition = re.search(r"PARTITION BY RANGE\s*\([^)]*\)", suffix)
+    return TableManifest(
+        columns=tuple(columns),
+        primary_keys=tuple(sorted(primary_keys)),
+        uniques=tuple(sorted(uniques)),
+        foreign_keys=tuple(sorted(foreign_keys)),
+        checks=tuple(sorted(checks)),
+        partition_clause=partition.group(0) if partition else None,
+    )
+
+
+def _index_manifest(sql: str) -> dict[str, tuple[bool, str, str, str | None]]:
+    pattern = re.compile(
+        r"CREATE\s+(UNIQUE\s+)?INDEX\s+([a-z_]+)\s+ON\s+([a-z_]+)\s*"
+        r"(\([^;]*?\))(?:\s+WHERE\s+([^;\n]*(?:\n(?!CREATE)[^;\n]*)*))?",
+        re.IGNORECASE,
+    )
+    indexes: dict[str, tuple[bool, str, str, str | None]] = {}
+    for match in pattern.finditer(sql):
+        predicate = _normalize_sql(match.group(5)) if match.group(5) else None
+        indexes[match.group(2)] = (
+            bool(match.group(1)),
+            match.group(3),
+            _normalize_sql(match.group(4)),
+            predicate,
+        )
+    return indexes
+
+
+def test_schema_reference_canonical_manifest_matches_migration() -> None:
+    migration = _load_migration()
+    migration_sql = "\n".join(migration.DDL)
+    documentation_sql = _document_sql_blocks(
+        DOCUMENTATION_PATH.read_text(encoding="utf-8")
+    )
+    migration_tables = _create_table_statements(migration_sql)
+    documented_tables = _create_table_statements(documentation_sql)
+
+    assert set(migration_tables) <= set(documented_tables)
+    assert {
+        name: _table_manifest(statement) for name, statement in migration_tables.items()
+    } == {name: _table_manifest(documented_tables[name]) for name in migration_tables}
+    assert _index_manifest(migration_sql) == _index_manifest(documentation_sql)
+
+
 def test_schema_reference_covers_every_migration_parent_table() -> None:
     """Removing a documented parent table must be detected before release."""
     assert DOCUMENTATION_PATH.is_file(), "schema reference document is missing"
@@ -100,9 +262,7 @@ def test_schema_reference_documents_partitions_and_required_indexes() -> None:
             table_name, ""
         )
 
-    documented_indexes = set(
-        re.findall(r"\b(?:UNIQUE )?INDEX ([a-z_]+)", sql_blocks)
-    )
+    documented_indexes = set(re.findall(r"\b(?:UNIQUE )?INDEX ([a-z_]+)", sql_blocks))
     assert REQUIRED_INDEXES <= documented_indexes
 
 

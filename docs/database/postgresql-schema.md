@@ -27,7 +27,7 @@ UV_CACHE_DIR=.uv-cache uv run alembic upgrade head
 
 - 識別碼以 `UUID` 表示，預設由 `gen_random_uuid()` 生成。
 - 所有事件與生命週期時間使用 UTC 的 `TIMESTAMPTZ`；不要以無時區 timestamp 解讀資料。
-- 半結構化欄位使用 `JSONB`。`webhook_deliveries.raw_payload` 與 `alert_events.raw_payload` 是已接受原始 payload 的永久保留紀錄，不應覆寫或刪除以取代處理後資料。
+- 半結構化欄位使用 `JSONB`。`webhook_deliveries.raw_body BYTEA` 永久保存 webhook delivery 的精確 request bytes（含空白、key 順序、escape、數字字面值與重複 JSON key），`body_hash` 是這組精確 bytes 的 SHA-256；`webhook_deliveries.raw_payload` 另外保存解析後、可查詢的 JSONB。`alert_events.raw_payload` 只保存該筆 alert 的 JSONB，不重複整份 webhook bytes。這些 immutable 原始紀錄不應覆寫或刪除以取代處理後資料。
 - 任一 alert 驗證失敗時，已接受的 delivery 仍會保留並標記 `status = 'VALIDATION_FAILED'`；同一 webhook 內其他有效 alerts 仍可繼續處理。每筆已取得 dedup claim 的失敗 alert event 也會保留，使用 `validation_status = 'VALIDATION_FAILED'`，並將結構化失敗原因寫入 `validation_errors` JSONB array；原始 payload 保持不變，以便稽核、重播與修正 parser 後重新處理。通過驗證的 event 使用預設值 `VALID` 與空 array。
 - 六張分割母表以 `(id, partition_timestamp)` 為複合主鍵。參照分割表的外鍵必須同時保存識別碼與 `partition_timestamp`，才能定位到正確資料分區。
 
@@ -73,7 +73,8 @@ CREATE TABLE projects (
     name TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (team_id, name)
+    UNIQUE (team_id, name),
+    UNIQUE (team_id, id)
 )
 
 CREATE TABLE environments (
@@ -82,7 +83,8 @@ CREATE TABLE environments (
     name TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (project_id, name)
+    UNIQUE (project_id, name),
+    UNIQUE (project_id, id)
 )
 
 CREATE TABLE services (
@@ -91,7 +93,8 @@ CREATE TABLE services (
     name TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (environment_id, name)
+    UNIQUE (environment_id, name),
+    UNIQUE (environment_id, id)
 )
 
 CREATE TABLE subjects (
@@ -123,7 +126,9 @@ CREATE TABLE grafana_sources (
     enabled BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (project_id, environment_id, name)
+    UNIQUE (project_id, environment_id, name),
+    FOREIGN KEY (project_id, environment_id)
+        REFERENCES environments(project_id, id)
 )
 ```
 
@@ -175,7 +180,16 @@ CREATE TABLE classification_mappings (
     created_by UUID REFERENCES subjects(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CHECK (num_nonnulls(team_id, project_id, environment_id, service_id) >= 1)
+    CHECK (num_nonnulls(team_id, project_id, environment_id, service_id) >= 1),
+    CHECK (team_id IS NULL OR environment_id IS NULL OR project_id IS NOT NULL),
+    CHECK (project_id IS NULL OR service_id IS NULL OR environment_id IS NOT NULL),
+    CHECK (team_id IS NULL OR service_id IS NULL OR
+           (project_id IS NOT NULL AND environment_id IS NOT NULL)),
+    FOREIGN KEY (team_id, project_id) REFERENCES projects(team_id, id),
+    FOREIGN KEY (project_id, environment_id)
+        REFERENCES environments(project_id, id),
+    FOREIGN KEY (environment_id, service_id)
+        REFERENCES services(environment_id, id)
 )
 ```
 
@@ -204,7 +218,12 @@ CREATE TABLE incidents (
     reopened_from_incident_id UUID REFERENCES incidents(id),
     version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    FOREIGN KEY (team_id, project_id) REFERENCES projects(team_id, id),
+    FOREIGN KEY (project_id, environment_id)
+        REFERENCES environments(project_id, id),
+    FOREIGN KEY (environment_id, service_id)
+        REFERENCES services(environment_id, id)
 )
 
 CREATE TABLE incident_alerts (
@@ -348,6 +367,7 @@ CREATE TABLE webhook_deliveries (
     source_id UUID NOT NULL REFERENCES grafana_sources(id),
     token_id TEXT,
     body_hash TEXT NOT NULL,
+    raw_body BYTEA NOT NULL,
     raw_payload JSONB NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('RECEIVED', 'PROCESSED', 'DUPLICATE', 'VALIDATION_FAILED', 'REJECTED', 'FAILED')),
     processed_at TIMESTAMPTZ,
@@ -397,7 +417,16 @@ CREATE TABLE evidence_records (
     raw_result_reference TEXT NOT NULL,
     content_hash TEXT NOT NULL,
     PRIMARY KEY (id, partition_timestamp),
-    CHECK (time_window_end >= time_window_start)
+    CHECK (time_window_end >= time_window_start),
+    CHECK (team_id IS NULL OR environment_id IS NULL OR project_id IS NOT NULL),
+    CHECK (project_id IS NULL OR service_id IS NULL OR environment_id IS NOT NULL),
+    CHECK (team_id IS NULL OR service_id IS NULL OR
+           (project_id IS NOT NULL AND environment_id IS NOT NULL)),
+    FOREIGN KEY (team_id, project_id) REFERENCES projects(team_id, id),
+    FOREIGN KEY (project_id, environment_id)
+        REFERENCES environments(project_id, id),
+    FOREIGN KEY (environment_id, service_id)
+        REFERENCES services(environment_id, id)
 ) PARTITION BY RANGE (partition_timestamp)
 
 CREATE TABLE incident_messages (
@@ -468,7 +497,9 @@ CREATE INDEX ix_outbox_events_status_available ON outbox_events (status, availab
 
 ## Partition 維護
 
-allowlist 僅包含：`webhook_deliveries`、`alert_events`、`evidence_records`、`incident_messages`、`incident_timeline_events` 與 `audit_events`。migration upgrade 會建立當月與下個月的六張分區。執行期的 `ensure_monthly_partitions(connection, month)` 會將輸入月份正規化為該月第一天、依 allowlist 為每張表發出 `CREATE TABLE IF NOT EXISTS ... PARTITION OF`，因此可安全重複呼叫；它不會對 allowlist 之外的表建立分區。
+allowlist 僅包含：`webhook_deliveries`、`alert_events`、`evidence_records`、`incident_messages`、`incident_timeline_events` 與 `audit_events`。migration upgrade 會建立當月與下個月的六張分區。執行期的 `ensure_monthly_partitions(connection, month)` 使用明確的 `public` schema 建立月分區，建立後逐一驗證 `relispartition`、正確 parent 與精確 bounds；同名 ordinary table、掛錯 parent 或錯誤 bounds 都會以 partition drift 失敗，不會被 `IF NOT EXISTS` 靜默略過。
+
+獨立維護命令 `sre-agent-ensure-partitions`（亦可執行 `python -m sre_agent.workers.partition_worker`）在啟動時才讀取 `DATABASE_URL`，建立本月、下月與下下月的安全 runway，失敗時回傳非零 exit code；排程與 infrastructure provisioning 不屬於此命令。`DATABASE_URL` 格式為 `postgresql://user:password@host:port/database` 或 SQLAlchemy 的 `postgresql+asyncpg://...`，設定使用 secret type 且命令不輸出 URL 或其中 credential。
 
 每個月的上界是 exclusive，12 月的範例如下，資料時間剛好等於 `2032-01-01 00:00:00+00` 屬於下一個分區而非本分區：
 
