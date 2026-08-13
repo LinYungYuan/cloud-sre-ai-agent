@@ -21,7 +21,7 @@ def _canonical_sha256(value: object) -> str:
 def make_alert_fingerprint(
     source_id: UUID,
     grafana_fingerprint: str,
-    labels: Mapping[str, str],
+    labels: Mapping[str, object],
 ) -> str:
     if grafana_fingerprint:
         return grafana_fingerprint

@@ -3,6 +3,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import cast
 from uuid import UUID
 
 REQUIRED_LABELS = (
@@ -48,7 +49,7 @@ class CrossCloudValidationResult:
 
 
 class CrossCloudAlertValidator:
-    def validate(self, labels: Mapping[str, str]) -> CrossCloudValidationResult:
+    def validate(self, labels: Mapping[str, object]) -> CrossCloudValidationResult:
         errors: list[AlertValidationError] = []
         for field in REQUIRED_LABELS:
             value = labels.get(field)
@@ -58,8 +59,8 @@ class CrossCloudAlertValidator:
             if self._is_invalid_value(
                 field,
                 value,
-                labels.get("cloud_provider"),
-                labels.get("cloud_scope_id"),
+                _string_value(labels.get("cloud_provider")),
+                _string_value(labels.get("cloud_scope_id")),
             ):
                 errors.append(AlertValidationError(field=field, code="invalid_value"))
 
@@ -152,14 +153,14 @@ class CrossCloudAlertValidator:
         return True
 
 
-def make_incident_identity(source_id: UUID, labels: Mapping[str, str]) -> str:
+def make_incident_identity(source_id: UUID, labels: Mapping[str, object]) -> str:
     validation = CrossCloudAlertValidator().validate(labels)
     if not validation.is_valid:
         raise ValueError("invalid cross-cloud alert labels")
 
     canonical = {
         "source_id": str(source_id),
-        **{field: labels[field] for field in INCIDENT_IDENTITY_FIELDS},
+        **{field: cast(str, labels[field]) for field in INCIDENT_IDENTITY_FIELDS},
     }
     encoded = json.dumps(
         canonical,
@@ -168,3 +169,7 @@ def make_incident_identity(source_id: UUID, labels: Mapping[str, str]) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _string_value(value: object) -> str | None:
+    return value if isinstance(value, str) else None

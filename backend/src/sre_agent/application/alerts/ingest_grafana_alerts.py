@@ -32,7 +32,7 @@ from sre_agent.persistence.unit_of_work import UnitOfWork
 class Classifier(Protocol):
     def classify(
         self,
-        labels: Mapping[str, str],
+        labels: Mapping[str, object],
         rule_uid: str | None,
         folder: str | None,
     ) -> ClassificationResult: ...
@@ -112,9 +112,6 @@ class IngestGrafanaAlerts:
                             AlertValidationError(field=field, code="unknown_scope")
                             for field in classification.missing_fields
                         )
-                if validation_errors:
-                    has_invalid_alert = True
-
                 claimed = await uow.alerts.claim_dedup_key(
                     source_id=source_id,
                     dedup_key=event.dedup_key,
@@ -124,6 +121,8 @@ class IngestGrafanaAlerts:
                 if not claimed:
                     continue
                 new_event_count += 1
+                if validation_errors:
+                    has_invalid_alert = True
                 stored_event = await uow.alerts.add_event(
                     delivery_id=delivery_id,
                     received_at=accepted_at,
@@ -198,11 +197,12 @@ class IngestGrafanaAlerts:
         classifier: Classifier,
         event: CanonicalAlertEvent,
     ) -> ClassificationResult:
+        rule_uid = event.labels.get("grafana_rule_uid") or event.labels.get("rule_uid")
+        folder = event.labels.get("grafana_folder") or event.labels.get("folder")
         return classifier.classify(
             event.labels,
-            rule_uid=event.labels.get("grafana_rule_uid")
-            or event.labels.get("rule_uid"),
-            folder=event.labels.get("grafana_folder") or event.labels.get("folder"),
+            rule_uid=rule_uid if isinstance(rule_uid, str) else None,
+            folder=folder if isinstance(folder, str) else None,
         )
 
 
@@ -219,16 +219,21 @@ def _incident_scope(
 
 
 def _title(event: CanonicalAlertEvent) -> str:
-    return (
-        event.annotations.get("summary")
-        or event.labels.get("alertname")
-        or f"Grafana alert {event.fingerprint}"
-    )
+    summary = event.annotations.get("summary")
+    alert_name = event.labels.get("alertname")
+    if summary:
+        return summary
+    if isinstance(alert_name, str) and alert_name:
+        return alert_name
+    return f"Grafana alert {event.fingerprint}"
 
 
 def _severity(event: CanonicalAlertEvent) -> str:
+    raw_severity = event.labels["severity"]
+    if not isinstance(raw_severity, str):
+        raise TypeError("validated severity must be a string")
     return {
         "critical": "SEV1",
         "warning": "SEV3",
         "info": "SEV4",
-    }[event.labels["severity"]]
+    }[raw_severity]

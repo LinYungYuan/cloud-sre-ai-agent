@@ -45,7 +45,7 @@ class CanonicalAlertEvent:
     status: AlertState
     starts_at: datetime
     ends_at: datetime
-    labels: Mapping[str, str]
+    labels: Mapping[str, object]
     annotations: Mapping[str, str]
     values: Mapping[str, FrozenJsonValue]
     generator_url: str
@@ -55,11 +55,10 @@ class CanonicalAlertEvent:
     image_url: str | None
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "labels",
-            MappingProxyType(dict(sorted(self.labels.items()))),
-        )
+        frozen_labels = _deep_freeze_json(self.labels)
+        if not isinstance(frozen_labels, Mapping):
+            raise TypeError("alert labels must be a JSON object")
+        object.__setattr__(self, "labels", frozen_labels)
         object.__setattr__(
             self,
             "annotations",

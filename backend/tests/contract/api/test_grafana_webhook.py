@@ -172,7 +172,7 @@ class ObservableFakeUnitOfWork:
 class NeverClassifier:
     def classify(
         self,
-        labels: Mapping[str, str],
+        labels: Mapping[str, object],
         rule_uid: str | None,
         folder: str | None,
     ) -> ClassificationResult:
