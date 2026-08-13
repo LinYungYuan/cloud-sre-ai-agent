@@ -11,6 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from sre_agent.integrations.pubsub.publisher import MessagePublisher
 
+_DEFERRED_CANCELLATION_NOTE = (
+    "Outer cancellation was deferred during durable outbox settlement."
+)
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -67,10 +71,21 @@ class OutboxPublisher:
             try:
                 published = await asyncio.shield(settlement)
             except asyncio.CancelledError:
-                if settlement.done():
+                if settlement.cancelled():
                     raise
                 cancellation_requested = True
+                if settlement.done():
+                    try:
+                        published = settlement.result()
+                    except Exception as error:
+                        error.add_note(_DEFERRED_CANCELLATION_NOTE)
+                        raise
+                    break
                 continue
+            except Exception as error:
+                if cancellation_requested:
+                    error.add_note(_DEFERRED_CANCELLATION_NOTE)
+                raise
             break
 
         if cancellation_requested:

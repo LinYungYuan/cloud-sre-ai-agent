@@ -372,3 +372,47 @@ def test_google_adapter_uses_injected_client_and_waits_for_acknowledgement():
 
     assert message_id == "google-message-id"
     assert client.call == (TOPIC, b"payload", {"traceId": "trace-1"})
+
+
+class SettlementDatabaseError(RuntimeError):
+    pass
+
+
+class ControlledFailingSettlement(OutboxPublisher):
+    def __init__(self, session_factory) -> None:
+        super().__init__(session_factory, RecordingPublisher(), TOPIC)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def _publish_and_settle_batch(self, limit: int) -> int:
+        self.started.set()
+        await self.release.wait()
+        raise SettlementDatabaseError("transaction commit failed")
+
+
+@pytest.mark.asyncio
+async def test_settlement_database_failure_wins_outer_cancellation_done_race(
+    session_factory,
+):
+    worker = ControlledFailingSettlement(session_factory)
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict[str, object]] = []
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+    try:
+        publishing = asyncio.create_task(worker.publish_batch(limit=1))
+        await worker.started.wait()
+        worker.release.set()
+        publishing.cancel()
+
+        with pytest.raises(SettlementDatabaseError) as raised:
+            await publishing
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous_handler)
+
+    assert str(raised.value) == "transaction commit failed"
+    assert raised.value.__notes__ == [
+        "Outer cancellation was deferred during durable outbox settlement."
+    ]
+    assert unhandled == []
