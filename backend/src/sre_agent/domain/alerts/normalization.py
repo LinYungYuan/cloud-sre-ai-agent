@@ -179,7 +179,9 @@ class SafeRuleEngine:
                 )
             else:
                 pattern = _SAFE_FORMATS[condition.value or ""]
-                matched = isinstance(value, str) and pattern.fullmatch(value) is not None
+                matched = (
+                    isinstance(value, str) and pattern.fullmatch(value) is not None
+                )
             if not matched:
                 return False
         return True
@@ -225,6 +227,9 @@ def _result(status: NormalizationStatus, warning: str) -> NormalizationResult:
 def _resolve_path(alert: CanonicalBaseAlert, path: str) -> tuple[bool, object]:
     root_name, *parts = path.split(".")
     current: object = getattr(alert, root_name)
+    flattened = ".".join(parts)
+    if isinstance(current, Mapping) and flattened in current:
+        return True, current[flattened]
     for part in parts:
         if not isinstance(current, Mapping) or part not in current:
             return False, None

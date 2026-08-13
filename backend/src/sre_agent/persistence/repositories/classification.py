@@ -9,7 +9,6 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from sre_agent.application.alerts.ingest_grafana_alerts import Classifier
 from sre_agent.domain.alerts.classification import (
     AlertClassifier,
     AlertMapping,
@@ -24,14 +23,14 @@ class UnknownGrafanaSourceError(RuntimeError):
 
 
 class LoadedClassifierProvider:
-    def __init__(self, classifiers: Mapping[UUID, Classifier]) -> None:
+    def __init__(self, classifiers: Mapping[UUID, AlertClassifier]) -> None:
         self._classifiers = MappingProxyType(dict(classifiers))
 
     @property
     def source_ids(self) -> frozenset[UUID]:
         return frozenset(self._classifiers)
 
-    def for_source(self, source_id: UUID) -> Classifier:
+    def for_source(self, source_id: UUID) -> AlertClassifier:
         try:
             return self._classifiers[source_id]
         except KeyError:

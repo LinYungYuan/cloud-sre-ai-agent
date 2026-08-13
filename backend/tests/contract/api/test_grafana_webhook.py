@@ -113,7 +113,7 @@ class FakeAlertRepository:
 
     async def claim_dedup_key(self, **values: Any) -> bool:
         assert values["delivery_id"] == DELIVERY_ID
-        return True
+        return False
 
     async def add_event(self, **values: Any) -> StoredAlertEvent:
         assert values["validation_status"] == "VALIDATION_FAILED"
@@ -128,7 +128,7 @@ class FakeAlertRepository:
         )
 
     async def finish_delivery(self, **values: Any) -> None:
-        assert values["status"] == "VALIDATION_FAILED"
+        assert values["status"] == "DUPLICATE"
         self.delivery_finished = True
 
 

@@ -24,6 +24,10 @@ from sre_agent.persistence.repositories.alerts import (
 )
 from sre_agent.persistence.repositories.incidents import IncidentRepository
 from sre_agent.persistence.repositories.jobs import JobRepository
+from sre_agent.persistence.repositories.normalization import (
+    FolderScopeProvider,
+    NormalizationRuleProvider,
+)
 from sre_agent.persistence.unit_of_work import UnitOfWork
 
 SOURCE_ID = UUID("50000000-0000-0000-0000-000000000001")
@@ -142,7 +146,8 @@ async def test_configured_app_accepts_valid_webhook_without_dependency_overrides
         observed_settings.append(settings)
         yield RuntimeResources(
             uow_factory=lambda: uow,
-            classifier_provider=classifiers,
+            normalization_rule_provider=NormalizationRuleProvider({}, frozenset()),
+            folder_scope_provider=FolderScopeProvider({}),
         )
 
     app = create_app(resource_factory=resources)
@@ -169,7 +174,7 @@ async def test_configured_app_accepts_valid_webhook_without_dependency_overrides
     assert response.status_code == 202
     assert response.json()["deliveryId"] == str(DELIVERY_ID)
     assert len(observed_settings) == 1
-    assert classifiers.sources == [SOURCE_ID]
+    assert classifiers.sources == []
     assert uow.committed
     assert uow.alert_repository.finished_status == "DUPLICATE"
     assert uow.alert_repository.delivery is not None

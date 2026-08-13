@@ -1,54 +1,52 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from sre_agent.domain.alerts.classification import (
-    AlertScope,
-    ClassificationResult,
-)
-from sre_agent.domain.alerts.cross_cloud import (
-    AlertValidationError,
-    CrossCloudAlertValidator,
-    make_incident_identity,
-)
 from sre_agent.domain.alerts.fingerprint import hash_raw_body
-from sre_agent.domain.alerts.models import AlertState, ClassificationStatus
+from sre_agent.domain.alerts.identity import make_incident_identity_v2
+from sre_agent.domain.alerts.models import AlertState
+from sre_agent.domain.alerts.normalization import SafeRuleEngine
+from sre_agent.domain.alerts.provider import detect_provider
 from sre_agent.domain.common import require_aware_utc
 from sre_agent.integrations.grafana.normalizer import (
     CanonicalAlertEvent,
     normalize_alerts,
 )
 from sre_agent.integrations.grafana.payloads import parse_grafana_body
-from sre_agent.persistence.repositories.alerts import SourceScope
 from sre_agent.persistence.repositories.incidents import IncidentScope
 from sre_agent.persistence.unit_of_work import UnitOfWork
 
 
-class Classifier(Protocol):
-    def classify(
-        self,
-        labels: Mapping[str, object],
-        rule_uid: str | None,
-        folder: str | None,
-    ) -> ClassificationResult: ...
+class NormalizationRuleProvider(Protocol):
+    def for_source(self, source_id: UUID) -> SafeRuleEngine: ...
 
 
-class ClassifierProvider(Protocol):
-    def for_source(self, source_id: UUID) -> Classifier: ...
+class FolderScopeProvider(Protocol):
+    def resolve(self, source_id: UUID, folder_code: str | None) -> IncidentScope: ...
 
 
 class StaticClassifierProvider:
-    def __init__(self, classifier: Classifier) -> None:
-        self._classifier = classifier
+    """Deprecated compatibility adapter; legacy classifiers are not consulted."""
 
-    def for_source(self, source_id: UUID) -> Classifier:
+    def __init__(self, classifier: object) -> None:
+        self.classifier = classifier
+
+
+class _EmptyRuleProvider:
+    def for_source(self, source_id: UUID) -> SafeRuleEngine:
         del source_id
-        return self._classifier
+        return SafeRuleEngine(())
+
+
+class _EmptyFolderScopeProvider:
+    def resolve(self, source_id: UUID, folder_code: str | None) -> IncidentScope:
+        del source_id, folder_code
+        return IncidentScope()
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,11 +61,19 @@ class IngestGrafanaAlerts:
         self,
         *,
         uow_factory: Callable[[], UnitOfWork],
-        classifier_provider: ClassifierProvider,
         max_body_bytes: int,
+        normalization_rule_provider: NormalizationRuleProvider | None = None,
+        folder_scope_provider: FolderScopeProvider | None = None,
+        classifier_provider: object | None = None,
     ) -> None:
+        del classifier_provider
         self._uow_factory = uow_factory
-        self._classifier_provider = classifier_provider
+        self._normalization_rule_provider = (
+            normalization_rule_provider or _EmptyRuleProvider()
+        )
+        self._folder_scope_provider = (
+            folder_scope_provider or _EmptyFolderScopeProvider()
+        )
         self._max_body_bytes = max_body_bytes
 
     async def execute(
@@ -78,9 +84,12 @@ class IngestGrafanaAlerts:
         received_at: datetime,
     ) -> IngestionResult:
         accepted_at = require_aware_utc(received_at)
-        classifier = self._classifier_provider.for_source(source_id)
         webhook = parse_grafana_body(raw_body, self._max_body_bytes)
-        canonical_events = normalize_alerts(source_id, webhook)
+        canonical_events = normalize_alerts(
+            source_id,
+            webhook,
+            self._normalization_rule_provider.for_source(source_id),
+        )
         raw_document = json.loads(raw_body)
         raw_alerts = raw_document["alerts"]
         if not isinstance(raw_alerts, list) or len(raw_alerts) != len(canonical_events):
@@ -88,7 +97,6 @@ class IngestGrafanaAlerts:
 
         incident_ids: list[UUID] = []
         async with self._uow_factory() as uow:
-            source_scope = await uow.alerts.get_source_scope(source_id)
             body_hash = hash_raw_body(raw_body)
             delivery_id = await uow.alerts.create_delivery(
                 source_id=source_id,
@@ -97,21 +105,21 @@ class IngestGrafanaAlerts:
                 body_hash=body_hash,
                 raw_body=raw_body,
                 raw_payload=raw_document,
+                truncated_alerts=webhook.truncated_alerts or 0,
+                incomplete=bool(webhook.truncated_alerts),
             )
 
             new_event_count = 0
             has_invalid_alert = False
             for event, raw_alert in zip(canonical_events, raw_alerts, strict=True):
-                validation = CrossCloudAlertValidator().validate(event.labels)
-                validation_errors = list(validation.errors)
-                classification: ClassificationResult | None = None
-                if validation.is_valid:
-                    classification = self._classify(classifier, event)
-                    if classification.status is not ClassificationStatus.CLASSIFIED:
-                        validation_errors.extend(
-                            AlertValidationError(field=field, code="unknown_scope")
-                            for field in classification.missing_fields
-                        )
+                provider = detect_provider(event.labels)
+                identity = make_incident_identity_v2(
+                    source_id,
+                    event.folder_code,
+                    event.alert_name,
+                    event.fingerprint,
+                )
+                validation_errors = list(provider.errors + identity.errors)
                 claimed = await uow.alerts.claim_dedup_key(
                     source_id=source_id,
                     dedup_key=event.dedup_key,
@@ -133,23 +141,26 @@ class IngestGrafanaAlerts:
                     ),
                     validation_errors=validation_errors,
                 )
-                if validation_errors:
-                    continue
-
                 await uow.alerts.upsert_instance(
                     event=event,
                     stored_event=stored_event,
                     received_at=accepted_at,
                 )
 
-                assert classification is not None
-                incident_scope = _incident_scope(classification.scope, source_scope)
-                identity_key = make_incident_identity(source_id, event.labels)
+                incident_scope = self._folder_scope_provider.resolve(
+                    source_id, event.folder_code
+                )
                 incident_id: UUID | None
                 if event.status is AlertState.FIRING:
-                    reopened_from = await uow.incidents.latest_resolved(identity_key)
+                    reopened_from = await uow.incidents.latest_resolved(
+                        identity.key, identity.version
+                    )
                     selection = await uow.incidents.get_or_create_active(
-                        identity_key=identity_key,
+                        identity_key=identity.key,
+                        identity_version=identity.version,
+                        provider=event.provider.value,
+                        folder_code=event.folder_code,
+                        alert_name=event.alert_name,
                         scope=incident_scope,
                         title=_title(event),
                         severity=_severity(event),
@@ -169,7 +180,9 @@ class IngestGrafanaAlerts:
                             available_at=accepted_at,
                         )
                 else:
-                    incident_id = await uow.incidents.lock_latest(identity_key)
+                    incident_id = await uow.incidents.lock_latest(
+                        identity.key, identity.version
+                    )
                     if incident_id is not None:
                         await uow.incidents.link_alert(incident_id, stored_event)
                         await uow.incidents.set_alert_state(
@@ -192,31 +205,6 @@ class IngestGrafanaAlerts:
 
         return IngestionResult(delivery_id, accepted_at, tuple(incident_ids))
 
-    @staticmethod
-    def _classify(
-        classifier: Classifier,
-        event: CanonicalAlertEvent,
-    ) -> ClassificationResult:
-        rule_uid = event.labels.get("grafana_rule_uid") or event.labels.get("rule_uid")
-        folder = event.labels.get("grafana_folder") or event.labels.get("folder")
-        return classifier.classify(
-            event.labels,
-            rule_uid=rule_uid if isinstance(rule_uid, str) else None,
-            folder=folder if isinstance(folder, str) else None,
-        )
-
-
-def _incident_scope(
-    classified: AlertScope,
-    source: SourceScope,
-) -> IncidentScope:
-    return IncidentScope(
-        team_id=classified.team_id or source.team_id,
-        project_id=classified.project_id or source.project_id,
-        environment_id=classified.environment_id or source.environment_id,
-        service_id=classified.service_id,
-    )
-
 
 def _title(event: CanonicalAlertEvent) -> str:
     summary = event.annotations.get("summary")
@@ -229,11 +217,4 @@ def _title(event: CanonicalAlertEvent) -> str:
 
 
 def _severity(event: CanonicalAlertEvent) -> str:
-    raw_severity = event.labels["severity"]
-    if not isinstance(raw_severity, str):
-        raise TypeError("validated severity must be a string")
-    return {
-        "critical": "SEV1",
-        "warning": "SEV3",
-        "info": "SEV4",
-    }[raw_severity]
+    return event.severity.canonical

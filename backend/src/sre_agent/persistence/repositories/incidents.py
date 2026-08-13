@@ -13,10 +13,22 @@ from sre_agent.persistence.repositories.alerts import StoredAlertEvent
 
 @dataclass(frozen=True, slots=True)
 class IncidentScope:
-    team_id: UUID
-    project_id: UUID
-    environment_id: UUID
-    service_id: UUID | None
+    team_id: UUID | None = None
+    project_id: UUID | None = None
+    environment_id: UUID | None = None
+    service_id: UUID | None = None
+
+    @property
+    def is_empty(self) -> bool:
+        return all(
+            value is None
+            for value in (
+                self.team_id,
+                self.project_id,
+                self.environment_id,
+                self.service_id,
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +42,10 @@ class IncidentRepository(Protocol):
         self,
         *,
         identity_key: str,
+        identity_version: int,
+        provider: str,
+        folder_code: str | None,
+        alert_name: str | None,
         scope: IncidentScope,
         title: str,
         severity: str,
@@ -37,9 +53,13 @@ class IncidentRepository(Protocol):
         reopened_from_incident_id: UUID | None,
     ) -> IncidentSelection: ...
 
-    async def latest_resolved(self, identity_key: str) -> UUID | None: ...
+    async def latest_resolved(
+        self, identity_key: str, identity_version: int
+    ) -> UUID | None: ...
 
-    async def lock_latest(self, identity_key: str) -> UUID | None: ...
+    async def lock_latest(
+        self, identity_key: str, identity_version: int
+    ) -> UUID | None: ...
 
     async def link_alert(
         self, incident_id: UUID, stored_event: StoredAlertEvent
@@ -58,6 +78,10 @@ class SqlAlchemyIncidentRepository:
         self,
         *,
         identity_key: str,
+        identity_version: int,
+        provider: str,
+        folder_code: str | None,
+        alert_name: str | None,
         scope: IncidentScope,
         title: str,
         severity: str,
@@ -69,15 +93,17 @@ class SqlAlchemyIncidentRepository:
             text(
                 """
                 INSERT INTO incidents (
-                    id, identity_key, title, severity, status, alert_state,
+                    id, identity_key, identity_version, provider, folder_code,
+                    alert_name, title, severity, status, alert_state,
                     team_id, project_id, environment_id, service_id, opened_at,
                     reopened_from_incident_id, created_at, updated_at
                 ) VALUES (
-                    :id, :identity_key, :title, :severity, 'OPEN', 'FIRING',
+                    :id, :identity_key, :identity_version, :provider,
+                    :folder_code, :alert_name, :title, :severity, 'OPEN', 'FIRING',
                     :team_id, :project_id, :environment_id, :service_id, :opened_at,
                     :reopened_from, :opened_at, :opened_at
                 )
-                ON CONFLICT (identity_key)
+                ON CONFLICT (identity_version, identity_key)
                     WHERE status IN ('OPEN', 'INVESTIGATING')
                     DO NOTHING
                 RETURNING id
@@ -86,6 +112,10 @@ class SqlAlchemyIncidentRepository:
             {
                 "id": proposed_id,
                 "identity_key": identity_key,
+                "identity_version": identity_version,
+                "provider": provider,
+                "folder_code": folder_code,
+                "alert_name": alert_name,
                 "title": title,
                 "severity": severity,
                 "team_id": scope.team_id,
@@ -105,46 +135,53 @@ class SqlAlchemyIncidentRepository:
                 SELECT id
                 FROM incidents
                 WHERE identity_key = :identity_key
+                  AND identity_version = :identity_version
                   AND status IN ('OPEN', 'INVESTIGATING')
                 ORDER BY opened_at DESC, id
                 LIMIT 1
                 FOR UPDATE
                 """
             ),
-            {"identity_key": identity_key},
+            {"identity_key": identity_key, "identity_version": identity_version},
         )
         if active_id is None:
             raise RuntimeError("active Incident could not be selected")
         return IncidentSelection(id=active_id, created=False)
 
-    async def latest_resolved(self, identity_key: str) -> UUID | None:
+    async def latest_resolved(
+        self, identity_key: str, identity_version: int
+    ) -> UUID | None:
         return await self._session.scalar(
             text(
                 """
                 SELECT id
                 FROM incidents
                 WHERE identity_key = :identity_key
+                  AND identity_version = :identity_version
                   AND status = 'RESOLVED'
                 ORDER BY resolved_at DESC NULLS LAST, opened_at DESC, id
                 LIMIT 1
                 """
             ),
-            {"identity_key": identity_key},
+            {"identity_key": identity_key, "identity_version": identity_version},
         )
 
-    async def lock_latest(self, identity_key: str) -> UUID | None:
+    async def lock_latest(
+        self, identity_key: str, identity_version: int
+    ) -> UUID | None:
         return await self._session.scalar(
             text(
                 """
                 SELECT id
                 FROM incidents
                 WHERE identity_key = :identity_key
+                  AND identity_version = :identity_version
                 ORDER BY opened_at DESC, id
                 LIMIT 1
                 FOR UPDATE
                 """
             ),
-            {"identity_key": identity_key},
+            {"identity_key": identity_key, "identity_version": identity_version},
         )
 
     async def link_alert(
