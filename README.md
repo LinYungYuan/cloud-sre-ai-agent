@@ -121,6 +121,17 @@ metadata without rerunning its DDL. Future migration ownership is defined by
 `contracts/database/table-ownership.yaml` once that planned contract is added;
 it is enforced by compatibility tests rather than separate database login roles.
 
+For local Pub/Sub delivery, start the Google official emulator and configure
+both processes with `PUBSUB_EMULATOR_HOST=127.0.0.1:58085`:
+
+```bash
+docker compose up -d pubsub-emulator
+cd backend && UV_CACHE_DIR="$PWD/.uv-cache" uv run sre-agent-outbox-worker
+```
+
+Production does not set `PUBSUB_EMULATOR_HOST`; Google clients use ADC and
+Workload Identity. No service-account key is stored in this repository.
+
 Before Angular starts, the frontend loads `/config.json`. Deployments must serve
 all of these fields:
 

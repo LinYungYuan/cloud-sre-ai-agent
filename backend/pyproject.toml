@@ -20,6 +20,7 @@ dependencies = [
 
 [project.scripts]
 sre-agent-ensure-partitions = "sre_agent.workers.partition_worker:main"
+sre-agent-outbox-worker = "sre_agent.workers.outbox_main:main"
 
 [dependency-groups]
 dev = [

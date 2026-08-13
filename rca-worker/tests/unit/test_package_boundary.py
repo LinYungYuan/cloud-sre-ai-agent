@@ -27,7 +27,9 @@ def test_worker_never_imports_backend_source() -> None:
                 names = [node.module or ""]
             else:
                 continue
-            if any(name == "sre_agent" or name.startswith("sre_agent.") for name in names):
+            if any(
+                name == "sre_agent" or name.startswith("sre_agent.") for name in names
+            ):
                 violations.append(str(path.relative_to(ROOT)))
 
     assert violations == []

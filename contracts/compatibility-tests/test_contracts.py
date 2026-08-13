@@ -660,6 +660,18 @@ def test_rca_worker_is_an_independent_package_with_its_own_migration_stream():
     assert "check: test-contracts test-backend test-rca-worker test-frontend" in makefile
 
 
+def test_local_compose_uses_the_official_pubsub_emulator_without_credentials():
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+    service = compose["services"]["pubsub-emulator"]
+
+    assert service["image"] == "google/cloud-sdk:578.0.0-emulators"
+    assert service["platform"] == "linux/amd64"
+    assert service["ports"] == ["127.0.0.1:58085:8085"]
+    serialized = json.dumps(service).lower()
+    assert "credential" not in serialized
+    assert "service_account" not in serialized
+
+
 def test_mapping_items_publish_etag_for_if_match_updates():
     contract = _operator_contract()
     mapping = contract["components"]["schemas"]["ClassificationMapping"]
