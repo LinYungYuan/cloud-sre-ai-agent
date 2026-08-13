@@ -10,6 +10,7 @@ dependencies = [
     "google-cloud-pubsub",
     "pydantic",
     "pydantic-settings",
+    "pyyaml",
     "sqlalchemy[asyncio]",
 ]
 
