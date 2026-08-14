@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -68,3 +69,12 @@ class AllowedTool(BaseModel):
 
     def validate_arguments(self, arguments: dict[str, Any]) -> None:
         Draft202012Validator(self.input_schema).validate(arguments)
+
+
+class CapabilitySet(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    by_specialist: Mapping[SpecialistKind, tuple[AllowedTool, ...]]
+
+    def for_specialist(self, kind: SpecialistKind) -> tuple[AllowedTool, ...]:
+        return self.by_specialist.get(kind, ())
