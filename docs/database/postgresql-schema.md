@@ -649,6 +649,17 @@ CREATE INDEX ix_folder_scope_mappings_lookup ON folder_scope_mappings (source_id
 
 Downgrade 警告：從 revision 0002 降回 0001 會永久刪除 normalization rules、folder mappings 與所有 canonical normalization 欄位；如果已存在 nullable scope 或 `UNMAPPED` Incident，恢復舊的 `NOT NULL`／severity constraint 前必須先修復資料。正式環境不應把 downgrade 當成一般 rollback 策略。
 
+## RCA Worker durable lifecycle
+
+`worker_jobs` 由 RCA Worker migration stream 接管 legacy schema，增加
+`lease_owner`、`lease_expires_at` 與 `attempt_count`。claim 只接受 `QUEUED` 或 lease
+已過期的 `RUNNING` 工作；總期限 300 秒、lease 60 秒、最多 3 次。
+`evidence_records.raw_result BYTEA` 保存 MCP 精確 bytes，JSONB 與 provenance
+metadata 分開保存；`rca_reports.result_status` 只能是 `COMPLETE`、`PARTIAL` 或
+`FAILED`。Backend、Worker 與兩條 Alembic stream 使用同一 application role，但
+version table 與 table ownership 各自獨立。Worker downgrade 會失去 exact raw bytes，
+正式環境不得把它當作一般 rollback。
+
 ## Partition 維護
 
 allowlist 僅包含：`webhook_deliveries`、`alert_events`、`evidence_records`、`incident_messages`、`incident_timeline_events` 與 `audit_events`。migration upgrade 會建立當月與下個月的六張分區。執行期的 `ensure_monthly_partitions(connection, month)` 使用明確的 `public` schema 建立月分區，建立後逐一驗證 `relispartition`、正確 parent 與精確 bounds；同名 ordinary table、掛錯 parent 或錯誤 bounds 都會以 partition drift 失敗，不會被 `IF NOT EXISTS` 靜默略過。
