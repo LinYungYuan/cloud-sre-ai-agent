@@ -7,7 +7,10 @@ requires-python = ">=3.11"
 dependencies = [
     "alembic",
     "asyncpg",
+    "google-adk>=2.7.0",
     "google-cloud-pubsub",
+    "jsonschema>=4.26.0",
+    "mcp>=2.0.0",
     "pydantic",
     "pydantic-settings",
     "pyyaml",
