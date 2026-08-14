@@ -17,6 +17,9 @@ dependencies = [
     "sqlalchemy[asyncio]",
 ]
 
+[project.scripts]
+sre-agent-rca-worker = "sre_rca_worker.workers.rca_worker:main"
+
 [dependency-groups]
 dev = [
     "jsonschema",
