@@ -65,6 +65,14 @@ NODE_BIN_DIR=/path/to/node/bin make test-frontend
 The frontend retrieves data only through the REST API. Refresh the page manually
 to retrieve the latest data.
 
+Provider 判斷只有一條規則：alert labels 存在且非空的
+`resource.label.project_id` 就是 GCP；key 不存在就是 AWS。Grafana `folder` 是
+專案／系統代碼，Incident identity v2 使用 `sourceId + folder + alertname`；
+`AlertValues` 原樣作為不可信 issue 交給 RCA。即使 normalization 是
+`VALIDATION_FAILED` 或 `UNCLASSIFIED`，仍建立 Incident、RCA run、worker job 與
+outbox event。Angular 只在使用者按「重新整理」時重新讀 REST；Chat/SSE/WebSocket
+保留至日後獨立的 `sre-chat-backend` 設計。
+
 ## RCA Worker setup
 
 The RCA Worker is a separate Python project with its own dependencies, lock file,
