@@ -1,6 +1,8 @@
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from sre_rca_worker.integrations.mcp.models import ManifestEntry
+
 
 class WorkerSettings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -14,7 +16,9 @@ class WorkerSettings(BaseSettings):
     rca_topic_id: str = Field(min_length=1)
     pubsub_subscription_id: str = Field(min_length=1)
     app_environment: str = Field(min_length=1)
+    model_name: str = Field(min_length=1)
     pubsub_emulator_host: str | None = None
+    mcp_capability_manifest: tuple[ManifestEntry, ...] = ()
     metrics_mcp_url: str = (
         "https://agentgateway.cp.gcubut.gcp.uwccb/agw/gcp-metrics-mcp"
     )

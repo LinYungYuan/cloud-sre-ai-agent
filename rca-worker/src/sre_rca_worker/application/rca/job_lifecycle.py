@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -44,22 +45,66 @@ class RcaJobHandler:
         processor: Processor,
         *,
         worker_id: str,
+        lease_renewal_seconds: float = 20,
     ) -> None:
         self._sessions = sessions
         self._processor = processor
         self._worker_id = worker_id
+        self._lease_renewal_seconds = lease_renewal_seconds
 
     async def handle(self, message: RcaJobMessage) -> JobDisposition:
         claim = await self._claim(message)
         if claim is None:
             return await self._unclaimed_disposition(message)
         try:
-            result = await self._processor(claim)
-        except BaseException as error:
-            if isinstance(error, (KeyboardInterrupt, SystemExit)):
-                raise
+            result = await self._execute_with_lease(claim)
+        except LeaseLostError:
+            return JobDisposition.NACK
+        except Exception:  # noqa: BLE001 - durable boundary stores only safe codes
             return await self._settle_failure(claim)
         return await self._settle_success(claim, result)
+
+    async def _execute_with_lease(self, claim: RcaJobClaim) -> RcaProcessingResult:
+        async def invoke() -> RcaProcessingResult:
+            return await self._processor(claim)
+
+        processor = asyncio.create_task(invoke())
+        renewal = asyncio.create_task(self._renew_lease(claim, processor))
+        try:
+            done, _ = await asyncio.wait(
+                {processor, renewal}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if processor in done:
+                return await processor
+            if renewal in done:
+                await renewal
+                raise LeaseLostError
+            raise RuntimeError("lease execution reached an impossible state")
+        finally:
+            for task in (processor, renewal):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(processor, renewal, return_exceptions=True)
+
+    async def _renew_lease(
+        self, claim: RcaJobClaim, processor: asyncio.Task[RcaProcessingResult]
+    ) -> None:
+        while not processor.done():
+            await asyncio.sleep(self._lease_renewal_seconds)
+            if processor.done():
+                return
+            async with self._sessions() as session, session.begin():
+                renewed = await session.scalar(
+                    text(
+                        """UPDATE worker_jobs
+                           SET lease_expires_at=now()+interval '60 seconds', updated_at=now()
+                           WHERE id=:id AND status='RUNNING' AND lease_owner=:owner
+                           RETURNING id"""
+                    ),
+                    {"id": claim.worker_job_id, "owner": claim.lease_owner},
+                )
+            if renewed is None:
+                raise LeaseLostError
 
     async def _claim(self, message: RcaJobMessage) -> RcaJobClaim | None:
         async with self._sessions() as session, session.begin():
@@ -145,8 +190,39 @@ class RcaJobHandler:
         if row["status"] in {"SUCCEEDED", "FAILED"}:
             return JobDisposition.ACK
         if row["expired"] or row["attempt_count"] >= 3:
+            await self._mark_unclaimed_terminal(
+                message,
+                "DEADLINE_EXCEEDED" if row["expired"] else "INTERNAL_ERROR",
+            )
             return JobDisposition.ACK
         return JobDisposition.NACK
+
+    async def _mark_unclaimed_terminal(
+        self, message: RcaJobMessage, failure_code: str
+    ) -> None:
+        async with self._sessions() as session, session.begin():
+            updated = await session.scalar(
+                text(
+                    """UPDATE worker_jobs SET status='FAILED', completed_at=now(),
+                              updated_at=now(), lease_owner=NULL, lease_expires_at=NULL
+                       WHERE id=:job AND rca_run_id=:run AND status NOT IN ('SUCCEEDED','FAILED')
+                       RETURNING id"""
+                ),
+                {"job": message.worker_job_id, "run": message.rca_run_id},
+            )
+            if updated is not None:
+                await session.execute(
+                    text(
+                        """UPDATE rca_runs SET status='FAILED', failure_code=:failure,
+                                  completed_at=now(), updated_at=now()
+                           WHERE id=:run AND incident_id=:incident"""
+                    ),
+                    {
+                        "failure": failure_code,
+                        "run": message.rca_run_id,
+                        "incident": message.incident_id,
+                    },
+                )
 
     async def _settle_success(
         self, claim: RcaJobClaim, result: RcaProcessingResult
@@ -196,13 +272,14 @@ class RcaJobHandler:
     async def _settle_failure(self, claim: RcaJobClaim) -> JobDisposition:
         terminal = claim.attempt_number >= 3
         async with self._sessions() as session, session.begin():
-            await session.execute(
+            updated = await session.scalar(
                 text(
                     """UPDATE worker_jobs
                        SET status=:status, available_at=CASE WHEN :terminal THEN available_at ELSE now()+interval '30 seconds' END,
                            completed_at=CASE WHEN :terminal THEN now() ELSE NULL END,
                            updated_at=now(), lease_owner=NULL, lease_expires_at=NULL
-                       WHERE id=:id AND status='RUNNING' AND lease_owner=:owner"""
+                       WHERE id=:id AND status='RUNNING' AND lease_owner=:owner
+                       RETURNING id"""
                 ),
                 {
                     "status": "FAILED" if terminal else "QUEUED",
@@ -211,6 +288,8 @@ class RcaJobHandler:
                     "owner": claim.lease_owner,
                 },
             )
+            if updated is None:
+                return JobDisposition.NACK
             await session.execute(
                 text(
                     """UPDATE worker_attempts SET completed_at=now(), failure_code='MCP_TRANSPORT'
@@ -229,3 +308,7 @@ class RcaJobHandler:
                 },
             )
         return JobDisposition.ACK if terminal else JobDisposition.NACK
+
+
+class LeaseLostError(RuntimeError):
+    pass

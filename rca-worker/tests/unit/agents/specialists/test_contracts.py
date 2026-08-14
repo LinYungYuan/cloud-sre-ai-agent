@@ -7,7 +7,11 @@ from pydantic import ValidationError
 from sre_rca_worker.agents.specialists.base import SpecialistRequest
 from sre_rca_worker.agents.specialists.metrics_agent import MetricsSpecialist
 from sre_rca_worker.domain.evidence.models import EvidenceDraft, Finding
-from sre_rca_worker.integrations.mcp.models import CloudScope, SpecialistKind
+from sre_rca_worker.integrations.mcp.models import (
+    AllowedTool,
+    CloudScope,
+    SpecialistKind,
+)
 
 NOW = datetime(2026, 8, 13, 6, 30, tzinfo=UTC)
 
@@ -83,3 +87,44 @@ async def test_no_tools_returns_missing_evidence_without_constructing_client() -
     assert result.findings == ()
     assert result.missing_evidence == ("NO_SAFE_MCP_CAPABILITY",)
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_safe_specialist_calls_only_allowed_tool_and_returns_exact_evidence() -> (
+    None
+):
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class Client:
+        endpoint_identity = "metrics"
+
+        async def list_tools(self):
+            return ()
+
+        async def call(self, tool_name, arguments, deadline):
+            calls.append((tool_name, arguments))
+            return b'{ "cpu": 85.23 }\n'
+
+    tool = AllowedTool(
+        name="metrics_query",
+        capability="metrics.query",
+        endpoint_identity="metrics",
+        input_schema={
+            "type": "object",
+            "properties": {"project_id": {"type": "string"}},
+            "required": ["project_id"],
+            "additionalProperties": False,
+        },
+    )
+    request = SpecialistRequest(
+        incident_id=uuid4(),
+        rca_run_id=uuid4(),
+        alert_issue="CPU high",
+        scope=CloudScope(provider="GCP", scope_id="project-a", safe=True),
+        window_start=NOW - timedelta(minutes=15),
+        window_end=NOW,
+        available_tools=(tool,),
+    )
+    result = await MetricsSpecialist(Client).run(request, NOW + timedelta(minutes=1))
+    assert calls == [("metrics_query", {"project_id": "project-a"})]
+    assert result.findings[0].evidence[0].raw_result == b'{ "cpu": 85.23 }\n'

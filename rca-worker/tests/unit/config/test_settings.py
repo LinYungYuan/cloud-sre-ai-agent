@@ -11,6 +11,7 @@ def _settings(**overrides):
         "rca_topic_id": "rca-jobs",
         "pubsub_subscription_id": "rca-worker",
         "app_environment": "local",
+        "model_name": "test-model",
         "pubsub_emulator_host": "127.0.0.1:58085",
     }
     values.update(overrides)
@@ -27,3 +28,25 @@ def test_local_settings_allow_the_official_emulator_without_credentials() -> Non
 def test_production_rejects_an_emulator_host() -> None:
     with pytest.raises(ValidationError, match="forbidden in production"):
         _settings(app_environment="production")
+
+
+def test_manifest_is_loaded_only_from_validated_startup_configuration() -> None:
+    settings = _settings(
+        mcp_capability_manifest=[
+            {
+                "endpoint_identity": "metrics",
+                "capability": "metrics.query",
+                "tool_name_pattern": "^metrics_query$",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"project_id": {"type": "string"}},
+                    "required": ["project_id"],
+                    "additionalProperties": False,
+                },
+                "risk": "READ_ONLY",
+            }
+        ]
+    )
+    entry = settings.mcp_capability_manifest[0]
+    assert entry.endpoint_identity == "metrics"
+    assert len(entry.input_schema_hash or "") == 64

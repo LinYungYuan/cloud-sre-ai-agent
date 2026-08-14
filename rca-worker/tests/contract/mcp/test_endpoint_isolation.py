@@ -15,6 +15,7 @@ def _settings() -> WorkerSettings:
             "rca_topic_id": "rca",
             "pubsub_subscription_id": "rca-worker",
             "app_environment": "test",
+            "model_name": "test-model",
         }
     )
 

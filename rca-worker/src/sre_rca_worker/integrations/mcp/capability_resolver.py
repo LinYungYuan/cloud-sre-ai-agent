@@ -35,7 +35,15 @@ class CapabilityResolver:
                 for tool in discovered
                 if re.fullmatch(entry.tool_name_pattern, tool.name)
                 and tool.annotations.get("readOnlyHint") is True
-                and set(tool.annotations) <= {"readOnlyHint"}
+                and tool.annotations.get("destructiveHint", False) is False
+                and set(tool.annotations)
+                <= {
+                    "title",
+                    "readOnlyHint",
+                    "destructiveHint",
+                    "idempotentHint",
+                    "openWorldHint",
+                }
                 and schema_hash(tool.input_schema) == entry.input_schema_hash
             ]
             if len(matches) != 1:

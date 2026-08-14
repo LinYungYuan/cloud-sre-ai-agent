@@ -42,7 +42,7 @@ class SdkMcpClient:
                 name=tool.name,
                 input_schema=tool.input_schema,
                 annotations=(
-                    tool.annotations.model_dump(exclude_none=True)
+                    tool.annotations.model_dump(by_alias=True, exclude_none=True)
                     if tool.annotations is not None
                     else {}
                 ),

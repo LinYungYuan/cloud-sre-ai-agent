@@ -144,3 +144,72 @@ async def test_identifier_mismatch_is_acked_without_running_job() -> None:
             == "QUEUED"
         )
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_outer_cancellation_propagates_and_lease_is_recoverable() -> None:
+    engine = create_async_engine(DATABASE_URL)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    message = await _seed(sessions)
+    entered = asyncio.Event()
+
+    async def process(claim):
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    task = asyncio.create_task(
+        RcaJobHandler(sessions, process, worker_id="cancelled").handle(message)
+    )
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    async with sessions() as session:
+        row = (
+            await session.execute(
+                text("SELECT status,lease_owner FROM worker_jobs WHERE id=:id"),
+                {"id": message.worker_job_id},
+            )
+        ).one()
+        assert row == ("RUNNING", "cancelled")
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_long_processing_renews_lease_before_terminal_commit() -> None:
+    engine = create_async_engine(DATABASE_URL)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    message = await _seed(sessions)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def process(claim):
+        entered.set()
+        await release.wait()
+        return RcaProcessingResult(status="COMPLETE")
+
+    task = asyncio.create_task(
+        RcaJobHandler(
+            sessions,
+            process,
+            worker_id="renewing",
+            lease_renewal_seconds=0.02,
+        ).handle(message)
+    )
+    await entered.wait()
+    async with sessions() as session:
+        first_expiry = await session.scalar(
+            text("SELECT lease_expires_at FROM worker_jobs WHERE id=:id"),
+            {"id": message.worker_job_id},
+        )
+    await asyncio.sleep(0.05)
+    async with sessions() as session:
+        renewed_expiry = await session.scalar(
+            text("SELECT lease_expires_at FROM worker_jobs WHERE id=:id"),
+            {"id": message.worker_job_id},
+        )
+    assert renewed_expiry > first_expiry
+    release.set()
+    assert await task is JobDisposition.ACK
+    await engine.dispose()

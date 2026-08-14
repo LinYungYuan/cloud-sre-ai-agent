@@ -50,6 +50,35 @@ def test_resolver_exposes_only_exact_endpoint_read_only_schema_match() -> None:
     ]
 
 
+def test_resolver_accepts_standard_safe_annotations_but_rejects_destructive() -> None:
+    safe = _tool(
+        annotations={
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        }
+    )
+    assert CapabilityResolver().resolve(
+        required=("metrics.query",),
+        manifest=(_manifest(),),
+        discovered=(safe,),
+        endpoint_identity="metrics",
+    )
+    destructive = safe.model_copy(
+        update={"annotations": safe.annotations | {"destructiveHint": True}}
+    )
+    assert (
+        CapabilityResolver().resolve(
+            required=("metrics.query",),
+            manifest=(_manifest(),),
+            discovered=(destructive,),
+            endpoint_identity="metrics",
+        )
+        == ()
+    )
+
+
 @pytest.mark.parametrize(
     ("manifest", "tool", "endpoint"),
     [
