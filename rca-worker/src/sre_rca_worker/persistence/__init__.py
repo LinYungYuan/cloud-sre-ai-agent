@@ -1,0 +1,1 @@
+"""Worker-owned persistence adapters."""
