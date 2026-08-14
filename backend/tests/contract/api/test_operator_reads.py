@@ -49,6 +49,9 @@ def _incident() -> dict[str, Any]:
         "status": "OPEN",
         "alert_state": "FIRING",
         "rca_status": "QUEUED",
+        "provider": "AWS",
+        "folder_code": "COM-LX-BOA-01",
+        "alert_name": "High CPU usage",
         "scope": _scope(),
         "acknowledged": False,
         "acknowledged_at": None,
@@ -203,6 +206,8 @@ async def test_operator_reads_use_camel_case_utc_z_etag_and_bounded_pages() -> N
         "serviceId": None,
     }
     assert incidents.json()["items"][0]["updatedAt"] == "2026-08-13T06:30:00Z"
+    assert incidents.json()["items"][0]["provider"] == "AWS"
+    assert incidents.json()["items"][0]["folderCode"] == "COM-LX-BOA-01"
     assert incidents.json()["nextCursor"] == "next-page"
 
     assert incident.status_code == 200
@@ -216,6 +221,9 @@ async def test_operator_reads_use_camel_case_utc_z_etag_and_bounded_pages() -> N
         "status",
         "alertState",
         "rcaStatus",
+        "provider",
+        "folderCode",
+        "alertName",
         "scope",
         "acknowledged",
         "acknowledgedAt",

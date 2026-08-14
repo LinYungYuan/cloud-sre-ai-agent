@@ -754,6 +754,9 @@ components:
         - status
         - alertState
         - rcaStatus
+        - provider
+        - folderCode
+        - alertName
         - scope
         - acknowledged
         - openedAt
@@ -779,6 +782,14 @@ components:
           oneOf:
             - $ref: '#/components/schemas/RcaRunStatus'
             - type: 'null'
+        provider:
+          oneOf:
+            - $ref: '#/components/schemas/Provider'
+            - type: 'null'
+        folderCode:
+          type: [string, 'null']
+        alertName:
+          type: [string, 'null']
         scope:
           $ref: '#/components/schemas/Scope'
         acknowledged:

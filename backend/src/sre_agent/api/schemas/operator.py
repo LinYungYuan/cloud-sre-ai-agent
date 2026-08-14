@@ -50,6 +50,9 @@ class IncidentSummary(OperatorModel):
     status: IncidentStatus
     alert_state: AlertState
     rca_status: RcaRunStatus | None
+    provider: Provider | None
+    folder_code: str | None
+    alert_name: str | None
     scope: Scope
     acknowledged: bool
     acknowledged_at: datetime | None = None
