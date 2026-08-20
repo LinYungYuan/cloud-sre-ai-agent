@@ -130,7 +130,8 @@ metadata without rerunning its DDL. Future migration ownership is defined by
 it is enforced by compatibility tests rather than separate database login roles.
 
 For local Pub/Sub delivery, start the Google official emulator and configure
-both processes with `PUBSUB_EMULATOR_HOST=127.0.0.1:58085`:
+both processes with `PUBSUB_EMULATOR_HOST=127.0.0.1:58085`; configure the RCA
+Worker with `PUBSUB_AUTO_CREATE=true`:
 
 ```bash
 docker compose up -d pubsub-emulator
@@ -138,7 +139,8 @@ cd backend && UV_CACHE_DIR="$PWD/.uv-cache" uv run sre-agent-outbox-worker
 ```
 
 Production does not set `PUBSUB_EMULATOR_HOST`; Google clients use ADC and
-Workload Identity. No service-account key is stored in this repository.
+Workload Identity, and the RCA Worker keeps `PUBSUB_AUTO_CREATE=false`. No
+service-account key is stored in this repository.
 
 Before Angular starts, the frontend loads `/config.json`. Deployments must serve
 all of these fields:
@@ -224,6 +226,7 @@ curl -fsS http://127.0.0.1:58085/v1/projects/sre-agent-local/topics
 export DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:55434/sre_agent'
 export PUBSUB_EMULATOR_HOST='127.0.0.1:58085'
 export PUBSUB_PROJECT_ID='sre-agent-local'
+export PUBSUB_AUTO_CREATE=true
 export RCA_TOPIC_ID='rca-jobs'
 ```
 
@@ -285,14 +288,15 @@ UV_CACHE_DIR="$PWD/.uv-cache" uv run --with uvicorn \
 
 ### 6. 啟動 RCA Worker
 
-Worker 會 idempotently 建立 `rca-jobs` topic 與 `rca-jobs-local-sub`
-subscription：
+Worker 在本機明確設定 `PUBSUB_AUTO_CREATE=true` 時，會 idempotently 建立
+`rca-jobs` topic 與 `rca-jobs-local-sub` subscription：
 
 ```bash
 cd rca-worker
 export DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:55434/sre_agent'
 export PUBSUB_EMULATOR_HOST='127.0.0.1:58085'
 export PUBSUB_PROJECT_ID='sre-agent-local'
+export PUBSUB_AUTO_CREATE=true
 export RCA_TOPIC_ID='rca-jobs'
 export PUBSUB_SUBSCRIPTION_ID='rca-jobs-local-sub'
 export APP_ENVIRONMENT='local'
@@ -308,7 +312,7 @@ UV_CACHE_DIR="$PWD/.uv-cache" uv run sre-agent-rca-worker
 
 ### 7. 啟動 outbox publisher
 
-等 Worker 建立 topic 後，再開另一個 terminal：
+等本機 Worker 建立 topic 後，再開另一個 terminal：
 
 ```bash
 cd backend

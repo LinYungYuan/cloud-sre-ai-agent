@@ -13,7 +13,7 @@ from sre_rca_worker.application.rca.job_lifecycle import (
 )
 from sre_rca_worker.application.rca.processor import ProductionRcaProcessor
 from sre_rca_worker.config.settings import WorkerSettings
-from sre_rca_worker.integrations.pubsub.bootstrap import ensure_topic_and_subscription
+from sre_rca_worker.integrations.pubsub.bootstrap import prepare_topic_and_subscription
 from sre_rca_worker.integrations.pubsub.messages import RcaJobMessage
 from sre_rca_worker.integrations.pubsub.subscriber import PubSubDelivery
 
@@ -57,17 +57,18 @@ async def run_production() -> None:
     engine = create_async_engine(settings.database_url.get_secret_value())
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     processor = ProductionRcaProcessor(sessions, settings)
-    handler = RcaJobHandler(sessions, processor, worker_id="rca-worker")
+    handler = RcaJobHandler(sessions, processor, worker_id=settings.worker_id)
     publisher = pubsub_v1.PublisherClient()
     subscriber = pubsub_v1.SubscriberClient()
     try:
         _, subscription = await asyncio.to_thread(
-            ensure_topic_and_subscription,
+            prepare_topic_and_subscription,
             publisher,
             subscriber,
             project_id=settings.pubsub_project_id,
             topic_id=settings.rca_topic_id,
             subscription_id=settings.pubsub_subscription_id,
+            auto_create=settings.pubsub_auto_create,
         )
         while True:
             response = await asyncio.to_thread(

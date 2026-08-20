@@ -11,12 +11,72 @@ from sre_rca_worker.application.rca.job_lifecycle import (
     RcaJobHandler,
     RcaProcessingResult,
 )
+from sre_rca_worker.config.settings import WorkerSettings
 from sre_rca_worker.integrations.pubsub.messages import RcaJobMessage
+from sre_rca_worker.workers import rca_worker
 
 DATABASE_URL = os.getenv(
     "MIGRATION_TEST_DATABASE_URL",
     "postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent",
 )
+
+
+@pytest.mark.asyncio
+async def test_production_runner_passes_configured_worker_identity_to_job_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = WorkerSettings.model_validate(
+        {
+            "database_url": "postgresql+asyncpg://app@db/sre",
+            "pubsub_project_id": "project",
+            "rca_topic_id": "topic",
+            "pubsub_subscription_id": "subscription",
+            "app_environment": "local",
+            "model_name": "test-model",
+            "worker_id": "pod-identity",
+        }
+    )
+    captured: dict[str, str] = {}
+
+    class FakeEngine:
+        async def dispose(self) -> None:
+            return None
+
+    class StopWorker(Exception):
+        pass
+
+    class FakePublisher:
+        def stop(self) -> None:
+            return None
+
+    class FakeSubscriber:
+        def close(self) -> None:
+            return None
+
+        def pull(self, *, request, timeout):
+            raise StopWorker
+
+    class CapturingHandler:
+        def __init__(self, sessions, processor, *, worker_id: str) -> None:
+            captured["worker_id"] = worker_id
+
+    monkeypatch.setattr(rca_worker, "WorkerSettings", lambda: settings)
+    monkeypatch.setattr(rca_worker, "create_async_engine", lambda _: FakeEngine())
+    monkeypatch.setattr(rca_worker, "async_sessionmaker", lambda *args, **kwargs: object())
+    monkeypatch.setattr(rca_worker, "ProductionRcaProcessor", lambda *args: object())
+    monkeypatch.setattr(rca_worker, "RcaJobHandler", CapturingHandler)
+    monkeypatch.setattr(rca_worker.pubsub_v1, "PublisherClient", FakePublisher)
+    monkeypatch.setattr(rca_worker.pubsub_v1, "SubscriberClient", FakeSubscriber)
+    monkeypatch.setattr(
+        rca_worker,
+        "prepare_topic_and_subscription",
+        lambda *args, **kwargs: ("topic", "subscription"),
+    )
+
+    with pytest.raises(StopWorker):
+        await rca_worker.run_production()
+
+    assert captured == {"worker_id": settings.worker_id}
 
 
 async def _seed(session_factory) -> RcaJobMessage:
