@@ -8,6 +8,12 @@ import pytest
 from sre_rca_worker.agents.rca.models import IncidentContext
 from sre_rca_worker.agents.rca.router import RuleRouter
 from sre_rca_worker.agents.rca.synthesizer import RcaSynthesizer
+from sre_rca_worker.domain.evidence.models import EvidenceReference
+from sre_rca_worker.domain.rca.models import (
+    EvidenceClaim,
+    RcaHypothesis,
+    RcaReportDraft,
+)
 from sre_rca_worker.integrations.mcp.models import (
     AllowedTool,
     CapabilitySet,
@@ -52,3 +58,31 @@ def test_route_and_partial_report_safety_dataset(path: Path) -> None:
         report = RcaSynthesizer().insufficient_evidence(provider=case["provider"])
         assert report.status == "PARTIAL"
         assert case["requiredPhrase"] in report.summary_zh_tw
+    else:
+        reference = EvidenceReference(id=uuid4(), partition_timestamp=now)
+        report = RcaSynthesizer().validate(
+            RcaReportDraft(
+                status="COMPLETE",
+                summary_zh_tw="多個來源的時間序列支持主要假設。",
+                hypotheses=(
+                    RcaHypothesis(
+                        statement=case["expectedLeadingHypothesis"],
+                        confidence=case["expectedConfidence"],
+                        claims=(
+                            EvidenceClaim(
+                                statement="延遲與連線池飽和同時發生",
+                                relation="SUPPORTS",
+                                evidence=(reference,),
+                            ),
+                        ),
+                    ),
+                ),
+                missing_evidence=(),
+                remediation=("由值班人員檢查連線池設定",),
+                verification_steps=("確認延遲回復",),
+            ),
+            known_evidence=(reference,),
+        )
+        assert report.hypotheses[0].statement == case["expectedLeadingHypothesis"]
+        assert report.hypotheses[0].confidence == case["expectedConfidence"]
+        assert all(value not in repr(report) for value in case.get("forbidden", []))

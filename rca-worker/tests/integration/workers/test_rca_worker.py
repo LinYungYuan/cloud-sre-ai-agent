@@ -213,3 +213,51 @@ async def test_long_processing_renews_lease_before_terminal_commit() -> None:
     release.set()
     assert await task is JobDisposition.ACK
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_transient_failure_nacks_twice_then_terminally_acks_third_attempt() -> (
+    None
+):
+    engine = create_async_engine(DATABASE_URL)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    message = await _seed(sessions)
+    calls = 0
+
+    async def process(claim):
+        nonlocal calls
+        calls += 1
+        raise ConnectionError("temporary MCP transport details")
+
+    handler = RcaJobHandler(sessions, process, worker_id="retrying")
+    assert await handler.handle(message) is JobDisposition.NACK
+    for expected in (JobDisposition.NACK, JobDisposition.ACK):
+        async with sessions() as session, session.begin():
+            await session.execute(
+                text("UPDATE worker_jobs SET available_at=now() WHERE id=:id"),
+                {"id": message.worker_job_id},
+            )
+        assert await handler.handle(message) is expected
+
+    async with sessions() as session:
+        job = (
+            await session.execute(
+                text(
+                    "SELECT status,attempt_count,lease_owner FROM worker_jobs WHERE id=:id"
+                ),
+                {"id": message.worker_job_id},
+            )
+        ).one()
+        run_status = await session.scalar(
+            text("SELECT status FROM rca_runs WHERE id=:id"),
+            {"id": message.rca_run_id},
+        )
+        attempts = await session.scalar(
+            text("SELECT count(*) FROM worker_attempts WHERE worker_job_id=:id"),
+            {"id": message.worker_job_id},
+        )
+    assert job == ("FAILED", 3, None)
+    assert run_status == "FAILED"
+    assert attempts == 3
+    assert calls == 3
+    await engine.dispose()

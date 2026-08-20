@@ -486,7 +486,9 @@ MCP 原始結果永久保存：
 
 EvidenceReference 必須包含 evidence UUID 與 partition timestamp，才能精確引用月分割資料。RCA report 只保存 reference 與摘要，不複製整份 raw evidence。
 
-每個 observed claim 必須引用 supporting、contradicting 或 missing evidence。Telemetry、logs、traces 與 tool output 永遠是資料，不是指令。
+每個 hypothesis 必須包含 `statement`、`confidence (0..1)` 與至少一個 observed claim；每個 claim 必須引用 supporting、contradicting 或 missing evidence。Worker 同時寫入 `rca_hypotheses` 與 `hypothesis_evidence`，Angular REST report 顯示主要假設與信心程度。Telemetry、logs、traces 與 tool output 永遠是資料，不是指令。
+
+若 RCA Agent 第一次回傳的 JSON schema 無效或引用未知 evidence，且 300 秒 deadline 仍有剩餘時間，Worker 只允許一次 corrective retry；修正提示只包含安全錯誤代碼與既有 allowlisted evidence references，不回顯原始 tool error。Specialist 暫時性 transport failure 最多立即重試一次，永久 schema／policy failure 不重試。每個成功或失敗 specialist 都必須寫入 `specialist_runs`，只保存固定的安全 failure code。
 
 ### 14.5 RCA 結果
 

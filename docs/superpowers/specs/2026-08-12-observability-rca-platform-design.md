@@ -27,11 +27,11 @@
 
 ### 2.1 產品行為
 
-- 同時支援 Grafana 告警自動觸發及工程師在 Incident 中追問。
+- 本 release 支援 Grafana 告警自動觸發與唯讀 Operator REST/UI；工程師追問保留給未來獨立 Chat service。
 - 每個新的 `firing` Incident 都自動啟動 RCA。
 - Grafana 重送或相同 alert instance 更新不得重複建立 Incident 或 RCA run。
 - Grafana `resolved` 更新 alert lifecycle，但不自動結束 Incident。
-- 同一 Incident 使用共享調查對話與時間軸。
+- 同一 Incident 使用稽核時間軸；共享調查對話不屬於目前 release scope。
 - 使用者可確認、指派、留言、手動重跑 RCA、解決及重新開啟 Incident。
 - 所有資料永久保存在 Cloud SQL PostgreSQL 18，不使用外部冷儲存。
 - 預估流量低於每日 1,000 個 alert instances。
@@ -250,7 +250,7 @@ Grafana 從外部網路呼叫公開 HTTPS endpoint。Bearer token 由 Secret Man
 2. 展開 payload 中的 `alerts[]`。
 3. 正規化 firing/resolved alert events。
 4. 執行 deduplication 與 alert instance upsert。
-5. 解析 team/project/environment/service scope。
+5. 以 `resource.label.project_id` 判斷 provider，並以 `folder + alertname` 建立 identity v2；team/environment/service 不是必要輸入。
 6. 建立或更新 Incident。
 7. 新 Incident 建立 RCA job 與 outbox event。
 
@@ -267,13 +267,9 @@ Grafana 從外部網路呼叫公開 HTTPS endpoint。Bearer token 由 Secret Man
 
 ### 7.2 Scope 分類
 
-分類順序：
+Provider 僅由 Grafana label `resource.label.project_id` 決定：存在且非空是 GCP，key 不存在是 AWS，存在但空白／無效則是 GCP `VALIDATION_FAILED`。`folder` 是專案／系統代碼；Incident identity v2 使用 `sourceId + folder + alertname`。`cloud_provider`、ARN、Series 或 AlertValues 都不能覆寫 provider。
 
-1. 優先讀取標準 Grafana labels：`team`、`project`、`environment`、`service`。
-2. 缺少欄位時套用有優先序的 classification mappings。
-3. 仍無法辨識時標記為 `UNCLASSIFIED` 並進入未分類佇列。
-
-未分類資料仍永久保存。Angular 允許授權人員補上 scope、預覽 mapping 影響範圍，並選擇是否建立 reusable mapping。
+Normalization rules 可補充 resource type/id/name，但不能阻止 Incident/RCA 建立。`UNCLASSIFIED` 與 `VALIDATION_FAILED` 仍永久保存，並建立 `RCA_ANALYSIS` worker job 與 outbox event；team、environment、service 不再是新告警的必要欄位。
 
 ### 7.3 Incident lifecycle
 
@@ -289,7 +285,7 @@ OPEN → INVESTIGATING → RESOLVED
   └──── reopen command ─────┘
 
 RCA Run
-WAITING_FOR_CLASSIFICATION → QUEUED → RUNNING → SUCCEEDED
+QUEUED → RUNNING → SUCCEEDED
                                            ├─ PARTIAL
                                            ├─ FAILED
                                            └─ CANCELLED
@@ -297,7 +293,7 @@ WAITING_FOR_CLASSIFICATION → QUEUED → RUNNING → SUCCEEDED
 
 `acknowledged_at`、`acknowledged_by` 與 `assigned_to` 是獨立欄位，不是 Incident status。重新開啟是一個受稽核的 command/event，執行後 status 回到 `OPEN`，不是額外的 `REOPENED` status。Grafana 全部恢復時只更新 `alert_state = RESOLVED`；Incident 仍由負責人檢查後手動結案。已結案的相同 fingerprint 再次 firing 時建立新 Incident，並記錄前後 Incident 關聯。
 
-每個新 firing Incident 都會自動建立 RCA run。若 team/environment/service 尚未完成分類，run 先進入 `WAITING_FOR_CLASSIFICATION`，不得查詢 MCP；完成分類後由系統自動轉成 `QUEUED`。這個等待狀態不計入五分鐘 RCA 執行期限，期限從進入 `QUEUED` 開始計算。
+每個新 firing Incident 都會在同一 transaction 建立 RCA run、`RCA_ANALYSIS` job 與 outbox event。工作進入 `QUEUED` 後有 300 秒總期限；沒有安全 GCP scope、AWS 或缺少允許 capability 時不連 MCP，但仍產生清楚標示「證據不足」的 `PARTIAL` 報告。
 
 ## 8. Multi-Agent RCA
 
@@ -308,7 +304,7 @@ WAITING_FOR_CLASSIFICATION → QUEUED → RUNNING → SUCCEEDED
 - Log Agent：整理 exception、error pattern、stack trace、first/last seen、frequency 與 event sequence。
 - RCA Agent：建立 evidence timeline、competing hypotheses、supporting/contradicting/missing evidence、leading hypothesis、confidence 與 verification plan。
 
-Production incident 預設並行執行三個 specialists，再由 RCA Agent 綜合。本階段不實作 Router、人工追問或共享對話。
+Deterministic Rule Router 只依 provider、安全 scope 與啟動時探索到的 read-only capabilities 選擇 specialists；GCP 可並行 Metrics、Trace、Log，再由唯一的 RCA Agent 綜合。Rule Router 不是 LLM agent，也不把 AlertValues 當指令。人工追問與共享對話保留給未來 Chat service。
 
 ### 8.2 時間預算
 
@@ -340,10 +336,11 @@ Evidence
 ├── source_endpoint
 ├── tool_name
 ├── observed_at
-├── team/project/environment/service
+├── normalized provider/safe scope
 ├── time_window_start/end
 ├── structured_data
-└── raw_result_reference
+├── raw_result BYTEA
+└── content_hash／metadata
 ```
 
 每一項 RCA claim 必須透過關聯表指出 supporting、contradicting 或 missing evidence。Confidence 不可取代 provenance。
@@ -402,9 +399,9 @@ hypothesis_evidence
 rca_reports
 ```
 
-每次重跑建立新 RCA run 與 report version，不覆蓋歷史。Evidence 保存 MCP endpoint、tool、time window、provenance、structured result 與 raw result reference。
+每次重跑建立新 RCA run 與 report version，不覆蓋歷史。Evidence 保存 MCP endpoint、capability、tool、time window、provenance、structured JSON、精確 raw bytes 與 content hash；報告只保存 opaque evidence references，不複製 raw evidence。
 
-### 9.5 對話、稽核與非同步工作
+### 9.5 稽核與非同步工作（Chat 保留）
 
 ```text
 incident_messages
@@ -415,7 +412,7 @@ worker_jobs
 worker_attempts
 ```
 
-訊息角色為 `USER`、`AGENT`、`SYSTEM`。AI 訊息關聯 RCA run 與 evidence。Audit records 不可由一般 API 修改或刪除。
+`incident_messages` 是 legacy reserved/unused table；本 release 不建立 Chat API、message route、conversation job、SSE 或 WebSocket。Timeline、audit、outbox 與 worker records 仍用於 durable workflow；audit records 不可由一般 API 修改或刪除。
 
 ### 9.6 永久保存與分區
 
@@ -521,7 +518,7 @@ Operator UI 僅使用 authenticated REST。系統不公開 SSE、WebSocket 或�
 詳情分為：
 
 - 總覽：Grafana 摘要、時間、labels、annotations、連結及 RCA 摘要。
-- 調查：Incident timeline、specialist progress 與共享 AI 對話。
+- 調查：Incident timeline 與 specialist progress；Chat/共享對話不在本 release。
 - RCA 報告：leading hypothesis、confidence、supporting/contradicting/missing evidence、verification 與版本比較。
 - 告警與證據：關聯 alert instances、evidence、provenance 及受權限保護的 raw data。
 - 稽核紀錄：操作人、時間與變更內容。

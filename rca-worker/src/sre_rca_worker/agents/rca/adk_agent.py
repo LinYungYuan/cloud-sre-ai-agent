@@ -27,10 +27,37 @@ class AdkRcaAgent:
     ) -> RcaReportDraft:
         if deadline.tzinfo is None or deadline.utcoffset() is None:
             raise ValueError("deadline must be timezone-aware")
-        remaining = (deadline - datetime.now(UTC)).total_seconds()
-        if remaining <= 0:
-            raise TimeoutError("RCA synthesis deadline expired")
+        prompt = self.build_prompt(
+            alert_issue=alert_issue,
+            evidence_summaries=evidence_summaries,
+            known_evidence=known_evidence,
+        )
+        for attempt in range(2):
+            remaining = (deadline - datetime.now(UTC)).total_seconds()
+            if remaining <= 0:
+                raise TimeoutError("RCA synthesis deadline expired")
+            final_text = await self._run_once(prompt, remaining=remaining)
+            try:
+                draft = RcaReportDraft.model_validate_json(final_text)
+                return RcaSynthesizer().validate(draft, known_evidence=known_evidence)
+            except ValueError as error:
+                if attempt == 1:
+                    raise
+                correction = json.loads(prompt)
+                correction["validationCorrection"] = (
+                    "UNKNOWN_EVIDENCE_REFERENCE"
+                    if str(error) == "RCA report cites unknown evidence"
+                    else "REPORT_SCHEMA_INVALID"
+                )
+                correction["instruction"] = (
+                    "Return a schema-valid report using only allowedEvidenceReferences."
+                )
+                prompt = json.dumps(
+                    correction, ensure_ascii=False, separators=(",", ":")
+                )
+        raise AssertionError("unreachable")
 
+    async def _run_once(self, prompt: str, *, remaining: float) -> str:
         from google.adk.agents import LlmAgent
         from google.adk.runners import InMemoryRunner
         from google.genai.types import Content, Part
@@ -40,17 +67,12 @@ class AdkRcaAgent:
             model=self._model_name,
             instruction=self._instruction,
             output_schema=RcaReportDraft,
-            mode="single_turn",
+            mode="chat",
             tools=[],
         )
         runner = InMemoryRunner(agent=agent, app_name="sre_rca_worker")
         user_id = "rca-worker"
         session_id = uuid4().hex
-        prompt = self.build_prompt(
-            alert_issue=alert_issue,
-            evidence_summaries=evidence_summaries,
-            known_evidence=known_evidence,
-        )
         final_text: str | None = None
         try:
             await runner.session_service.create_session(
@@ -70,8 +92,7 @@ class AdkRcaAgent:
             await runner.close()
         if not final_text:
             raise ValueError("RCA Agent returned no structured report")
-        draft = RcaReportDraft.model_validate_json(final_text)
-        return RcaSynthesizer().validate(draft, known_evidence=known_evidence)
+        return final_text
 
     @staticmethod
     def build_prompt(

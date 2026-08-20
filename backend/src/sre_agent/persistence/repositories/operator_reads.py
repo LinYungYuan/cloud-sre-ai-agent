@@ -450,8 +450,10 @@ class SqlAlchemyOperatorReadRepository:
             "status": body["status"],
             "summary": row["summary"],
             "root_cause": body["rootCause"],
+            "confidence": body.get("confidence"),
             "impact": body["impact"],
             "recommendations": body.get("recommendations", []),
+            "hypotheses": body.get("hypotheses", []),
             "claims": body.get("claims", []),
             "created_at": row["created_at"],
         }

@@ -149,8 +149,10 @@ class FakeReads:
             "status": "PARTIAL",
             "summary": "CPU 使用率過高",
             "root_cause": "尚待確認",
+            "confidence": None,
             "impact": "資料庫延遲",
             "recommendations": ["確認慢查詢"],
+            "hypotheses": [],
             "claims": [],
             "created_at": NOW,
         }
@@ -251,6 +253,8 @@ async def test_operator_reads_use_camel_case_utc_z_etag_and_bounded_pages() -> N
     assert runs.json()["items"][0]["runNumber"] == 1
     assert report.status_code == 200
     assert report.json()["rootCause"] == "尚待確認"
+    assert report.json()["confidence"] is None
+    assert report.json()["hypotheses"] == []
     for response in (incidents, incident, alert, runs, report):
         assert response.headers["x-correlation-id"] == "operator-request-1"
 

@@ -139,7 +139,9 @@ class RcaReport(OperatorModel):
     status: str
     summary: str
     root_cause: str
+    confidence: float | None = Field(default=None, ge=0, le=1)
     impact: str
     recommendations: list[str]
+    hypotheses: list[dict[str, Any]]
     claims: list[dict[str, Any]]
     created_at: datetime

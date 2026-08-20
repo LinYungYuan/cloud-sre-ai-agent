@@ -58,16 +58,32 @@ class RcaWorkflow:
                 available_tools=capabilities.for_specialist(kind),
             )
             try:
-                remaining = (deadline - datetime.now(UTC)).total_seconds()
-                if remaining <= 0:
-                    raise TimeoutError
-                async with asyncio.timeout(remaining):
-                    results[kind] = await self._specialists[kind].run(request, deadline)
+                for attempt in range(2):
+                    remaining = (deadline - datetime.now(UTC)).total_seconds()
+                    if remaining <= 0:
+                        raise TimeoutError
+                    try:
+                        async with asyncio.timeout(remaining):
+                            results[kind] = await self._specialists[kind].run(
+                                request, deadline
+                            )
+                        break
+                    except (ConnectionError, OSError):
+                        if attempt == 1:
+                            raise
             except asyncio.CancelledError:
                 raise
             except TimeoutError:
                 failures[kind] = SpecialistFailure(
                     specialist=kind, code="SPECIALIST_TIMEOUT"
+                )
+            except (ConnectionError, OSError):
+                failures[kind] = SpecialistFailure(
+                    specialist=kind, code="SPECIALIST_TRANSPORT"
+                )
+            except ValueError:
+                failures[kind] = SpecialistFailure(
+                    specialist=kind, code="SPECIALIST_VALIDATION"
                 )
             except Exception:  # noqa: BLE001 - converted to a safe closed failure code
                 failures[kind] = SpecialistFailure(

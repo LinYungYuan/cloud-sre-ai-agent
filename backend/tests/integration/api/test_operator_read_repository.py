@@ -183,7 +183,7 @@ async def repository():
                     result_status
                 ) VALUES (
                     $1, $2, 1, 'CPU 使用率過高',
-                    '{"status":"PARTIAL","rootCause":"尚待確認","impact":"資料庫延遲","recommendations":["確認慢查詢"],"claims":[]}'::jsonb,
+                    '{"status":"PARTIAL","rootCause":"尚待確認","confidence":0.42,"impact":"資料庫延遲","recommendations":["確認慢查詢"],"hypotheses":[{"statement":"資料庫負載增加","confidence":0.42,"claims":[]}],"claims":[]}'::jsonb,
                     $3, 'PARTIAL'
                 )""",
                 (REPORT_ID, RUN_ID, AT),
@@ -221,6 +221,8 @@ async def test_scoped_operator_reads_normalized_incident_alert_run_and_report(
     assert "raw_body" not in alert and "raw_payload" not in alert
     assert runs["items"][0]["run_number"] == 1
     assert report["root_cause"] == "尚待確認"
+    assert report["confidence"] == pytest.approx(0.42)
+    assert report["hypotheses"][0]["statement"] == "資料庫負載增加"
 
 
 @pytest.mark.asyncio

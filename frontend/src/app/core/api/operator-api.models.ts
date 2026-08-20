@@ -97,8 +97,14 @@ export interface RcaReport {
   status: string;
   summary: string;
   rootCause: string;
+  confidence: number | null;
   impact: string;
   recommendations: string[];
+  hypotheses: Array<{
+    statement: string;
+    confidence: number;
+    claims: Record<string, unknown>[];
+  }>;
   claims: Record<string, unknown>[];
   createdAt: string;
 }

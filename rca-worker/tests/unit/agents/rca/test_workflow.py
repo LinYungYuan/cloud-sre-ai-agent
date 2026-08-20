@@ -23,17 +23,23 @@ class FakeSpecialist:
         barrier: asyncio.Event,
         *,
         failure: Exception | None = None,
+        transient_failures: int = 0,
     ) -> None:
         self.kind = kind
         self.started = started
         self.barrier = barrier
         self.failure = failure
+        self.transient_failures = transient_failures
+        self.calls = 0
 
     async def run(
         self, request: SpecialistRequest, deadline: datetime
     ) -> SpecialistResult:
+        self.calls += 1
         self.started.append(self.kind)
         await self.barrier.wait()
+        if self.calls <= self.transient_failures:
+            raise ConnectionError("temporary endpoint outage with secret details")
         if self.failure:
             raise self.failure
         return SpecialistResult(specialist=self.kind)
@@ -122,3 +128,71 @@ async def test_expired_deadline_or_empty_route_invokes_nothing() -> None:
             deadline=now - timedelta(seconds=1),
         )
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_workflow_retries_transient_transport_once_but_not_policy_failure() -> (
+    None
+):
+    now = datetime.now(UTC)
+    started: list[SpecialistKind] = []
+    barrier = asyncio.Event()
+    barrier.set()
+    metrics = FakeSpecialist(
+        SpecialistKind.METRICS, started, barrier, transient_failures=1
+    )
+    trace = FakeSpecialist(
+        SpecialistKind.TRACE,
+        started,
+        barrier,
+        failure=ValueError("permanent schema failure"),
+    )
+    bundle = await RcaWorkflow(
+        {
+            SpecialistKind.METRICS: metrics,
+            SpecialistKind.TRACE: trace,
+        }
+    ).run(
+        _context(now),
+        CapabilitySet(
+            by_specialist={
+                SpecialistKind.METRICS: (_tool(SpecialistKind.METRICS),),
+                SpecialistKind.TRACE: (_tool(SpecialistKind.TRACE),),
+            }
+        ),
+        deadline=now + timedelta(seconds=5),
+    )
+
+    assert metrics.calls == 2
+    assert trace.calls == 1
+    assert tuple(item.specialist for item in bundle.results) == (
+        SpecialistKind.METRICS,
+    )
+    assert [(item.specialist, item.code) for item in bundle.failures] == [
+        (SpecialistKind.TRACE, "SPECIALIST_VALIDATION")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_exhausted_transport_retry_has_a_distinct_safe_failure_code() -> None:
+    now = datetime.now(UTC)
+    barrier = asyncio.Event()
+    barrier.set()
+    metrics = FakeSpecialist(
+        SpecialistKind.METRICS, [], barrier, transient_failures=2
+    )
+
+    bundle = await RcaWorkflow({SpecialistKind.METRICS: metrics}).run(
+        _context(now),
+        CapabilitySet(
+            by_specialist={
+                SpecialistKind.METRICS: (_tool(SpecialistKind.METRICS),)
+            }
+        ),
+        deadline=now + timedelta(seconds=5),
+    )
+
+    assert metrics.calls == 2
+    assert [(item.specialist, item.code) for item in bundle.failures] == [
+        (SpecialistKind.METRICS, "SPECIALIST_TRANSPORT")
+    ]

@@ -8,7 +8,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from sre_rca_worker.agents.rca.adk_agent import AdkRcaAgent
-from sre_rca_worker.agents.rca.models import IncidentContext
+from sre_rca_worker.agents.rca.models import (
+    IncidentContext,
+    InvestigationBundle,
+    SpecialistFailure,
+)
 from sre_rca_worker.agents.rca.synthesizer import RcaSynthesizer
 from sre_rca_worker.agents.rca.workflow import RcaWorkflow
 from sre_rca_worker.agents.skills.loader import load_skills
@@ -23,7 +27,7 @@ from sre_rca_worker.application.rca.job_lifecycle import (
 from sre_rca_worker.application.rca.persist_evidence import PersistEvidence
 from sre_rca_worker.config.settings import WorkerSettings
 from sre_rca_worker.domain.evidence.models import EvidenceReference
-from sre_rca_worker.domain.rca.models import RcaReportDraft
+from sre_rca_worker.domain.rca.models import EvidenceClaim, RcaReportDraft
 from sre_rca_worker.integrations.mcp.discovery import discover_capabilities
 from sre_rca_worker.integrations.mcp.factories import McpClientFactory
 from sre_rca_worker.integrations.mcp.models import CloudScope, SpecialistKind
@@ -60,10 +64,16 @@ class ProductionRcaProcessor:
         bundle = await RcaWorkflow(specialists).run(
             context, capabilities, deadline=claim.deadline_at
         )
+        await self._persist_failures(claim, bundle.failures)
+        self._raise_if_retryable_total_failure(bundle, claim.attempt_number)
         references, summaries = await self._persist_bundle(claim, bundle.results)
         if not references:
-            report = RcaSynthesizer().insufficient_evidence(
-                provider=context.scope.provider if context.scope else None
+            report = (
+                RcaSynthesizer().failed_analysis()
+                if bundle.failures
+                else RcaSynthesizer().insufficient_evidence(
+                    provider=context.scope.provider if context.scope else None
+                )
             )
         else:
             report = await AdkRcaAgent(
@@ -75,6 +85,8 @@ class ProductionRcaProcessor:
                 known_evidence=references,
                 deadline=claim.deadline_at,
             )
+            if bundle.failures:
+                report = RcaSynthesizer().with_specialist_failures(report)
         await self._persist_report(claim, report)
         return RcaProcessingResult(status=report.status)
 
@@ -134,7 +146,7 @@ class ProductionRcaProcessor:
                         """INSERT INTO specialist_runs(rca_run_id,specialist_type,status,started_at,completed_at)
                            VALUES (:run,:kind,'SUCCEEDED',now(),now())
                            ON CONFLICT (rca_run_id,specialist_type) DO UPDATE
-                           SET status='SUCCEEDED', completed_at=now()
+                           SET status='SUCCEEDED', completed_at=now(), failure_code=NULL
                            RETURNING id"""
                     ),
                     {
@@ -162,17 +174,132 @@ class ProductionRcaProcessor:
                         )
         return tuple(references), tuple(summaries)
 
+    async def _persist_failures(
+        self,
+        claim: RcaJobClaim,
+        failures: tuple[SpecialistFailure, ...],
+    ) -> None:
+        specialist_types = {
+            SpecialistKind.METRICS: "METRICS",
+            SpecialistKind.TRACE: "TRACES",
+            SpecialistKind.LOG: "LOGS",
+        }
+        failure_codes = {
+            "SPECIALIST_TIMEOUT": "MCP_TIMEOUT",
+            "SPECIALIST_TRANSPORT": "MCP_TRANSPORT",
+            "SPECIALIST_VALIDATION": "VALIDATION_FAILED",
+            "SPECIALIST_FAILED": "INTERNAL_ERROR",
+        }
+        async with self._sessions() as session, session.begin():
+            for failure in failures:
+                await session.execute(
+                    text(
+                        """INSERT INTO specialist_runs(
+                              rca_run_id,specialist_type,status,started_at,
+                              completed_at,failure_code)
+                           VALUES (:run,:kind,'FAILED',now(),now(),:failure_code)
+                           ON CONFLICT (rca_run_id,specialist_type) DO UPDATE
+                           SET status='FAILED', completed_at=now(),
+                               failure_code=EXCLUDED.failure_code"""
+                    ),
+                    {
+                        "run": claim.rca_run_id,
+                        "kind": specialist_types[failure.specialist],
+                        "failure_code": failure_codes[failure.code],
+                    },
+                )
+
+    @staticmethod
+    def _raise_if_retryable_total_failure(
+        bundle: InvestigationBundle, attempt_number: int
+    ) -> None:
+        if (
+            attempt_number < 3
+            and not bundle.results
+            and bundle.failures
+            and all(
+                failure.code == "SPECIALIST_TRANSPORT" for failure in bundle.failures
+            )
+        ):
+            raise ConnectionError("transient MCP failure")
+
     async def _persist_report(self, claim: RcaJobClaim, report: RcaReportDraft) -> None:
+        def serialize_claim(claim_item: EvidenceClaim) -> dict[str, Any]:
+            return {
+                "statement": claim_item.statement,
+                "evidence": [
+                    {
+                        "evidenceId": str(reference.id),
+                        "partitionTimestamp": reference.partition_timestamp.isoformat().replace(
+                            "+00:00", "Z"
+                        ),
+                        "relation": claim_item.relation,
+                    }
+                    for reference in claim_item.evidence
+                ],
+            }
+
         body: dict[str, Any] = {
             "status": report.status,
-            "rootCause": report.hypotheses[0] if report.hypotheses else "尚待確認",
-            "impact": "；".join(item.statement for item in report.claims) or "證據不足",
+            "rootCause": (
+                report.hypotheses[0].statement if report.hypotheses else "尚待確認"
+            ),
+            "confidence": (
+                report.hypotheses[0].confidence if report.hypotheses else None
+            ),
+            "impact": "；".join(
+                claim.statement
+                for hypothesis in report.hypotheses
+                for claim in hypothesis.claims
+            )
+            or "證據不足",
             "recommendations": list(report.remediation),
-            "claims": [item.model_dump(mode="json") for item in report.claims],
+            "hypotheses": [
+                {
+                    "statement": item.statement,
+                    "confidence": item.confidence,
+                    "claims": [serialize_claim(claim) for claim in item.claims],
+                }
+                for item in report.hypotheses
+            ],
+            "claims": [
+                serialize_claim(claim)
+                for hypothesis in report.hypotheses
+                for claim in hypothesis.claims
+            ],
             "verificationSteps": list(report.verification_steps),
             "missingEvidence": list(report.missing_evidence),
         }
         async with self._sessions() as session, session.begin():
+            for hypothesis in report.hypotheses:
+                hypothesis_id = await session.scalar(
+                    text(
+                        """INSERT INTO rca_hypotheses(rca_run_id,statement,confidence)
+                           VALUES (:run,:statement,:confidence) RETURNING id"""
+                    ),
+                    {
+                        "run": claim.rca_run_id,
+                        "statement": hypothesis.statement,
+                        "confidence": hypothesis.confidence,
+                    },
+                )
+                for claim_item in hypothesis.claims:
+                    for reference in claim_item.evidence:
+                        await session.execute(
+                            text(
+                                """INSERT INTO hypothesis_evidence(
+                                      hypothesis_id,evidence_id,
+                                      evidence_partition_timestamp,relation)
+                                   VALUES (:hypothesis,:evidence,:partition,:relation)
+                                   ON CONFLICT DO NOTHING"""
+                            ),
+                            {
+                                "hypothesis": hypothesis_id,
+                                "evidence": reference.id,
+                                "partition": reference.partition_timestamp,
+                                "relation": claim_item.relation,
+                            },
+                        )
             await session.execute(
                 text(
                     """INSERT INTO rca_reports(rca_run_id,version,summary,report,result_status)

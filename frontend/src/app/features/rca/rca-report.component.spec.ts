@@ -16,13 +16,16 @@ describe('RcaReportComponent', () => {
       status: 'PARTIAL',
       summary: '證據不足，目前沒有 AWS MCP 證據。',
       rootCause: '尚待確認',
+      confidence: 0.88,
       impact: '未知',
       recommendations: ['確認監控資料'],
+      hypotheses: [],
       claims: [],
       createdAt: '2026-08-13T06:30:00Z',
     });
     fixture.detectChanges();
     expect(fixture.nativeElement.textContent).toContain('證據不足');
+    expect(fixture.nativeElement.textContent).toContain('88%');
     expect(fixture.nativeElement.textContent).toContain('修復建議（需人工審查）');
   });
 });

@@ -6,10 +6,34 @@
   "status": "PARTIAL",
   "summary": "Checkout errors correlate with a database connection-pool saturation window.",
   "rootCause": "A deployment increased concurrent database work beyond the configured pool capacity.",
+  "confidence": 0.78,
   "impact": "Some checkout requests returned HTTP 500 responses for twelve minutes.",
   "recommendations": [
     "Roll back the concurrency change.",
     "Add connection-pool saturation alerts."
+  ],
+  "hypotheses": [
+    {
+      "statement": "A deployment increased concurrent database work beyond the configured pool capacity.",
+      "confidence": 0.78,
+      "claims": [
+        {
+          "statement": "Database pool saturation preceded the HTTP error increase.",
+          "evidence": [
+            {
+              "evidenceId": "985de543-ae04-4758-b9f9-14088354e3a0",
+              "partitionTimestamp": "2026-08-12T10:35:00Z",
+              "relation": "SUPPORTS"
+            },
+            {
+              "evidenceId": "117fd644-ab0f-4f32-9881-bb897fa4fe16",
+              "partitionTimestamp": "2026-08-12T10:36:00Z",
+              "relation": "SUPPORTS"
+            }
+          ]
+        }
+      ]
+    }
   ],
   "claims": [
     {

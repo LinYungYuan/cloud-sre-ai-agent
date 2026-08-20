@@ -1074,8 +1074,10 @@ components:
         - status
         - summary
         - rootCause
+        - confidence
         - impact
         - recommendations
+        - hypotheses
         - claims
         - createdAt
       properties:
@@ -1093,13 +1095,19 @@ components:
           minimum: 1
         status:
           type: string
-          enum: [SUCCEEDED, PARTIAL]
+          enum: [COMPLETE, PARTIAL, FAILED]
         summary:
           type: string
           minLength: 1
         rootCause:
           type: string
           minLength: 1
+        confidence:
+          oneOf:
+            - type: number
+              minimum: 0
+              maximum: 1
+            - type: 'null'
         impact:
           type: string
           minLength: 1
@@ -1108,6 +1116,25 @@ components:
           items:
             type: string
             minLength: 1
+        hypotheses:
+          type: array
+          items:
+            type: object
+            required: [statement, confidence, claims]
+            properties:
+              statement:
+                type: string
+                minLength: 1
+              confidence:
+                type: number
+                minimum: 0
+                maximum: 1
+              claims:
+                type: array
+                minItems: 1
+                items:
+                  $ref: '#/components/schemas/ReportClaim'
+            additionalProperties: false
         claims:
           type: array
           items:
