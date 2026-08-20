@@ -1,52 +1,49 @@
-# GKE Production Readiness Design
+# GKE 正式環境就緒設計
 
-Date: 2026-08-20
-Status: Approved in chat; awaiting written-spec review
+日期：2026-08-20
+狀態：對話中已核准，等待中文書面規格審閱
 
-## Objective
+## 目標
 
-Prepare the SRE Agent Backend, Angular Frontend, RCA Worker, outbox publisher,
-database migrations, and partition maintenance workloads for deployment on
-Google Kubernetes Engine.
+讓 SRE Agent 的 Backend、Angular Frontend、RCA Worker、outbox publisher、
+資料庫 migration 與 partition maintenance workload 具備部署到 Google
+Kubernetes Engine 的條件。
 
-This work produces production container images and a Kustomize base for the
-application workloads. It deliberately does not provision Google Cloud
-infrastructure. Cloud SQL, Pub/Sub, Workload Identity bindings, secrets,
-Gateway, DNS, and TLS remain external deployment inputs that can be managed by
-Terraform later.
+本次工作會產出正式環境 container image，以及應用 workload 的 Kustomize
+base，但不會建立 Google Cloud 基礎設施。Cloud SQL、Pub/Sub、Workload
+Identity 綁定、Secret、Gateway、DNS 與 TLS 都是外部部署輸入，之後可交由
+Terraform 管理。
 
-## Scope
+## 範圍
 
-The implementation covers:
+實作範圍包含：
 
-- A production Backend image used by the API, outbox publisher, Backend
-  migration Job, and partition-maintenance CronJob.
-- A production Frontend image that serves the compiled Angular application.
-- A production RCA Worker image used by the Worker Deployment and Worker
-  migration Job.
-- Backend liveness and database-aware readiness endpoints.
-- A reduced, purpose-specific configuration model for the outbox publisher.
-- Explicit Worker configuration for Pub/Sub resource auto-creation and a
-  per-Pod Worker identity.
-- Kubernetes Deployments, Services, ConfigMap, ServiceAccounts, CronJob, and
-  ordered migration Job templates.
-- Deployment and verification documentation.
+- 建立 Backend 正式環境 image，供 API、outbox publisher、Backend migration
+  Job 與 partition maintenance CronJob 共用。
+- 建立用來提供編譯後 Angular 應用程式的 Frontend 正式環境 image。
+- 建立 RCA Worker 正式環境 image，供 Worker Deployment 與 Worker migration
+  Job 共用。
+- 新增 Backend liveness 與具備資料庫檢查的 readiness endpoint。
+- 為 outbox publisher 建立職責單一且最小化的設定模型。
+- 為 Pub/Sub 資源自動建立功能與每個 Pod 的 Worker identity 提供明確設定。
+- 建立 Kubernetes Deployment、Service、ConfigMap、ServiceAccount、CronJob
+  與依序執行的 migration Job template。
+- 補充部署與驗證文件。
 
-The implementation excludes:
+實作範圍不包含：
 
-- Cloud SQL and Pub/Sub Terraform resources.
-- Creation or population of Kubernetes Secrets.
-- Gateway, Ingress, DNS, certificates, domains, and external load balancers.
-- Operator API authentication. In non-local environments the Operator API
-  continues to fail closed with HTTP 503.
-- Container Registry and CI/CD pipeline implementation.
-- RCA Worker horizontal scaling and Pub/Sub-backlog HPA.
-- Real MCP endpoints, capability manifests, model credentials, or production
-  evidence access.
+- Cloud SQL 與 Pub/Sub Terraform 資源。
+- 建立或填入 Kubernetes Secret。
+- Gateway、Ingress、DNS、憑證、網域與外部 load balancer。
+- Operator API 身分驗證；非本機環境的 Operator API 會繼續以 HTTP 503
+  fail closed。
+- Container Registry 與 CI/CD pipeline 實作。
+- RCA Worker 水平擴展及以 Pub/Sub backlog 為依據的 HPA。
+- 真實 MCP endpoint、capability manifest、模型憑證或正式 evidence 存取。
 
-## Architecture
+## 架構
 
-The deployed data flow is:
+部署後的資料流如下：
 
 ```text
 Frontend Service ----> Backend Service ----> Cloud SQL
@@ -61,141 +58,129 @@ Frontend Service ----> Backend Service ----> Cloud SQL
                                                      Cloud SQL / MCP / model
 ```
 
-The Frontend and Backend are the only workloads with Kubernetes Services. The
-outbox publisher and RCA Worker are background Deployments and do not accept
-inbound application traffic.
+只有 Frontend 與 Backend workload 具有 Kubernetes Service。Outbox publisher
+與 RCA Worker 都是背景 Deployment，不接收對內或對外的應用流量。
 
-One Backend image is reused with different commands for the API, outbox
-publisher, Backend migration, and partition maintenance. One RCA Worker image
-is reused for the Worker and Worker migration. This prevents release drift
-between runtime code and schema-management code.
+同一個 Backend image 會使用不同 command 分別執行 API、outbox publisher、
+Backend migration 與 partition maintenance。同一個 RCA Worker image 則供
+Worker 與 Worker migration 共用，藉此避免 runtime code 與 schema management
+code 在不同 release 間產生版本漂移。
 
-## Component Design
+## 元件設計
 
 ### Backend
 
-The Backend receives a multi-stage production Dockerfile. Dependency
-installation uses the checked-in `uv.lock`; the runtime runs as a non-root user
-and starts Uvicorn on port 8000. Uvicorn becomes an explicit locked production
-dependency instead of an undeclared local tool.
+Backend 會新增 multi-stage 正式環境 Dockerfile。相依套件以 repository 內的
+`uv.lock` 安裝；runtime 使用 non-root user，並在 port 8000 啟動 Uvicorn。
+Uvicorn 會成為鎖定版本的正式相依套件，而不是未宣告的本機工具。
 
-Two unauthenticated operational endpoints are added outside `/api/v1` and the
-Grafana webhook namespace:
+新增兩個不需身分驗證的操作 endpoint，路徑獨立於 `/api/v1` 與 Grafana
+webhook namespace：
 
-- `GET /health/live` returns success when the ASGI process can serve requests.
-  It does not query PostgreSQL, preventing temporary database failures from
-  causing a restart loop.
-- `GET /health/ready` performs a bounded `SELECT 1` through a dedicated health
-  dependency. It returns success only after application startup has completed
-  and PostgreSQL is reachable.
+- `GET /health/live`：ASGI process 能回應 request 時回傳成功。此 endpoint
+  不查詢 PostgreSQL，避免暫時性資料庫故障引發重啟迴圈。
+- `GET /health/ready`：透過專用 health dependency 執行有 timeout 的
+  `SELECT 1`。只有應用程式完成啟動且 PostgreSQL 可連線時才回傳成功。
 
-Health responses contain no configuration, credentials, catalog content, or
-exception text. Readiness failures return a generic 503 response.
+Health response 不得包含設定值、credential、catalog 內容或 exception text。
+Readiness 失敗時只回傳通用的 HTTP 503 response。
 
-Production Operator authentication is unchanged. When `APP_ENVIRONMENT` is not
-`local`, the existing unavailable identity provider continues returning 503.
-The deployment must not set `APP_ENVIRONMENT=local` as an authentication
-bypass.
+正式環境的 Operator 身分驗證維持現狀。當 `APP_ENVIRONMENT` 不是 `local` 時，
+既有 unavailable identity provider 會繼續回傳 503。部署不得以設定
+`APP_ENVIRONMENT=local` 的方式繞過身分驗證。
 
 ### Outbox publisher
 
-The outbox publisher is a required runtime bridge between the transactional
-database and Pub/Sub. Backend transactions persist an event in
-`outbox_events`; the publisher claims pending rows and publishes them. Without
-this workload, the RCA Worker receives no jobs created by the Backend.
+Outbox publisher 是 transaction database 與 Pub/Sub 之間必要的 runtime
+橋接元件。Backend transaction 先將 event 寫入 `outbox_events`；publisher 再
+claim 尚未處理的 row 並發布。缺少這個 workload 時，RCA Worker 不會收到
+Backend 建立的任何 job。
 
-The publisher receives a dedicated `OutboxSettings` model containing only:
+Publisher 會改用專用的 `OutboxSettings`，只包含：
 
 - `DATABASE_URL`
 - `PUBSUB_PROJECT_ID`
 - `RCA_TOPIC_ID`
 
-It no longer requires Grafana credentials, model selection, or MCP endpoints.
-The publisher runs from the Backend image as a separate Deployment with no
-Service.
+它不再需要 Grafana credential、模型選擇或 MCP endpoint。Publisher 會使用
+Backend image，以沒有 Service 的獨立 Deployment 執行。
 
 ### Frontend
 
-The Frontend image uses Node.js 24 in the build stage and an unprivileged Nginx
-runtime listening on port 8080. Nginx provides:
+Frontend image 以 Node.js 24 作為 build stage，runtime 使用 unprivileged
+Nginx 並監聽 port 8080。Nginx 負責：
 
-- Static Angular assets.
-- SPA fallback to `index.html` for client-side routes.
-- `/healthz` for Kubernetes probes.
-- Appropriate cache separation: `index.html` and `config.json` are not cached
-  as immutable assets, while hashed Angular assets may be cached long-term.
+- 提供 Angular static asset。
+- 將 client-side route fallback 到 `index.html`。
+- 提供 Kubernetes probe 使用的 `/healthz`。
+- 區分快取策略：`index.html` 與 `config.json` 不使用 immutable cache；具有
+  hash 的 Angular asset 可以長期快取。
 
-The image contains a safe default `config.json`. Kubernetes mounts the
-environment-specific `config.json` from a ConfigMap, allowing `apiBaseUrl`,
-locale, and time zone changes without rebuilding the image. API proxying is not
-performed by Nginx in the production image; the future Gateway must route the
-configured API path to the Backend Service.
+Image 內含安全的預設 `config.json`。Kubernetes 會以 ConfigMap 掛載環境專用
+的 `config.json`，因此 `apiBaseUrl`、locale 與 time zone 可以在不重新 build
+image 的情況下變更。正式環境 image 的 Nginx 不代理 API；未來的 Gateway
+必須將設定的 API path 導向 Backend Service。
 
 ### RCA Worker
 
-The RCA Worker Dockerfile default command starts `sre-agent-rca-worker` instead
-of printing the package version and exiting. The container runs as a non-root
-user.
+RCA Worker Dockerfile 的預設 command 會改為啟動 `sre-agent-rca-worker`，不再
+只輸出 package version 後結束。Container 使用 non-root user 執行。
 
-Worker settings add:
+Worker settings 新增：
 
-- `PUBSUB_AUTO_CREATE`, defaulting to `false`.
-- `WORKER_ID`, defaulting to the container hostname when not explicitly set.
+- `PUBSUB_AUTO_CREATE`，預設為 `false`。
+- `WORKER_ID`；未明確設定時，預設使用 container hostname。
 
-When `PUBSUB_AUTO_CREATE=false`, the Worker constructs the configured topic and
-subscription paths but does not call create APIs. This supports least-privilege
-production IAM when Terraform owns Pub/Sub resources. Local development sets
-`PUBSUB_AUTO_CREATE=true` to retain emulator bootstrap behavior.
+當 `PUBSUB_AUTO_CREATE=false` 時，Worker 只組合已設定的 topic 與 subscription
+path，不呼叫 create API。Terraform 負責 Pub/Sub 資源時，正式環境便可採用
+least-privilege IAM。本機開發則設定 `PUBSUB_AUTO_CREATE=true`，保留 Emulator
+自動建立資源的行為。
 
-The Worker Deployment starts with one replica. A unique Pod hostname is used as
-the lease owner, removing the hard-coded shared identity and preparing the
-claim protocol for future replicas. Horizontal scaling itself remains out of
-scope and requires a separate concurrency and load test.
+Worker Deployment 初期只使用一個 replica。Pod hostname 會成為唯一的 lease
+owner，移除 hard-coded 的共用 identity，也為未來增加 replica 做好 claim
+protocol 準備。水平擴展本身不在本次範圍內，必須另做 concurrency 與 load
+test。
 
-The Worker has no network Service and therefore no readiness probe. Fatal
-startup or pull-loop errors terminate the process so the Deployment controller
-can restart it. The Pod receives at least 330 seconds of termination grace to
-cover the configured 300-second RCA deadline.
+Worker 沒有 network Service，因此不設定 readiness probe。無法恢復的 startup
+或 pull-loop error 必須終止 process，交由 Deployment controller 重啟。Pod 的
+termination grace 至少設為 330 秒，以涵蓋設定的 300 秒 RCA deadline。
 
-## Database Operations
+## 資料庫操作
 
-### Migrations
+### Migration
 
-Terraform provisions the Cloud SQL instance, database, application role,
-networking, and availability settings. Alembic migrations create and evolve the
-application schema inside that database, including tables, indexes, foreign
-keys, constraints, version tables, and initial partitions.
+Terraform 負責建立 Cloud SQL instance、database、application role、networking
+與 availability 設定。Alembic migration 則在該 database 內建立及演進應用
+schema，包括 table、index、foreign key、constraint、version table 與初始
+partition。
 
-There are two ordered migration streams:
+Migration 分為兩條且必須依序執行：
 
-1. The Backend migration creates and upgrades the shared core schema.
-2. The RCA Worker migration verifies the required Backend revision and then
-   upgrades Worker-owned lifecycle and evidence fields.
+1. Backend migration 建立及升級共用核心 schema。
+2. RCA Worker migration 驗證必要的 Backend revision，再升級 Worker 擁有的
+   lifecycle 與 evidence 欄位。
 
-Migration manifests are separate from the long-running Kustomize base. A
-release pipeline must create the Backend migration Job, wait for successful
-completion, create the Worker migration Job, wait for successful completion,
-and only then apply or roll out the application base. A migration failure stops
-the release.
+Migration manifest 不放入長時間運行 workload 的 Kustomize base。Release
+pipeline 必須建立 Backend migration Job 並等待成功，再建立 Worker migration
+Job 並等待成功，最後才能套用或 rollout 應用程式 base。任何 migration 失敗
+都會停止 release。
 
-Migrations do not insert environment-specific Grafana sources, normalization
-rules, users, or scope grants. Those records require a separate controlled seed
-or administration process outside this design.
+Migration 不會新增環境專用的 Grafana source、normalization rule、user 或
+scope grant。這些資料需要另外的受控 seed 或管理流程，不屬於本設計。
 
 ### Partition maintenance
 
-Several high-volume tables use monthly PostgreSQL partitions. Migrations create
-only an initial runway. The partition command maintains the current month and
-the following two months so a calendar transition cannot cause inserts to fail
-because no matching partition exists.
+數個高流量 table 使用 PostgreSQL 月份 partition。Migration 只建立初始的
+partition runway。Partition command 會維持本月與接下來兩個月的 partition，
+避免月份切換時因沒有符合的 partition 而使 insert 失敗。
 
-A Kubernetes CronJob runs the existing partition-maintenance command daily.
-It uses `concurrencyPolicy: Forbid`, has a finite retry limit and deadline, and
-retains limited successful and failed Job history for operations review.
+Kubernetes CronJob 每日執行既有 partition maintenance command。CronJob 使用
+`concurrencyPolicy: Forbid`，設定有限的 retry 次數與 deadline，並只保留少量
+成功及失敗 Job history 供維運調查。
 
-## Kubernetes Resources
+## Kubernetes 資源
 
-The repository gains this structure:
+Repository 會新增以下結構：
 
 ```text
 deploy/k8s/
@@ -216,98 +201,93 @@ deploy/k8s/
     worker-migration-job.yaml
 ```
 
-The base defines names and references but not a namespace, domain, image
-registry, Google service account annotation, or Secret data. Those values are
-deployment-environment concerns and can be supplied by a future overlay or
-Terraform/release tooling.
+Base 會定義資源名稱與 reference，但不指定 namespace、網域、image registry、
+Google service account annotation 或 Secret data。這些都屬於部署環境設定，
+之後可由 overlay、Terraform 或 release tooling 提供。
 
-All Pods use a non-root security context, disable privilege escalation, drop
-Linux capabilities, use a read-only root filesystem where compatible, and
-declare CPU and memory requests and limits. Writable temporary paths are backed
-by `emptyDir` volumes where required.
+所有 Pod 都使用 non-root security context、停用 privilege escalation、移除
+Linux capability，並在相容時使用 read-only root filesystem；同時設定 CPU
+與 memory request／limit。需要寫入的暫存路徑會以 `emptyDir` volume 提供。
 
-The ConfigMap contains only non-sensitive defaults such as:
+ConfigMap 只包含非敏感預設值，例如：
 
 - `APP_ENVIRONMENT=production`
-- Pub/Sub project, topic, and subscription identifiers as replaceable values.
-- Model name and approved HTTPS MCP endpoint placeholders.
-- `PUBSUB_AUTO_CREATE=false`.
-- Frontend runtime configuration.
+- 可被環境覆寫的 Pub/Sub project、topic 與 subscription identifier。
+- Model name 與經核准 HTTPS MCP endpoint 的安全預設值。
+- `PUBSUB_AUTO_CREATE=false`。
+- Frontend runtime configuration。
 
-Workloads reference individual keys in a pre-existing `sre-agent-secrets`
-Secret. At minimum, the Backend and database workloads require `DATABASE_URL`,
-and the Backend requires `GRAFANA_TOKENS`. Secret values are never committed.
+Workload 會引用預先存在的 `sre-agent-secrets` Secret 中的個別 key。Backend 與
+資料庫相關 workload 至少需要 `DATABASE_URL`，Backend 另需要
+`GRAFANA_TOKENS`。任何 Secret value 都不得提交到 repository。
 
-The ServiceAccounts are Kubernetes identities only. Workload Identity bindings
-and IAM roles remain external. The intended permission split is:
+ServiceAccount 只定義 Kubernetes identity。Workload Identity 綁定與 IAM role
+維持為外部設定。預期權限拆分如下：
 
-- Outbox ServiceAccount: Pub/Sub publisher access to the RCA topic.
-- Worker ServiceAccount: Pub/Sub subscriber access to the RCA subscription and
-  the model/MCP access required by the selected production integration.
-- Backend and migration ServiceAccounts: Cloud SQL connectivity and the
-  database privileges represented by `DATABASE_URL`.
+- Outbox ServiceAccount：對 RCA topic 的 Pub/Sub publisher 權限。
+- Worker ServiceAccount：對 RCA subscription 的 Pub/Sub subscriber 權限，以及
+  所選正式整合需要的 model／MCP 存取權。
+- Backend 與 migration ServiceAccount：Cloud SQL 連線能力，以及
+  `DATABASE_URL` 所代表的資料庫權限。
 
-## Rollout and Failure Handling
+## Rollout 與故障處理
 
-The release order is:
+Release 順序如下：
 
 ```text
-Terraform-provisioned dependencies available
-  -> Backend migration Job succeeds
-  -> Worker migration Job succeeds
-  -> ConfigMap, ServiceAccounts, Services, CronJob, and Deployments applied
-  -> Backend readiness succeeds
-  -> external routing can send traffic
+Terraform 建立的 dependency 已可使用
+  -> Backend migration Job 成功
+  -> Worker migration Job 成功
+  -> 套用 ConfigMap、ServiceAccount、Service、CronJob 與 Deployment
+  -> Backend readiness 成功
+  -> 外部 routing 可開始送入流量
 ```
 
-Backend rolling updates rely on readiness to remove unhealthy Pods from
-service endpoints. Liveness is intentionally independent of PostgreSQL.
+Backend rolling update 依靠 readiness 將不健康的 Pod 從 Service endpoint
+移除。Liveness 刻意不依賴 PostgreSQL。
 
-Outbox and Worker failures preserve their existing database and Pub/Sub retry
-semantics. Kubernetes restarts a process only after the process boundary exits;
-the manifests do not hide fatal errors with shell retry loops.
+Outbox 與 Worker failure 會保留既有的資料庫及 Pub/Sub retry semantic。只有
+process boundary 結束後 Kubernetes 才會重啟程序；manifest 不會以 shell retry
+loop 隱藏 fatal error。
 
-The Worker remains at one replica. The outbox publisher also starts at one
-replica; its existing `FOR UPDATE SKIP LOCKED` claim behavior leaves room for a
-future scaling review without making scaling part of this release.
+Worker 維持一個 replica。Outbox publisher 初期也使用一個 replica；既有的
+`FOR UPDATE SKIP LOCKED` claim 行為為未來 scaling review 保留空間，但本次
+release 不包含擴展。
 
-## Testing and Verification
+## 測試與驗證
 
-Implementation follows test-driven development for behavior changes. Required
-verification includes:
+會以 test-driven development 實作行為變更。必要驗證包含：
 
-- Backend tests for liveness, successful readiness, and sanitized readiness
-  failure.
-- Unit tests proving `OutboxSettings` accepts only its required runtime inputs.
-- Worker tests for production no-create behavior, local auto-create behavior,
-  and hostname-derived Worker identity.
-- Existing Backend, RCA Worker, contract, and Frontend test/type/lint gates.
-- Production builds for all three container images.
-- A Kustomize render of the application base and static manifest validation.
-- Container smoke tests for Backend health, Frontend `/healthz` and SPA
-  fallback, and Worker process startup behavior.
-- The existing local Grafana webhook end-to-end path, using PostgreSQL and the
-  Pub/Sub emulator, to confirm that outbox publishing and Worker processing are
-  not regressed.
+- Backend liveness、readiness 成功，以及 readiness failure 不洩漏資訊的測試。
+- 證明 `OutboxSettings` 只接受必要 runtime input 的 unit test。
+- Worker production no-create、本機 auto-create，以及由 hostname 產生 Worker
+  identity 的測試。
+- 既有 Backend、RCA Worker、contract 與 Frontend 的 test、type 與 lint gate。
+- 三個 production container image 的 build。
+- Kustomize application base render 與 manifest 靜態驗證。
+- Backend health、Frontend `/healthz`／SPA fallback，以及 Worker process startup
+  行為的 container smoke test。
+- 使用 PostgreSQL 與 Pub/Sub Emulator 的既有本機 Grafana webhook 端到端
+  路徑，確認 outbox publishing 與 Worker processing 沒有 regression。
 
-No verification step creates, mutates, or deletes Google Cloud resources.
+任何驗證步驟都不得建立、修改或刪除 Google Cloud 資源。
 
-## Acceptance Criteria
+## 驗收條件
 
-The work is complete when:
+符合以下條件時才算完成：
 
-- Backend, Frontend, and RCA Worker production images build reproducibly from
-  checked-in lock files.
-- Each image starts its intended production process as a non-root user.
-- Backend liveness and database-aware readiness behave as specified.
-- Frontend serves runtime configuration, client-side routes, and health checks
-  from the production image.
-- Production Worker startup does not require Pub/Sub resource-creation
-  permission and uses a unique Worker identity.
-- Outbox runs with purpose-specific settings.
-- Kustomize renders all long-running application resources and the partition
-  CronJob without Secret data or infrastructure resources.
-- Ordered migration Job templates and operational instructions are present.
-- All required automated and smoke verification passes.
-- Operator authentication, Terraform resources, external routing, and secret
-  values remain explicitly outside the delivered scope.
+- Backend、Frontend 與 RCA Worker production image 都能以 checked-in lock
+  file 重現 build。
+- 每個 image 都以 non-root user 啟動預期的 production process。
+- Backend liveness 與 database-aware readiness 符合設計行為。
+- Frontend production image 能提供 runtime configuration、client-side route
+  與 health check。
+- Production Worker 啟動時不需要 Pub/Sub resource creation 權限，並使用唯一
+  Worker identity。
+- Outbox 使用職責單一的專用 settings。
+- Kustomize 能 render 所有長時間運行的應用資源與 partition CronJob，且不包含
+  Secret data 或基礎設施資源。
+- 已提供依序執行的 migration Job template 與操作說明。
+- 所有必要自動化及 smoke verification 均通過。
+- Operator authentication、Terraform 資源、external routing 與 Secret value
+  明確維持在交付範圍之外。
