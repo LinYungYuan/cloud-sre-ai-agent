@@ -1,5 +1,7 @@
 # 跨雲 Grafana Alert 資訊規格
 
+> **已由新版規格取代：** 本文件要求的自訂 `cloud_provider`、`cloud_scope_id`、`team`、`environment`、`service` 與舊 Incident identity 已不再適用。請以 [`2026-08-13-grafana-normalization-rca-worker-design.md`](./2026-08-13-grafana-normalization-rca-worker-design.md) 為準；本文件只保留作為歷史設計紀錄。
+
 ## 1. 目的
 
 本規格定義 Grafana 對 SRE AI Agent 發送 GCP 與 AWS 告警時，alert labels、annotations、Incident identity、驗證與失敗處理的共同格式。

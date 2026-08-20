@@ -1,0 +1,1 @@
+{"provider":"GCP","scopeId":"blank-project","safe":false,"alertIssue":"resource.label.project_id is blank","available":["metrics"],"expectedRoute":[],"expectedStatus":"PARTIAL","requiredPhrase":"證據不足"}

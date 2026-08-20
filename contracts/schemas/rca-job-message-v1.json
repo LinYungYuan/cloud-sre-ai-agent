@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.sre-agent.local/schemas/rca-job-message-v1.json",
+  "title": "RCA Job Message v1",
+  "type": "object",
+  "required": ["schemaVersion", "workerJobId", "rcaRunId", "incidentId", "attempt"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "workerJobId": {"type": "string", "format": "uuid"},
+    "rcaRunId": {"type": "string", "format": "uuid"},
+    "incidentId": {"type": "string", "format": "uuid"},
+    "attempt": {"const": 1}
+  },
+  "additionalProperties": false
+}

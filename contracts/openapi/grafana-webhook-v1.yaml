@@ -126,8 +126,8 @@ components:
           enum: [firing, resolved]
         labels:
           type: object
-          additionalProperties:
-            type: string
+          description: Raw Grafana labels. Values are preserved as JSON and validated per alert during ingestion.
+          additionalProperties: true
         annotations:
           type: object
           additionalProperties:

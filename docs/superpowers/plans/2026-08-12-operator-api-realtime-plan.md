@@ -1,5 +1,7 @@
 # Operator REST API Implementation Plan
 
+> **已由新版計畫取代：** 本文件保留作為早期 REST 設計歷史。實作時以 [`2026-08-13-grafana-normalization-operator-ui-plan.md`](./2026-08-13-grafana-normalization-operator-ui-plan.md) 為準；目前不實作 conversation/chat，且 Backend 與 RCA Worker 必須位於不同套件。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Expose secure, versioned Incident/Alert/RCA/conversation REST operations for the Angular client.

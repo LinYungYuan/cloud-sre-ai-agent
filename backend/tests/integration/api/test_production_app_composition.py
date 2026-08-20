@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from time import perf_counter
 from uuid import UUID
 
 import httpx
@@ -22,7 +23,7 @@ DATABASE_URL = os.getenv(
     "postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent",
 ).replace("postgresql://", "postgresql+asyncpg://", 1)
 EXAMPLE = (
-    Path(__file__).resolve().parents[4] / "contracts/examples/grafana-firing.json"
+    Path(__file__).resolve().parents[4] / "contracts/examples/grafana-firing-aws.json"
 ).read_bytes()
 
 
@@ -75,7 +76,7 @@ async def test_production_resources_accept_and_commit_without_dependency_overrid
         grafana_tokens={SOURCE_ID: {"current-2026-08": SecretStr("accepted-token")}},
         pubsub_project_id="local-project",
         rca_topic_id="rca-jobs",
-        app_environment="test",
+        app_environment="local",
         model_name="test-model",
         metrics_mcp_url=HTTP_URL.validate_python("https://gateway/gcp/metrics/mcp"),
         trace_mcp_url=HTTP_URL.validate_python("https://gateway/gcp/trace/mcp"),
@@ -94,6 +95,7 @@ async def test_production_resources_accept_and_commit_without_dependency_overrid
                 transport=transport,
                 base_url="http://production.test",
             ) as client:
+                started = perf_counter()
                 response = await client.post(
                     f"/webhooks/v1/grafana/{SOURCE_ID}",
                     content=EXAMPLE,
@@ -102,8 +104,41 @@ async def test_production_resources_accept_and_commit_without_dependency_overrid
                         "Content-Type": "application/json",
                     },
                 )
+                elapsed = perf_counter() - started
+
+                async with session_factory() as session:
+                    incident_id = await session.scalar(
+                        text("SELECT id FROM incidents ORDER BY created_at DESC LIMIT 1")
+                    )
+                    alert_id = await session.scalar(
+                        text("SELECT id FROM alert_instances ORDER BY last_seen_at DESC LIMIT 1")
+                    )
+                    artifact_counts = (
+                        await session.execute(
+                            text(
+                                """SELECT
+                                  (SELECT count(*) FROM incidents),
+                                  (SELECT count(*) FROM rca_runs),
+                                  (SELECT count(*) FROM worker_jobs),
+                                  (SELECT count(*) FROM outbox_events)"""
+                            )
+                        )
+                    ).one()
+                incident_response = await client.get(f"/api/v1/incidents/{incident_id}")
+                alert_response = await client.get(f"/api/v1/alerts/{alert_id}")
 
         assert response.status_code == 202
+        assert elapsed < 2
+        assert artifact_counts == (1, 1, 1, 1)
+        assert incident_response.status_code == 200
+        assert incident_response.json()["provider"] == "AWS"
+        assert incident_response.json()["folderCode"] == "COM-LX-BOA-01"
+        assert alert_response.status_code == 200
+        assert alert_response.json()["provider"] == "AWS"
+        assert alert_response.json()["severity"] == "SEV1"
+        assert alert_response.json()["issue"]["rawText"].startswith(
+            "Account: 123456789012"
+        )
         async with session_factory() as session:
             delivery = (
                 (

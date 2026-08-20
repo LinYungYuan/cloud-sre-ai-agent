@@ -47,6 +47,19 @@ def test_fallback_fingerprint_uses_sorted_labels_and_source_id():
     )
 
 
+def test_fallback_fingerprint_preserves_json_label_types() -> None:
+    numeric = make_alert_fingerprint(SOURCE_ONE, "", {"value": 1})
+    string = make_alert_fingerprint(SOURCE_ONE, "", {"value": "1"})
+    nested = make_alert_fingerprint(
+        SOURCE_ONE,
+        "",
+        {"resource.label.project_id": {"unexpected": [1, True, None]}},
+    )
+
+    assert numeric != string
+    assert len(nested) == 64
+
+
 def test_dedup_key_includes_the_alert_lifecycle_identity():
     starts_at = datetime(2026, 8, 12, 2, tzinfo=UTC)
     ends_at = datetime(2026, 8, 12, 3, tzinfo=UTC)

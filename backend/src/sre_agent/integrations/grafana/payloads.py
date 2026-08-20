@@ -1,6 +1,14 @@
 from typing import Any, Literal
 
-from pydantic import AnyUrl, BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
+from pydantic import (
+    AnyUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    PrivateAttr,
+    ValidationError,
+)
 
 from sre_agent.domain.common import UtcTimestamp
 
@@ -17,7 +25,7 @@ class GrafanaAlert(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     status: Literal["firing", "resolved"]
-    labels: dict[str, str]
+    labels: dict[str, JsonValue]
     annotations: dict[str, str]
     starts_at: UtcTimestamp = Field(
         validation_alias="startsAt", serialization_alias="startsAt"

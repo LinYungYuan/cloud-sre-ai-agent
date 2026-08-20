@@ -39,6 +39,8 @@ class AlertRepository(Protocol):
         body_hash: str,
         raw_body: bytes,
         raw_payload: object,
+        truncated_alerts: int,
+        incomplete: bool,
     ) -> UUID: ...
 
     async def claim_dedup_key(
@@ -128,6 +130,8 @@ class SqlAlchemyAlertRepository:
         body_hash: str,
         raw_body: bytes,
         raw_payload: object,
+        truncated_alerts: int,
+        incomplete: bool,
     ) -> UUID:
         delivery_id = uuid4()
         await self._session.execute(
@@ -135,10 +139,12 @@ class SqlAlchemyAlertRepository:
                 """
                 INSERT INTO webhook_deliveries (
                     id, partition_timestamp, received_at, source_id, token_id,
-                    body_hash, raw_body, raw_payload, status
+                    body_hash, raw_body, raw_payload, truncated_alerts,
+                    incomplete, status
                 ) VALUES (
                     :id, :received_at, :received_at, :source_id, :token_id,
-                    :body_hash, :raw_body, CAST(:raw_payload AS jsonb), 'RECEIVED'
+                    :body_hash, :raw_body, CAST(:raw_payload AS jsonb),
+                    :truncated_alerts, :incomplete, 'RECEIVED'
                 )
                 """
             ),
@@ -150,6 +156,8 @@ class SqlAlchemyAlertRepository:
                 "body_hash": body_hash,
                 "raw_body": raw_body,
                 "raw_payload": _json(raw_payload),
+                "truncated_alerts": truncated_alerts,
+                "incomplete": incomplete,
             },
         )
         return delivery_id
@@ -201,13 +209,21 @@ class SqlAlchemyAlertRepository:
                     id, partition_timestamp, observed_at, source_id, delivery_id,
                     delivery_partition_timestamp, fingerprint, alert_state,
                     validation_status, validation_errors, starts_at, ends_at,
-                    labels, annotations, raw_payload
+                    labels, annotations, raw_payload, provider, folder_code,
+                    alert_name, severity_raw, severity_canonical, issue,
+                    resource, normalization_status, normalization_rule_id,
+                    normalization_rule_version, normalization_warnings
                 ) VALUES (
                     :id, :received_at, :received_at, :source_id, :delivery_id,
                     :received_at, :fingerprint, :alert_state, :validation_status,
                     CAST(:validation_errors AS jsonb), :starts_at, :ends_at,
                     CAST(:labels AS jsonb), CAST(:annotations AS jsonb),
-                    CAST(:raw_payload AS jsonb)
+                    CAST(:raw_payload AS jsonb), :provider, :folder_code,
+                    :alert_name, :severity_raw, :severity_canonical,
+                    CAST(:issue AS jsonb), CAST(:resource AS jsonb),
+                    :normalization_status, :normalization_rule_id,
+                    :normalization_rule_version,
+                    CAST(:normalization_warnings AS jsonb)
                 )
                 """
             ),
@@ -230,6 +246,37 @@ class SqlAlchemyAlertRepository:
                 "labels": _json(dict(event.labels)),
                 "annotations": _json(dict(event.annotations)),
                 "raw_payload": _json(raw_payload),
+                "provider": event.provider.value,
+                "folder_code": event.folder_code,
+                "alert_name": event.alert_name,
+                "severity_raw": event.severity.raw,
+                "severity_canonical": event.severity.canonical,
+                "issue": _json(
+                    {
+                        "rawText": event.issue.raw_text,
+                        "source": event.issue.source,
+                        "contentType": event.issue.content_type,
+                        "untrusted": event.issue.untrusted,
+                    }
+                ),
+                "resource": (
+                    None
+                    if event.resource is None
+                    else _json(
+                        {
+                            "provider": event.resource.provider.value,
+                            "resourceType": event.resource.resource_type,
+                            "scopeId": event.resource.scope_id,
+                            "resourceId": event.resource.resource_id,
+                            "resourceName": event.resource.resource_name,
+                            "displayUnit": event.resource.display_unit,
+                        }
+                    )
+                ),
+                "normalization_status": event.normalization_status.value,
+                "normalization_rule_id": event.normalization_rule_id,
+                "normalization_rule_version": event.normalization_rule_version,
+                "normalization_warnings": _json(event.normalization_warnings),
             },
         )
         return StoredAlertEvent(event_id, received_at)

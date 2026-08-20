@@ -515,45 +515,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/CursorPageHypotheses'
 
-  /api/v1/incidents/{id}/messages:
-    parameters:
-      - $ref: '#/components/parameters/ResourceId'
-    get:
-      operationId: listIncidentMessages
-      summary: List immutable incident conversation messages.
-      parameters:
-        - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/Limit'
-        - $ref: '#/components/parameters/From'
-        - $ref: '#/components/parameters/To'
-      responses:
-        <<: *commonErrorResponses
-        '200':
-          description: Cursor page of incident messages.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CursorPageIncidentMessages'
-    post:
-      operationId: createIncidentMessage
-      summary: Persist an operator message and enqueue an agent response.
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateIncidentMessageRequest'
-      responses:
-        <<: *commonErrorResponses
-        '202':
-          description: Persisted user message.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/IncidentMessage'
-
 components:
   securitySchemes:
     bearerAuth:
@@ -704,6 +665,12 @@ components:
     Severity:
       type: string
       enum: [CRITICAL, HIGH, MEDIUM, LOW]
+    Provider:
+      type: string
+      enum: [GCP, AWS]
+    CanonicalSeverity:
+      type: string
+      enum: [SEV1, SEV3, UNMAPPED]
     ProblemCode:
       type: string
       enum:
@@ -753,16 +720,16 @@ components:
       required: [teamId, projectId, environmentId, serviceId]
       properties:
         teamId:
-          type: string
+          type: [string, 'null']
           format: uuid
         projectId:
-          type: string
+          type: [string, 'null']
           format: uuid
         environmentId:
-          type: string
+          type: [string, 'null']
           format: uuid
         serviceId:
-          type: string
+          type: [string, 'null']
           format: uuid
       additionalProperties: false
     Assignee:
@@ -787,6 +754,9 @@ components:
         - status
         - alertState
         - rcaStatus
+        - provider
+        - folderCode
+        - alertName
         - scope
         - acknowledged
         - openedAt
@@ -803,7 +773,7 @@ components:
           type: string
           minLength: 1
         severity:
-          $ref: '#/components/schemas/Severity'
+          $ref: '#/components/schemas/CanonicalSeverity'
         status:
           $ref: '#/components/schemas/IncidentStatus'
         alertState:
@@ -812,6 +782,14 @@ components:
           oneOf:
             - $ref: '#/components/schemas/RcaRunStatus'
             - type: 'null'
+        provider:
+          oneOf:
+            - $ref: '#/components/schemas/Provider'
+            - type: 'null'
+        folderCode:
+          type: [string, 'null']
+        alertName:
+          type: [string, 'null']
         scope:
           $ref: '#/components/schemas/Scope'
         acknowledged:
@@ -960,12 +938,35 @@ components:
         - updatedAt
         - labels
         - annotations
+        - provider
+        - folderCode
+        - alertName
+        - severityRaw
+        - issue
+        - normalizationWarnings
       properties:
         <<: *alertSummaryProperties
+        provider:
+          $ref: '#/components/schemas/Provider'
+        folderCode:
+          type: [string, 'null']
+        alertName:
+          type: [string, 'null']
+        severityRaw:
+          type: [string, 'null']
+        severity:
+          $ref: '#/components/schemas/CanonicalSeverity'
+        issue:
+          $ref: '#/components/schemas/AlertIssue'
+        normalization:
+          $ref: '#/components/schemas/NormalizationInfo'
+        normalizationWarnings:
+          type: array
+          items:
+            type: string
         labels:
           type: object
-          additionalProperties:
-            type: string
+          additionalProperties: true
         annotations:
           type: object
           additionalProperties:
@@ -973,6 +974,34 @@ components:
         generatorUrl:
           type: string
           format: uri
+      additionalProperties: false
+
+    AlertIssue:
+      type: object
+      required: [rawText, source, contentType, untrusted]
+      properties:
+        rawText:
+          type: string
+        source:
+          const: grafana.annotations.AlertValues
+        contentType:
+          const: text/plain
+        untrusted:
+          const: true
+      additionalProperties: false
+    NormalizationInfo:
+      type: object
+      required: [status, ruleId, ruleVersion]
+      properties:
+        status:
+          type: string
+          enum: [NORMALIZED, UNCLASSIFIED, VALIDATION_FAILED]
+        ruleId:
+          type: [string, 'null']
+          format: uuid
+        ruleVersion:
+          type: [integer, 'null']
+          minimum: 1
       additionalProperties: false
 
     RcaRun:
@@ -1012,11 +1041,13 @@ components:
       additionalProperties: false
     EvidenceReference:
       type: object
-      required: [evidenceId, relation]
+      required: [evidenceId, partitionTimestamp, relation]
       properties:
         evidenceId:
           type: string
           format: uuid
+        partitionTimestamp:
+          $ref: '#/components/schemas/UtcDateTime'
         relation:
           $ref: '#/components/schemas/EvidenceRelation'
       additionalProperties: false
@@ -1043,8 +1074,10 @@ components:
         - status
         - summary
         - rootCause
+        - confidence
         - impact
         - recommendations
+        - hypotheses
         - claims
         - createdAt
       properties:
@@ -1062,13 +1095,19 @@ components:
           minimum: 1
         status:
           type: string
-          enum: [SUCCEEDED, PARTIAL]
+          enum: [COMPLETE, PARTIAL, FAILED]
         summary:
           type: string
           minLength: 1
         rootCause:
           type: string
           minLength: 1
+        confidence:
+          oneOf:
+            - type: number
+              minimum: 0
+              maximum: 1
+            - type: 'null'
         impact:
           type: string
           minLength: 1
@@ -1077,6 +1116,25 @@ components:
           items:
             type: string
             minLength: 1
+        hypotheses:
+          type: array
+          items:
+            type: object
+            required: [statement, confidence, claims]
+            properties:
+              statement:
+                type: string
+                minLength: 1
+              confidence:
+                type: number
+                minimum: 0
+                maximum: 1
+              claims:
+                type: array
+                minItems: 1
+                items:
+                  $ref: '#/components/schemas/ReportClaim'
+            additionalProperties: false
         claims:
           type: array
           items:

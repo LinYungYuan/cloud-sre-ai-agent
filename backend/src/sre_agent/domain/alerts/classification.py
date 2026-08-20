@@ -81,7 +81,7 @@ class AlertClassifier:
 
     def classify(
         self,
-        labels: Mapping[str, str],
+        labels: Mapping[str, object],
         rule_uid: str | None,
         folder: str | None,
     ) -> ClassificationResult:
@@ -135,7 +135,7 @@ class AlertClassifier:
 
     def _resolve_label(
         self,
-        labels: Mapping[str, str],
+        labels: Mapping[str, object],
         scope_field: ScopeField,
     ) -> UUID | None:
         label_value = (
@@ -143,14 +143,14 @@ class AlertClassifier:
             if scope_field == "project" and "cloud_scope_id" in labels
             else labels.get(scope_field)
         )
-        if label_value is None:
+        if not isinstance(label_value, str):
             return None
         return self._resolver.resolve(scope_field, label_value)
 
     def _matches(
         self,
         mapping: AlertMapping,
-        labels: Mapping[str, str],
+        labels: Mapping[str, object],
         rule_uid: str | None,
         folder: str | None,
     ) -> bool:

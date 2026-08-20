@@ -1,112 +1,44 @@
 import asyncio
-import hashlib
 import json
 import os
-from collections import Counter
-from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Self
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import (
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from sre_agent.application.alerts.ingest_grafana_alerts import (
-    IngestGrafanaAlerts,
-    IngestionResult,
-    StaticClassifierProvider,
+from sre_agent.application.alerts.ingest_grafana_alerts import IngestGrafanaAlerts
+from sre_agent.domain.alerts.normalization import (
+    NormalizationRule,
+    RuleCondition,
+    RuleOutput,
+    SafeRuleEngine,
 )
-from sre_agent.domain.alerts.classification import (
-    AlertClassifier,
-    ScopeField,
-    ScopeResolver,
+from sre_agent.domain.alerts.provider import Provider
+from sre_agent.persistence.repositories.incidents import IncidentScope
+from sre_agent.persistence.repositories.normalization import (
+    FolderScopeProvider,
+    NormalizationRuleProvider,
 )
-from sre_agent.persistence.repositories.alerts import (
-    AlertRepository,
-    SqlAlchemyAlertRepository,
-)
-from sre_agent.persistence.repositories.incidents import (
-    IncidentRepository,
-    SqlAlchemyIncidentRepository,
-)
-from sre_agent.persistence.repositories.jobs import SqlAlchemyJobRepository
-from sre_agent.persistence.unit_of_work import SqlAlchemyUnitOfWork, UnitOfWork
+from sre_agent.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
+DATABASE_URL = os.getenv(
+    "MIGRATION_TEST_DATABASE_URL",
+    "postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent",
+)
+ROOT = Path(__file__).resolve().parents[4]
+AWS_FIXTURE = (ROOT / "contracts/examples/grafana-firing-aws.json").read_bytes()
+GCP_FIXTURE = (ROOT / "contracts/examples/grafana-firing.json").read_bytes()
+SOURCE_ID = UUID("50000000-0000-0000-0000-000000000001")
 TEAM_ID = UUID("10000000-0000-0000-0000-000000000001")
 PROJECT_ID = UUID("20000000-0000-0000-0000-000000000001")
 ENVIRONMENT_ID = UUID("30000000-0000-0000-0000-000000000001")
 SERVICE_ID = UUID("40000000-0000-0000-0000-000000000001")
-SOURCE_ID = UUID("50000000-0000-0000-0000-000000000001")
+RECEIVED_AT = datetime(2026, 8, 13, 7, tzinfo=UTC)
 TOKEN_ID = "current-2026-08"
-RECEIVED_AT = datetime(2026, 8, 12, 4, 0, tzinfo=UTC)
-DATABASE_URL = os.getenv(
-    "MIGRATION_TEST_DATABASE_URL",
-    "postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent",
-).replace("postgresql://", "postgresql+asyncpg://", 1)
-REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
-
-CROSS_CLOUD_REQUIRED_LABELS = (
-    "alertname",
-    "cloud_provider",
-    "cloud_scope_id",
-    "resource_type",
-    "resource_id",
-    "environment",
-    "service",
-    "team",
-    "severity",
-    "signal_type",
-)
-
-GCP_LABELS = {
-    "alertname": "HighCPU",
-    "cloud_provider": "gcp",
-    "cloud_scope_id": "checkout-prod",
-    "resource_type": "gke_service",
-    "resource_id": "projects/checkout-prod/locations/asia-east1/services/api",
-    "environment": "production",
-    "service": "api",
-    "team": "payments",
-    "severity": "warning",
-    "signal_type": "metric",
-}
-
-AWS_LABELS = {
-    "alertname": "RdsCpuHigh",
-    "cloud_provider": "aws",
-    "cloud_scope_id": "123456789012",
-    "resource_type": "rds_instance",
-    "resource_id": "arn:aws:rds:ap-northeast-1:123456789012:db:orders-prod",
-    "environment": "production",
-    "service": "api",
-    "team": "payments",
-    "severity": "critical",
-    "signal_type": "metric",
-}
-
-DOWNSTREAM_TABLES = (
-    "alert_instances",
-    "incidents",
-    "incident_alerts",
-    "rca_runs",
-    "worker_jobs",
-    "outbox_events",
-)
-
-
-class KnownScope(ScopeResolver):
-    def __init__(self, records: dict[tuple[ScopeField, str], UUID]) -> None:
-        self._records = records
-
-    def resolve(self, field: ScopeField, label_value: str) -> UUID | None:
-        return self._records.get((field, label_value))
 
 
 @pytest_asyncio.fixture
@@ -114,1045 +46,377 @@ async def session_factory():
     engine = create_async_engine(DATABASE_URL)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as connection:
+        await connection.execute(text("TRUNCATE TABLE outbox_events, teams CASCADE"))
+        await connection.execute(
+            text("INSERT INTO teams (id, name) VALUES (:id, 'ingestion-team')"),
+            {"id": TEAM_ID},
+        )
         await connection.execute(
             text(
-                "TRUNCATE TABLE outbox_events, worker_jobs, rca_runs, "
-                "incident_alerts, incidents, ingestion_dedup_keys, alert_instances, "
-                "alert_events, webhook_deliveries, grafana_sources, services, "
-                "environments, projects, teams CASCADE"
-            )
-        )
-        parameters = {
-            "team_id": TEAM_ID,
-            "project_id": PROJECT_ID,
-            "environment_id": ENVIRONMENT_ID,
-            "service_id": SERVICE_ID,
-            "source_id": SOURCE_ID,
-        }
-        for statement in (
-            "INSERT INTO teams (id, name) VALUES (:team_id, 'payments')",
-            (
                 "INSERT INTO projects (id, team_id, name) "
-                "VALUES (:project_id, :team_id, 'checkout')"
+                "VALUES (:id, :team_id, 'ingestion-project')"
             ),
-            (
+            {"id": PROJECT_ID, "team_id": TEAM_ID},
+        )
+        await connection.execute(
+            text(
                 "INSERT INTO environments (id, project_id, name) "
-                "VALUES (:environment_id, :project_id, 'production')"
+                "VALUES (:id, :project_id, 'ingestion-environment')"
             ),
-            (
+            {"id": ENVIRONMENT_ID, "project_id": PROJECT_ID},
+        )
+        await connection.execute(
+            text(
                 "INSERT INTO services (id, environment_id, name) "
-                "VALUES (:service_id, :environment_id, 'api')"
+                "VALUES (:id, :environment_id, 'ingestion-service')"
             ),
-            (
-                "INSERT INTO grafana_sources (id, project_id, environment_id, name) "
-                "VALUES (:source_id, :project_id, :environment_id, 'primary')"
+            {"id": SERVICE_ID, "environment_id": ENVIRONMENT_ID},
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO grafana_sources "
+                "(id, project_id, environment_id, name) "
+                "VALUES (:id, :project_id, :environment_id, 'grafana')"
             ),
-        ):
-            await connection.execute(text(statement), parameters)
+            {
+                "id": SOURCE_ID,
+                "project_id": PROJECT_ID,
+                "environment_id": ENVIRONMENT_ID,
+            },
+        )
+        await connection.execute(
+            text(
+                """
+                INSERT INTO normalization_rules (
+                    id, source_id, name, version, priority, provider,
+                    conditions, output
+                ) VALUES
+                (
+                    '60000000-0000-0000-0000-000000000001', :source_id,
+                    'gcp-project', 1, 1, 'GCP', '[]'::jsonb,
+                    '{"provider":"GCP","resource_type":"gcp_resource"}'::jsonb
+                ),
+                (
+                    '60000000-0000-0000-0000-000000000002', :source_id,
+                    'aws-account', 1, 2, 'AWS', '[]'::jsonb,
+                    '{"provider":"AWS","resource_type":"rds_instance"}'::jsonb
+                )
+                """
+            ),
+            {"source_id": SOURCE_ID},
+        )
     try:
         yield factory
     finally:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("TRUNCATE TABLE outbox_events, teams CASCADE")
+            )
         await engine.dispose()
 
 
-def _classifier() -> AlertClassifier:
-    records: dict[tuple[ScopeField, str], UUID] = {
-        ("team", "payments"): TEAM_ID,
-        ("team", "platform"): TEAM_ID,
-        ("team", "commerce"): TEAM_ID,
-        ("project", "checkout-prod"): PROJECT_ID,
-        ("project", "svc-lx-afa-01-uat-1b9a87"): PROJECT_ID,
-        ("project", "123456789012"): PROJECT_ID,
-        ("environment", "production"): ENVIRONMENT_ID,
-        ("environment", "uat"): ENVIRONMENT_ID,
-        ("environment", "prod"): ENVIRONMENT_ID,
-        ("service", "api"): SERVICE_ID,
-        ("service", "aaaa"): SERVICE_ID,
-        ("service", "orders"): SERVICE_ID,
-    }
-    return AlertClassifier(SOURCE_ID, KnownScope(records), [])
+def _rule_provider() -> NormalizationRuleProvider:
+    gcp = NormalizationRule(
+        id=UUID("60000000-0000-0000-0000-000000000001"),
+        name="gcp-project",
+        version=1,
+        priority=1,
+        conditions=(
+            RuleCondition(
+                path="labels.resource.label.project_id",
+                operator="exists",
+            ),
+        ),
+        output=RuleOutput(
+            provider=Provider.GCP,
+            resource_type="gcp_resource",
+            scope_path="labels.resource.label.project_id",
+            resource_id_path="labels.DBInstanceIdentifier",
+        ),
+    )
+    aws = NormalizationRule(
+        id=UUID("60000000-0000-0000-0000-000000000002"),
+        name="aws-account",
+        version=1,
+        priority=2,
+        conditions=(
+            RuleCondition(
+                path="labels.Series", operator="format", value="aws_account_id"
+            ),
+        ),
+        output=RuleOutput(
+            provider=Provider.AWS,
+            resource_type="rds_instance",
+            scope_path="labels.Series",
+            resource_id_path="labels.DBInstanceIdentifier",
+        ),
+    )
+    return NormalizationRuleProvider(
+        {SOURCE_ID: SafeRuleEngine((gcp, aws))},
+        frozenset({SOURCE_ID}),
+    )
 
 
 def _use_case(
     session_factory: async_sessionmaker[AsyncSession],
     *,
-    uow_factory: Callable[[], UnitOfWork] | None = None,
+    folders: FolderScopeProvider | None = None,
+    uow_factory=None,
 ) -> IngestGrafanaAlerts:
     return IngestGrafanaAlerts(
         uow_factory=uow_factory or (lambda: SqlAlchemyUnitOfWork(session_factory)),
-        classifier_provider=StaticClassifierProvider(_classifier()),
+        normalization_rule_provider=_rule_provider(),
+        folder_scope_provider=folders or FolderScopeProvider({}),
         max_body_bytes=1_048_576,
     )
 
 
-def _alert(
-    fingerprint: str,
-    *,
-    status: str = "firing",
-    value: int = 95,
-    cloud_provider: str = "gcp",
-    label_overrides: dict[str, str] | None = None,
-) -> dict[str, object]:
-    labels = dict(AWS_LABELS if cloud_provider == "aws" else GCP_LABELS)
-    labels.update(label_overrides or {})
-    return {
-        "status": status,
-        "labels": labels,
-        "annotations": {"summary": f"{labels['alertname']} is firing"},
-        "startsAt": "2026-08-12T02:00:00Z",
-        "endsAt": "2026-08-12T03:00:00Z",
-        "values": {"A": value},
-        "generatorURL": "https://grafana.example.com/alert/api",
-        "fingerprint": fingerprint,
-        "vendorExtension": {"kept": True},
-    }
-
-
-def _body(*alerts: dict[str, object]) -> bytes:
-    return json.dumps(
-        {"receiver": "sre-agent", "status": alerts[0]["status"], "alerts": alerts},
-        indent=2,
-        ensure_ascii=False,
-    ).encode()
-
-
 async def _rows(
-    session_factory: async_sessionmaker[AsyncSession], query: str
-) -> list[dict[str, Any]]:
+    session_factory: async_sessionmaker[AsyncSession], statement: str
+) -> list[dict]:
     async with session_factory() as session:
-        result = await session.execute(text(query))
-        return [dict(row) for row in result.mappings().all()]
+        return [
+            dict(row) for row in (await session.execute(text(statement))).mappings()
+        ]
 
 
-async def _assert_table_counts(
-    session_factory: async_sessionmaker[AsyncSession],
-    expected: dict[str, int],
-) -> None:
-    for table_name, count in expected.items():
-        rows = await _rows(session_factory, f"SELECT * FROM {table_name}")
-        assert len(rows) == count, table_name
+def _payload(raw: bytes) -> dict:
+    return json.loads(raw)
 
 
-async def _assert_validation_retention(
-    session_factory: async_sessionmaker[AsyncSession],
-    result: IngestionResult,
-    raw_alert: dict[str, object],
-    expected_errors: list[dict[str, str]],
-) -> None:
-    assert result.incident_ids == ()
-    delivery = (await _rows(session_factory, "SELECT * FROM webhook_deliveries"))[0]
-    assert delivery["id"] == result.delivery_id
-    assert delivery["status"] == "VALIDATION_FAILED"
-    event = (await _rows(session_factory, "SELECT * FROM alert_events"))[0]
-    assert event["validation_status"] == "VALIDATION_FAILED"
-    assert event["validation_errors"] == expected_errors
-    assert event["raw_payload"] == raw_alert
-    assert len(await _rows(session_factory, "SELECT * FROM ingestion_dedup_keys")) == 1
-    await _assert_table_counts(
-        session_factory,
-        {table_name: 0 for table_name in DOWNSTREAM_TABLES},
-    )
-
-
-class DedupBarrierAlertRepository(SqlAlchemyAlertRepository):
-    def __init__(self, session: AsyncSession, barrier: asyncio.Barrier) -> None:
-        super().__init__(session)
-        self._barrier = barrier
-
-    async def claim_dedup_key(
-        self,
-        *,
-        source_id: UUID,
-        dedup_key: str,
-        delivery_id: UUID,
-        delivery_partition_timestamp: datetime,
-    ) -> bool:
-        await self._barrier.wait()
-        return await super().claim_dedup_key(
-            source_id=source_id,
-            dedup_key=dedup_key,
-            delivery_id=delivery_id,
-            delivery_partition_timestamp=delivery_partition_timestamp,
-        )
-
-
-class IncidentBarrierRepository(SqlAlchemyIncidentRepository):
-    def __init__(self, session: AsyncSession, barrier: asyncio.Barrier) -> None:
-        super().__init__(session)
-        self._barrier = barrier
-
-    async def get_or_create_active(self, *args: Any, **kwargs: Any) -> Any:
-        await self._barrier.wait()
-        return await super().get_or_create_active(*args, **kwargs)
-
-
-class RepositoryBarrierUnitOfWork(SqlAlchemyUnitOfWork):
-    alerts: AlertRepository
-    incidents: IncidentRepository
-
-    def __init__(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-        *,
-        dedup_barrier: asyncio.Barrier | None = None,
-        incident_barrier: asyncio.Barrier | None = None,
-    ) -> None:
-        super().__init__(session_factory)
-        self._dedup_barrier = dedup_barrier
-        self._incident_barrier = incident_barrier
-
-    async def __aenter__(self) -> Self:
-        await super().__aenter__()
-        assert self._session is not None
-        if self._dedup_barrier is not None:
-            self.alerts = DedupBarrierAlertRepository(
-                self._session, self._dedup_barrier
-            )
-        if self._incident_barrier is not None:
-            self.incidents = IncidentBarrierRepository(
-                self._session, self._incident_barrier
-            )
-        return self
-
-
-class FailingJobRepository(SqlAlchemyJobRepository):
-    async def create_rca_work(
-        self,
-        *,
-        incident_id: UUID,
-        run_status: str,
-        available_at: datetime,
-    ) -> UUID:
-        raise RuntimeError("injected failure after Incident insertion")
-
-
-class BarrierJobRepository(SqlAlchemyJobRepository):
-    def __init__(self, session: AsyncSession, barrier: asyncio.Barrier) -> None:
-        super().__init__(session)
-        self._barrier = barrier
-
-    async def create_rca_work(
-        self,
-        *,
-        incident_id: UUID,
-        run_status: str,
-        available_at: datetime,
-    ) -> UUID:
-        await self._barrier.wait()
-        return await super().create_rca_work(
-            incident_id=incident_id,
-            run_status=run_status,
-            available_at=available_at,
-        )
+def _encode(payload: dict) -> bytes:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
 
 
 @pytest.mark.asyncio
-async def test_new_gcp_firing_is_stored_atomically_with_validation_and_one_rca(
+async def test_approved_aws_body_persists_exact_issue_and_always_creates_rca(
     session_factory,
-):
-    raw_body = _body(_alert("grafana-api"))
-
+) -> None:
     result = await _use_case(session_factory).execute(
-        SOURCE_ID, TOKEN_ID, raw_body, RECEIVED_AT
+        SOURCE_ID, TOKEN_ID, AWS_FIXTURE, RECEIVED_AT
     )
 
-    assert isinstance(result, IngestionResult)
-    assert result.accepted_at == RECEIVED_AT
     assert len(result.incident_ids) == 1
     delivery = (await _rows(session_factory, "SELECT * FROM webhook_deliveries"))[0]
-    assert delivery["id"] == result.delivery_id
-    assert delivery["status"] == "PROCESSED"
-    assert delivery["body_hash"] == hashlib.sha256(raw_body).hexdigest()
-    assert delivery["raw_payload"] == json.loads(raw_body)
-    assert delivery["token_id"] == TOKEN_ID
     event = (await _rows(session_factory, "SELECT * FROM alert_events"))[0]
-    assert event["raw_payload"] == json.loads(raw_body)["alerts"][0]
-    assert event["alert_state"] == "FIRING"
-    assert event["validation_status"] == "VALID"
-    assert event["validation_errors"] == []
     incident = (await _rows(session_factory, "SELECT * FROM incidents"))[0]
-    assert incident["id"] == result.incident_ids[0]
-    assert (incident["status"], incident["alert_state"]) == ("OPEN", "FIRING")
-    assert len(incident["identity_key"]) == 64
+    run = (await _rows(session_factory, "SELECT * FROM rca_runs"))[0]
+    job = (await _rows(session_factory, "SELECT * FROM worker_jobs"))[0]
+    outbox = (await _rows(session_factory, "SELECT * FROM outbox_events"))[0]
+
+    assert delivery["status"] == "PROCESSED"
+    assert delivery["raw_body"] == AWS_FIXTURE
+    assert delivery["truncated_alerts"] == 0
+    assert delivery["incomplete"] is False
+    assert event["provider"] == "AWS"
+    assert event["folder_code"] == "COM-LX-BOA-01"
+    assert event["alert_name"] == "High CPU usage"
+    assert event["severity_raw"] == "ERROR"
+    assert event["severity_canonical"] == "SEV1"
+    assert event["issue"] == {
+        "rawText": "Account: 123456789012\nDB Name: production-rds-01\nValue: 85.23%\n<br>",
+        "source": "grafana.annotations.AlertValues",
+        "contentType": "text/plain",
+        "untrusted": True,
+    }
+    assert event["normalization_status"] == "NORMALIZED"
+    assert incident["identity_version"] == 2
+    assert incident["provider"] == "AWS"
+    assert all(
+        incident[column] is None
+        for column in ("team_id", "project_id", "environment_id", "service_id")
+    )
+    assert run["status"] == "QUEUED"
+    assert job["job_type"] == "RCA_ANALYSIS"
+    assert outbox["event_type"] == "RCA_RUN_REQUESTED"
+    assert (
+        job["payload"]
+        == outbox["payload"]
+        == {
+            "schemaVersion": 1,
+            "workerJobId": str(job["id"]),
+            "rcaRunId": str(run["id"]),
+            "incidentId": str(incident["id"]),
+            "attempt": 1,
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_gcp_project_key_is_the_only_provider_discriminator(
+    session_factory,
+) -> None:
+    await _use_case(session_factory).execute(
+        SOURCE_ID, TOKEN_ID, GCP_FIXTURE, RECEIVED_AT
+    )
+
+    event = (await _rows(session_factory, "SELECT * FROM alert_events"))[0]
+    incident = (await _rows(session_factory, "SELECT * FROM incidents"))[0]
+    assert event["provider"] == "GCP"
+    assert event["normalization_status"] == "NORMALIZED"
+    assert incident["provider"] == "GCP"
+
+
+@pytest.mark.asyncio
+async def test_present_blank_gcp_project_is_validation_failed_but_still_has_rca(
+    session_factory,
+) -> None:
+    payload = _payload(GCP_FIXTURE)
+    payload["alerts"][0]["labels"]["resource.label.project_id"] = "  "
+
+    await _use_case(session_factory).execute(
+        SOURCE_ID, TOKEN_ID, _encode(payload), RECEIVED_AT
+    )
+
+    delivery = (await _rows(session_factory, "SELECT * FROM webhook_deliveries"))[0]
+    event = (await _rows(session_factory, "SELECT * FROM alert_events"))[0]
+    assert delivery["status"] == "VALIDATION_FAILED"
+    assert event["provider"] == "GCP"
+    assert event["validation_errors"] == [
+        {"field": "resource.label.project_id", "code": "invalid_value"}
+    ]
+    assert len(await _rows(session_factory, "SELECT id FROM incidents")) == 1
+    assert len(await _rows(session_factory, "SELECT id FROM rca_runs")) == 1
+    assert len(await _rows(session_factory, "SELECT id FROM worker_jobs")) == 1
+    assert len(await _rows(session_factory, "SELECT id FROM outbox_events")) == 1
+
+
+@pytest.mark.asyncio
+async def test_folder_mapping_is_optional_but_used_when_present(
+    session_factory,
+) -> None:
+    folders = FolderScopeProvider(
+        {
+            (SOURCE_ID, "COM-LX-BOA-01"): IncidentScope(
+                TEAM_ID, PROJECT_ID, ENVIRONMENT_ID, SERVICE_ID
+            )
+        }
+    )
+
+    await _use_case(session_factory, folders=folders).execute(
+        SOURCE_ID, TOKEN_ID, AWS_FIXTURE, RECEIVED_AT
+    )
+
+    incident = (await _rows(session_factory, "SELECT * FROM incidents"))[0]
     assert (
         incident["team_id"],
         incident["project_id"],
         incident["environment_id"],
         incident["service_id"],
     ) == (TEAM_ID, PROJECT_ID, ENVIRONMENT_ID, SERVICE_ID)
-    runs = await _rows(session_factory, "SELECT * FROM rca_runs")
-    jobs = await _rows(session_factory, "SELECT * FROM worker_jobs")
-    outbox = await _rows(session_factory, "SELECT * FROM outbox_events")
-    assert len(runs) == len(jobs) == len(outbox) == 1
-    assert runs[0]["status"] == "QUEUED"
-    assert jobs[0]["rca_run_id"] == runs[0]["id"]
-    assert outbox[0]["idempotency_key"] == f"rca-run:{runs[0]['id']}"
 
 
 @pytest.mark.asyncio
-async def test_delivery_round_trips_exact_webhook_bytes(session_factory):
-    raw_alert = json.dumps(_alert("exact-wire-body"), separators=(",", ":"))
-    raw_body = (
-        "{\n"
-        '  "receiver": "sre-agent",\n'
-        '  "status": "firing",\n'
-        '  "wireNumber": 1.00,\n'
-        '  "wireEscape": "\\u0061",\n'
-        '  "duplicate": "first",\n'
-        '  "duplicate": "second",\n'
-        f'  "alerts": [{raw_alert}]\n'
-        "}\n"
-    ).encode()
-
-    await _use_case(session_factory).execute(SOURCE_ID, TOKEN_ID, raw_body, RECEIVED_AT)
-
-    delivery = (await _rows(session_factory, "SELECT * FROM webhook_deliveries"))[0]
-    assert delivery["raw_body"] == raw_body
-    assert delivery["raw_payload"] == json.loads(raw_body)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("fixture_name", "expected_provider", "label_severity", "incident_severity"),
-    [
-        ("grafana-firing.json", "gcp", "warning", "SEV3"),
-        ("grafana-firing-aws.json", "aws", "critical", "SEV1"),
-    ],
-)
-async def test_approved_cross_cloud_fixture_without_legacy_project_creates_queued_rca(
+async def test_duplicate_delivery_keeps_second_delivery_without_repeating_work(
     session_factory,
-    fixture_name: str,
-    expected_provider: str,
-    label_severity: str,
-    incident_severity: str,
-):
-    raw_body = (REPOSITORY_ROOT / "contracts" / "examples" / fixture_name).read_bytes()
-    raw_payload = json.loads(raw_body)
-    raw_alert = raw_payload["alerts"][0]
-    labels = raw_alert["labels"]
+) -> None:
+    use_case = _use_case(session_factory)
+    first = await use_case.execute(SOURCE_ID, TOKEN_ID, AWS_FIXTURE, RECEIVED_AT)
+    second = await use_case.execute(SOURCE_ID, TOKEN_ID, AWS_FIXTURE, RECEIVED_AT)
 
-    assert labels["cloud_provider"] == expected_provider
-    assert labels["severity"] == label_severity
-    assert "project" not in labels
-
-    result = await _use_case(session_factory).execute(
-        SOURCE_ID, TOKEN_ID, raw_body, RECEIVED_AT
-    )
-
-    assert len(result.incident_ids) == 1
-    delivery = (await _rows(session_factory, "SELECT * FROM webhook_deliveries"))[0]
-    assert delivery["status"] == "PROCESSED"
-    assert delivery["raw_payload"] == raw_payload
-    event = (await _rows(session_factory, "SELECT * FROM alert_events"))[0]
-    assert event["validation_status"] == "VALID"
-    assert event["raw_payload"] == raw_alert
-    incident = (await _rows(session_factory, "SELECT * FROM incidents"))[0]
-    assert incident["severity"] == incident_severity
-    run = (await _rows(session_factory, "SELECT * FROM rca_runs"))[0]
-    assert run["status"] == "QUEUED"
-    job = (await _rows(session_factory, "SELECT * FROM worker_jobs"))[0]
-    outbox = (await _rows(session_factory, "SELECT * FROM outbox_events"))[0]
-    expected_payload = {
-        "incident_id": str(incident["id"]),
-        "rca_run_id": str(run["id"]),
-    }
-    assert job["job_type"] == "RCA_ANALYSIS"
-    assert job["payload"] == expected_payload
-    assert outbox["event_type"] == "RCA_RUN_REQUESTED"
-    assert outbox["payload"] == expected_payload
-    await _assert_table_counts(
-        session_factory,
-        {"incidents": 1, "rca_runs": 1, "worker_jobs": 1, "outbox_events": 1},
-    )
-    if expected_provider == "gcp":
-        assert delivery["raw_payload"]["grafanaTopLevelExtension"] == "retain-me"
-        assert event["raw_payload"]["grafanaExtension"] == {"runbookOwner": "payments"}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("cloud_provider", "severity", "expected_severity"),
-    [
-        ("gcp", "critical", "SEV1"),
-        ("aws", "warning", "SEV3"),
-        ("gcp", "info", "SEV4"),
-    ],
-)
-async def test_gcp_and_aws_firing_create_queued_rca_with_exact_severity(
-    session_factory,
-    cloud_provider: str,
-    severity: str,
-    expected_severity: str,
-):
-    alert = _alert(
-        f"{cloud_provider}-{severity}",
-        cloud_provider=cloud_provider,
-        label_overrides={"severity": severity},
-    )
-
-    result = await _use_case(session_factory).execute(
-        SOURCE_ID, TOKEN_ID, _body(alert), RECEIVED_AT
-    )
-
-    assert len(result.incident_ids) == 1
-    incident = (await _rows(session_factory, "SELECT * FROM incidents"))[0]
-    assert incident["severity"] == expected_severity
-    run = (await _rows(session_factory, "SELECT * FROM rca_runs"))[0]
-    assert run["status"] == "QUEUED"
-    assert len(await _rows(session_factory, "SELECT * FROM worker_jobs")) == 1
-    assert len(await _rows(session_factory, "SELECT * FROM outbox_events")) == 1
-
-
-@pytest.mark.asyncio
-async def test_identical_redelivery_keeps_delivery_without_repeating_transitions(
-    session_factory,
-):
-    raw_body = _body(_alert("grafana-api"))
-    first = await _use_case(session_factory).execute(
-        SOURCE_ID, TOKEN_ID, raw_body, RECEIVED_AT
-    )
-
-    duplicate = await _use_case(session_factory).execute(
-        SOURCE_ID, TOKEN_ID, raw_body, RECEIVED_AT + timedelta(seconds=1)
-    )
-
-    assert duplicate.delivery_id != first.delivery_id
-    assert duplicate.incident_ids == ()
-    deliveries = await _rows(
-        session_factory, "SELECT status FROM webhook_deliveries ORDER BY received_at"
-    )
-    assert [row["status"] for row in deliveries] == ["PROCESSED", "DUPLICATE"]
-    await _assert_table_counts(
-        session_factory,
-        {
-            "ingestion_dedup_keys": 1,
-            "alert_events": 1,
-            "alert_instances": 1,
-            "incidents": 1,
-            "incident_alerts": 1,
-            "rca_runs": 1,
-            "worker_jobs": 1,
-            "outbox_events": 1,
-        },
-    )
-    instance = (await _rows(session_factory, "SELECT * FROM alert_instances"))[0]
-    assert instance["version"] == 1
-
-
-@pytest.mark.asyncio
-async def test_repeated_invalid_delivery_keeps_each_delivery_validation_failed(
-    session_factory,
-):
-    invalid = _alert("repeated-invalid")
-    invalid_labels = invalid["labels"]
-    assert isinstance(invalid_labels, dict)
-    invalid_labels.pop("resource_id")
-    raw_body = _body(invalid)
-
-    first = await _use_case(session_factory).execute(
-        SOURCE_ID, TOKEN_ID, raw_body, RECEIVED_AT
-    )
-    repeated = await _use_case(session_factory).execute(
-        SOURCE_ID,
-        TOKEN_ID,
-        raw_body,
-        RECEIVED_AT + timedelta(seconds=1),
-    )
-
-    assert first.delivery_id != repeated.delivery_id
-    assert first.incident_ids == repeated.incident_ids == ()
-    deliveries = await _rows(
-        session_factory, "SELECT status FROM webhook_deliveries ORDER BY received_at"
-    )
-    assert [row["status"] for row in deliveries] == [
-        "VALIDATION_FAILED",
-        "VALIDATION_FAILED",
-    ]
-    event = (await _rows(session_factory, "SELECT * FROM alert_events"))[0]
-    assert event["validation_status"] == "VALIDATION_FAILED"
-    assert event["validation_errors"] == [{"field": "resource_id", "code": "required"}]
-    await _assert_table_counts(
-        session_factory,
-        {
-            "ingestion_dedup_keys": 1,
-            "alert_events": 1,
-            **{table_name: 0 for table_name in DOWNSTREAM_TABLES},
-        },
-    )
-
-
-@pytest.mark.asyncio
-async def test_firing_update_reuses_only_the_same_identity_active_incident(
-    session_factory,
-):
-    first = await _use_case(session_factory).execute(
-        SOURCE_ID, TOKEN_ID, _body(_alert("grafana-api")), RECEIVED_AT
-    )
-
-    updated = await _use_case(session_factory).execute(
-        SOURCE_ID,
-        TOKEN_ID,
-        _body(_alert("grafana-api", value=99)),
-        RECEIVED_AT + timedelta(minutes=1),
-    )
-
-    assert updated.incident_ids == first.incident_ids
-    instance = (await _rows(session_factory, "SELECT * FROM alert_instances"))[0]
-    assert instance["version"] == 2
-    await _assert_table_counts(
-        session_factory,
-        {
-            "alert_events": 2,
-            "incident_alerts": 2,
-            "incidents": 1,
-            "rca_runs": 1,
-            "worker_jobs": 1,
-            "outbox_events": 1,
-        },
-    )
-
-
-@pytest.mark.asyncio
-async def test_same_resource_with_different_alertname_creates_separate_work(
-    session_factory,
-):
-    first = await _use_case(session_factory).execute(
-        SOURCE_ID, TOKEN_ID, _body(_alert("cpu")), RECEIVED_AT
-    )
-    second = await _use_case(session_factory).execute(
-        SOURCE_ID,
-        TOKEN_ID,
-        _body(_alert("memory", label_overrides={"alertname": "HighMemory"})),
-        RECEIVED_AT + timedelta(minutes=1),
-    )
-
-    assert first.incident_ids != second.incident_ids
-    await _assert_table_counts(
-        session_factory,
-        {
-            "incidents": 2,
-            "rca_runs": 2,
-            "worker_jobs": 2,
-            "outbox_events": 2,
-        },
-    )
-    identities = {
-        row["identity_key"]
-        for row in await _rows(session_factory, "SELECT identity_key FROM incidents")
-    }
-    assert len(identities) == 2
-
-
-@pytest.mark.asyncio
-async def test_same_project_with_different_resource_id_creates_separate_work(
-    session_factory,
-):
-    first = await _use_case(session_factory).execute(
-        SOURCE_ID, TOKEN_ID, _body(_alert("api")), RECEIVED_AT
-    )
-    second = await _use_case(session_factory).execute(
-        SOURCE_ID,
-        TOKEN_ID,
-        _body(
-            _alert(
-                "worker",
-                label_overrides={
-                    "resource_id": (
-                        "projects/checkout-prod/locations/asia-east1/services/worker"
-                    )
-                },
-            )
-        ),
-        RECEIVED_AT + timedelta(minutes=1),
-    )
-
-    assert first.incident_ids != second.incident_ids
-    await _assert_table_counts(
-        session_factory,
-        {
-            "incidents": 2,
-            "rca_runs": 2,
-            "worker_jobs": 2,
-            "outbox_events": 2,
-        },
-    )
-
-
-@pytest.mark.asyncio
-async def test_one_webhook_with_two_identities_creates_two_incidents_and_work(
-    session_factory,
-):
-    result = await _use_case(session_factory).execute(
-        SOURCE_ID,
-        TOKEN_ID,
-        _body(
-            _alert("api"),
-            _alert(
-                "worker",
-                value=88,
-                label_overrides={
-                    "resource_id": (
-                        "projects/checkout-prod/locations/asia-east1/services/worker"
-                    )
-                },
-            ),
-        ),
-        RECEIVED_AT,
-    )
-
-    assert len(result.incident_ids) == 2
-    assert len(set(result.incident_ids)) == 2
-    await _assert_table_counts(
-        session_factory,
-        {
-            "alert_events": 2,
-            "alert_instances": 2,
-            "incident_alerts": 2,
-            "incidents": 2,
-            "rca_runs": 2,
-            "worker_jobs": 2,
-            "outbox_events": 2,
-        },
-    )
-
-
-@pytest.mark.asyncio
-async def test_reopen_points_to_latest_resolved_incident_of_exact_identity(
-    session_factory,
-):
-    first = await _use_case(session_factory).execute(
-        SOURCE_ID, TOKEN_ID, _body(_alert("cpu")), RECEIVED_AT
-    )
-    other = await _use_case(session_factory).execute(
-        SOURCE_ID,
-        TOKEN_ID,
-        _body(_alert("memory", label_overrides={"alertname": "HighMemory"})),
-        RECEIVED_AT + timedelta(minutes=1),
-    )
-    async with session_factory.begin() as session:
-        await session.execute(
-            text(
-                "UPDATE incidents SET status = 'RESOLVED', resolved_at = :resolved_at "
-                "WHERE id = :incident_id"
-            ),
-            {
-                "resolved_at": RECEIVED_AT + timedelta(minutes=2),
-                "incident_id": first.incident_ids[0],
-            },
-        )
-        await session.execute(
-            text(
-                "UPDATE incidents SET status = 'RESOLVED', resolved_at = :resolved_at "
-                "WHERE id = :incident_id"
-            ),
-            {
-                "resolved_at": RECEIVED_AT + timedelta(minutes=3),
-                "incident_id": other.incident_ids[0],
-            },
-        )
-
-    reopened = await _use_case(session_factory).execute(
-        SOURCE_ID,
-        TOKEN_ID,
-        _body(_alert("cpu", value=100)),
-        RECEIVED_AT + timedelta(minutes=4),
-    )
-
-    assert reopened.incident_ids not in (first.incident_ids, other.incident_ids)
-    new_incident = (
-        await _rows(
+    assert first.delivery_id != second.delivery_id
+    assert [
+        row["status"]
+        for row in await _rows(
             session_factory,
-            f"SELECT * FROM incidents WHERE id = '{reopened.incident_ids[0]}'",
+            "SELECT status FROM webhook_deliveries "
+            "ORDER BY CASE status WHEN 'PROCESSED' THEN 1 ELSE 2 END",
         )
-    )[0]
-    assert new_incident["status"] == "OPEN"
-    assert new_incident["reopened_from_incident_id"] == first.incident_ids[0]
-    await _assert_table_counts(
+    ] == ["PROCESSED", "DUPLICATE"]
+    assert len(await _rows(session_factory, "SELECT id FROM alert_events")) == 1
+    assert len(await _rows(session_factory, "SELECT id FROM incidents")) == 1
+    assert len(await _rows(session_factory, "SELECT id FROM rca_runs")) == 1
+
+
+@pytest.mark.asyncio
+async def test_identity_v2_groups_only_same_source_folder_and_alert_name(
+    session_factory,
+) -> None:
+    first = _payload(AWS_FIXTURE)
+    update = _payload(AWS_FIXTURE)
+    update["alerts"][0]["fingerprint"] = "different-fingerprint"
+    other = _payload(AWS_FIXTURE)
+    other["alerts"][0]["fingerprint"] = "other-alert"
+    other["alerts"][0]["labels"]["alertname"] = "Database connections high"
+
+    use_case = _use_case(session_factory)
+    await use_case.execute(SOURCE_ID, TOKEN_ID, _encode(first), RECEIVED_AT)
+    await use_case.execute(SOURCE_ID, TOKEN_ID, _encode(update), RECEIVED_AT)
+    await use_case.execute(SOURCE_ID, TOKEN_ID, _encode(other), RECEIVED_AT)
+
+    incidents = await _rows(
         session_factory,
-        {"incidents": 3, "rca_runs": 3, "worker_jobs": 3, "outbox_events": 3},
+        "SELECT alert_name, identity_version FROM incidents ORDER BY alert_name",
     )
-
-
-@pytest.mark.asyncio
-async def test_resolved_finds_exact_identity_without_changing_human_status(
-    session_factory,
-):
-    first = await _use_case(session_factory).execute(
-        SOURCE_ID, TOKEN_ID, _body(_alert("cpu")), RECEIVED_AT
-    )
-    other = await _use_case(session_factory).execute(
-        SOURCE_ID,
-        TOKEN_ID,
-        _body(_alert("memory", label_overrides={"alertname": "HighMemory"})),
-        RECEIVED_AT + timedelta(minutes=1),
-    )
-
-    resolved = await _use_case(session_factory).execute(
-        SOURCE_ID,
-        TOKEN_ID,
-        _body(_alert("resolved-new-fingerprint", status="resolved", value=20)),
-        RECEIVED_AT + timedelta(minutes=2),
-    )
-
-    assert resolved.incident_ids == first.incident_ids
-    incidents = {
-        row["id"]: row
-        for row in await _rows(session_factory, "SELECT * FROM incidents")
-    }
-    assert incidents[first.incident_ids[0]]["alert_state"] == "RESOLVED"
-    assert incidents[other.incident_ids[0]]["alert_state"] == "FIRING"
-    assert incidents[first.incident_ids[0]]["status"] == "OPEN"
-    assert incidents[first.incident_ids[0]]["resolved_at"] is None
-    assert incidents[other.incident_ids[0]]["status"] == "OPEN"
-    assert len(await _rows(session_factory, "SELECT * FROM rca_runs")) == 2
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("field", CROSS_CLOUD_REQUIRED_LABELS)
-@pytest.mark.parametrize("label_value", [None, "   "], ids=["missing", "blank"])
-async def test_each_missing_or_blank_required_label_retains_validation_error_only(
-    session_factory,
-    field: str,
-    label_value: str | None,
-):
-    alert = _alert(f"invalid-{field}-{label_value is None}")
-    labels = alert["labels"]
-    assert isinstance(labels, dict)
-    if label_value is None:
-        labels.pop(field)
-    else:
-        labels[field] = label_value
-
-    result = await _use_case(session_factory).execute(
-        SOURCE_ID, TOKEN_ID, _body(alert), RECEIVED_AT
-    )
-
-    await _assert_validation_retention(
-        session_factory,
-        result,
-        alert,
-        [{"field": field, "code": "required"}],
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("cloud_provider", "azure"),
-        ("severity", "urgent"),
-        ("signal_type", "event"),
-    ],
-)
-async def test_invalid_enum_retains_stable_validation_error_only(
-    session_factory,
-    field: str,
-    value: str,
-):
-    alert = _alert("invalid-enum", label_overrides={field: value})
-
-    result = await _use_case(session_factory).execute(
-        SOURCE_ID, TOKEN_ID, _body(alert), RECEIVED_AT
-    )
-
-    await _assert_validation_retention(
-        session_factory,
-        result,
-        alert,
-        [{"field": field, "code": "invalid_value"}],
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("cloud_provider", "cloud_scope_id", "resource_type", "resource_id"),
-    [
-        (
-            "gcp",
-            "checkout-prod",
-            "gke-service",
-            "projects/checkout-prod/locations/asia-east1/services/api",
-        ),
-        ("gcp", "checkout-prod", "gke_service", "projects/checkout-prod"),
-        (
-            "gcp",
-            "checkout-prod",
-            "gke_service",
-            "projects/other-project/locations/asia-east1/services/api",
-        ),
-        ("aws", "123456789012", "rds_instance", "123456789012"),
-        (
-            "aws",
-            "123456789012",
-            "rds_instance",
-            "arn:aws:rds:ap-northeast-1:210987654321:db:orders-prod",
-        ),
-    ],
-)
-async def test_invalid_resource_identity_is_retained_without_downstream_work(
-    session_factory,
-    cloud_provider: str,
-    cloud_scope_id: str,
-    resource_type: str,
-    resource_id: str,
-):
-    alert = _alert(
-        "invalid-resource-identity",
-        cloud_provider=cloud_provider,
-        label_overrides={
-            "cloud_scope_id": cloud_scope_id,
-            "resource_type": resource_type,
-            "resource_id": resource_id,
-        },
-    )
-
-    result = await _use_case(session_factory).execute(
-        SOURCE_ID, TOKEN_ID, _body(alert), RECEIVED_AT
-    )
-
-    expected_field = (
-        "resource_type" if resource_type == "gke-service" else "resource_id"
-    )
-    await _assert_validation_retention(
-        session_factory,
-        result,
-        alert,
-        [{"field": expected_field, "code": "invalid_value"}],
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("field", ("team", "project", "environment", "service"))
-async def test_unknown_internal_scope_retains_unknown_scope_error_only(
-    session_factory,
-    field: str,
-):
-    label_key = "cloud_scope_id" if field == "project" else field
-    label_overrides = {label_key: f"unknown-{field}"}
-    if field == "project":
-        label_overrides["resource_id"] = (
-            "projects/unknown-project/locations/asia-east1/services/api"
-        )
-    alert = _alert("unknown-scope", label_overrides=label_overrides)
-
-    result = await _use_case(session_factory).execute(
-        SOURCE_ID, TOKEN_ID, _body(alert), RECEIVED_AT
-    )
-
-    await _assert_validation_retention(
-        session_factory,
-        result,
-        alert,
-        [{"field": field, "code": "unknown_scope"}],
-    )
-
-
-@pytest.mark.asyncio
-async def test_mixed_webhook_retains_invalid_event_and_processes_valid_identity(
-    session_factory,
-):
-    invalid = _alert("invalid")
-    invalid_labels = invalid["labels"]
-    assert isinstance(invalid_labels, dict)
-    invalid_labels.pop("resource_id")
-    valid = _alert("valid-aws", cloud_provider="aws")
-
-    result = await _use_case(session_factory).execute(
-        SOURCE_ID, TOKEN_ID, _body(invalid, valid), RECEIVED_AT
-    )
-
-    assert len(result.incident_ids) == 1
-    delivery = (await _rows(session_factory, "SELECT * FROM webhook_deliveries"))[0]
-    assert delivery["status"] == "VALIDATION_FAILED"
-    events = {
-        row["fingerprint"]: row
-        for row in await _rows(session_factory, "SELECT * FROM alert_events")
-    }
-    assert events["invalid"]["validation_status"] == "VALIDATION_FAILED"
-    assert events["invalid"]["validation_errors"] == [
-        {"field": "resource_id", "code": "required"}
+    assert incidents == [
+        {"alert_name": "Database connections high", "identity_version": 2},
+        {"alert_name": "High CPU usage", "identity_version": 2},
     ]
-    assert events["valid-aws"]["validation_status"] == "VALID"
-    assert events["valid-aws"]["validation_errors"] == []
-    await _assert_table_counts(
-        session_factory,
-        {
-            "ingestion_dedup_keys": 2,
-            "alert_events": 2,
-            "alert_instances": 1,
-            "incidents": 1,
-            "incident_alerts": 1,
-            "rca_runs": 1,
-            "worker_jobs": 1,
-            "outbox_events": 1,
-        },
-    )
+    assert len(await _rows(session_factory, "SELECT id FROM rca_runs")) == 2
 
 
 @pytest.mark.asyncio
-async def test_concurrent_identical_delivery_keeps_both_deliveries_and_one_transition(
+async def test_grouped_webhook_normalizes_each_alert_provider_independently(
     session_factory,
-):
-    barrier = asyncio.Barrier(2)
+) -> None:
+    aws = _payload(AWS_FIXTURE)["alerts"][0]
+    gcp = _payload(GCP_FIXTURE)["alerts"][0]
+    gcp["labels"]["alertname"] = "GCP High CPU usage"
+    gcp["fingerprint"] = "gcp-fingerprint"
+    payload = _payload(AWS_FIXTURE)
+    payload["alerts"] = [aws, gcp]
 
-    def uow_factory() -> RepositoryBarrierUnitOfWork:
-        return RepositoryBarrierUnitOfWork(
-            session_factory,
-            dedup_barrier=barrier,
-        )
-
-    use_case = _use_case(session_factory, uow_factory=uow_factory)
-    raw_body = _body(_alert("concurrent-duplicate"))
-
-    results = await asyncio.wait_for(
-        asyncio.gather(
-            use_case.execute(SOURCE_ID, TOKEN_ID, raw_body, RECEIVED_AT),
-            use_case.execute(
-                SOURCE_ID,
-                TOKEN_ID,
-                raw_body,
-                RECEIVED_AT + timedelta(seconds=1),
-            ),
-        ),
-        timeout=5,
+    await _use_case(session_factory).execute(
+        SOURCE_ID, TOKEN_ID, _encode(payload), RECEIVED_AT
     )
 
-    assert results[0].delivery_id != results[1].delivery_id
-    reported_incidents = [
-        incident_id for result in results for incident_id in result.incident_ids
+    events = await _rows(
+        session_factory,
+        "SELECT provider, issue->>'rawText' AS issue FROM alert_events ORDER BY provider",
+    )
+    assert [row["provider"] for row in events] == ["AWS", "GCP"]
+    assert all(row["issue"].startswith("Account:") for row in events)
+    assert len(await _rows(session_factory, "SELECT id FROM incidents")) == 2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_identity_has_one_active_incident_and_one_rca(
+    session_factory,
+) -> None:
+    second = _payload(AWS_FIXTURE)
+    second["alerts"][0]["fingerprint"] = "concurrent-second"
+    start = asyncio.Event()
+
+    async def ingest(raw: bytes) -> None:
+        await start.wait()
+        await _use_case(session_factory).execute(SOURCE_ID, TOKEN_ID, raw, RECEIVED_AT)
+
+    tasks = [
+        asyncio.create_task(ingest(AWS_FIXTURE)),
+        asyncio.create_task(ingest(_encode(second))),
     ]
-    assert len(reported_incidents) == 1
-    deliveries = await _rows(session_factory, "SELECT * FROM webhook_deliveries")
-    assert len(deliveries) == 2
-    assert Counter(row["status"] for row in deliveries) == Counter(
-        {"PROCESSED": 1, "DUPLICATE": 1}
-    )
-    await _assert_table_counts(
-        session_factory,
-        {
-            "ingestion_dedup_keys": 1,
-            "alert_events": 1,
-            "alert_instances": 1,
-            "incidents": 1,
-            "incident_alerts": 1,
-            "rca_runs": 1,
-            "worker_jobs": 1,
-            "outbox_events": 1,
-        },
-    )
+    start.set()
+    await asyncio.gather(*tasks)
+
+    assert len(await _rows(session_factory, "SELECT id FROM incidents")) == 1
+    assert len(await _rows(session_factory, "SELECT id FROM rca_runs")) == 1
+    assert len(await _rows(session_factory, "SELECT id FROM worker_jobs")) == 1
+    assert len(await _rows(session_factory, "SELECT id FROM outbox_events")) == 1
+
+
+class FailingJobRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def create_rca_work(self, **values) -> UUID:
+        del values
+        raise RuntimeError("injected failure")
 
 
 @pytest.mark.asyncio
-async def test_concurrent_distinct_events_with_same_identity_share_active_incident(
+async def test_failure_after_incident_insert_rolls_back_every_artifact(
     session_factory,
-):
-    barrier = asyncio.Barrier(2)
-
-    def uow_factory() -> RepositoryBarrierUnitOfWork:
-        return RepositoryBarrierUnitOfWork(
-            session_factory,
-            incident_barrier=barrier,
-        )
-
-    use_case = _use_case(session_factory, uow_factory=uow_factory)
-    results = await asyncio.wait_for(
-        asyncio.gather(
-            use_case.execute(
-                SOURCE_ID,
-                TOKEN_ID,
-                _body(_alert("concurrent-a", value=95)),
-                RECEIVED_AT,
-            ),
-            use_case.execute(
-                SOURCE_ID,
-                TOKEN_ID,
-                _body(_alert("concurrent-b", value=96)),
-                RECEIVED_AT + timedelta(seconds=1),
-            ),
-        ),
-        timeout=5,
-    )
-
-    assert len(results[0].incident_ids) == 1
-    assert results[0].incident_ids == results[1].incident_ids
-    deliveries = await _rows(session_factory, "SELECT * FROM webhook_deliveries")
-    assert len(deliveries) == 2
-    assert {row["status"] for row in deliveries} == {"PROCESSED"}
-    await _assert_table_counts(
-        session_factory,
-        {
-            "ingestion_dedup_keys": 2,
-            "alert_events": 2,
-            "alert_instances": 2,
-            "incidents": 1,
-            "incident_alerts": 2,
-            "rca_runs": 1,
-            "worker_jobs": 1,
-            "outbox_events": 1,
-        },
-    )
-
-
-@pytest.mark.asyncio
-async def test_concurrent_create_rca_work_returns_one_run_job_and_outbox(
-    session_factory,
-):
-    incident_id = uuid4()
-    async with session_factory.begin() as session:
-        await session.execute(
-            text(
-                """
-                INSERT INTO incidents (
-                    id, identity_key, title, severity, status, alert_state,
-                    team_id, project_id, environment_id, service_id,
-                    opened_at, created_at, updated_at
-                ) VALUES (
-                    :id, 'direct-job-concurrency', 'Concurrent job', 'SEV3',
-                    'OPEN', 'FIRING', :team_id, :project_id, :environment_id,
-                    :service_id, :opened_at, :opened_at, :opened_at
-                )
-                """
-            ),
-            {
-                "id": incident_id,
-                "team_id": TEAM_ID,
-                "project_id": PROJECT_ID,
-                "environment_id": ENVIRONMENT_ID,
-                "service_id": SERVICE_ID,
-                "opened_at": RECEIVED_AT,
-            },
-        )
-
-    barrier = asyncio.Barrier(2)
-
-    async def create_work() -> UUID:
-        async with session_factory.begin() as session:
-            return await BarrierJobRepository(session, barrier).create_rca_work(
-                incident_id=incident_id,
-                run_status="QUEUED",
-                available_at=RECEIVED_AT,
-            )
-
-    run_ids = await asyncio.wait_for(
-        asyncio.gather(create_work(), create_work()),
-        timeout=5,
-    )
-
-    assert run_ids[0] == run_ids[1]
-    await _assert_table_counts(
-        session_factory,
-        {"rca_runs": 1, "worker_jobs": 1, "outbox_events": 1},
-    )
-    job = (await _rows(session_factory, "SELECT * FROM worker_jobs"))[0]
-    outbox = (await _rows(session_factory, "SELECT * FROM outbox_events"))[0]
-    assert job["rca_run_id"] == run_ids[0]
-    assert outbox["idempotency_key"] == f"rca-run:{run_ids[0]}"
-
-
-@pytest.mark.asyncio
-async def test_failure_after_incident_insert_rolls_back_every_ingestion_artifact(
-    session_factory,
-):
+) -> None:
     def uow_factory() -> SqlAlchemyUnitOfWork:
         return SqlAlchemyUnitOfWork(
             session_factory,
@@ -1161,7 +425,7 @@ async def test_failure_after_incident_insert_rolls_back_every_ingestion_artifact
 
     with pytest.raises(RuntimeError, match="injected failure"):
         await _use_case(session_factory, uow_factory=uow_factory).execute(
-            SOURCE_ID, TOKEN_ID, _body(_alert("grafana-api")), RECEIVED_AT
+            SOURCE_ID, TOKEN_ID, AWS_FIXTURE, RECEIVED_AT
         )
 
     for table in (
@@ -1175,4 +439,4 @@ async def test_failure_after_incident_insert_rolls_back_every_ingestion_artifact
         "worker_jobs",
         "outbox_events",
     ):
-        assert await _rows(session_factory, f"SELECT * FROM {table}") == [], table
+        assert await _rows(session_factory, f"SELECT id FROM {table}") == []

@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from sre_agent.integrations.pubsub.messages import RcaJobMessage
 from sre_agent.integrations.pubsub.publisher import MessagePublisher
 
 _DEFERRED_CANCELLATION_NOTE = (
@@ -41,6 +42,19 @@ def _canonical_event(row: dict[str, Any]) -> bytes:
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
+
+
+class OutboxInvariantError(RuntimeError):
+    """A persisted outbox row violates its public message contract."""
+
+
+def _published_data(row: dict[str, Any]) -> bytes:
+    if row["event_type"] != "RCA_RUN_REQUESTED":
+        return _canonical_event(row)
+    try:
+        return RcaJobMessage.from_mapping(row["payload"]).to_bytes()
+    except (TypeError, ValueError) as error:
+        raise OutboxInvariantError("invalid persisted RCA job message") from error
 
 
 class OutboxPublisher:
@@ -99,7 +113,8 @@ class OutboxPublisher:
             result = await session.execute(
                 text(
                     """
-                    SELECT id, aggregate_id, event_type, idempotency_key, created_at
+                    SELECT id, aggregate_id, event_type, payload,
+                           idempotency_key, created_at
                     FROM outbox_events
                     WHERE status IN ('PENDING', 'FAILED')
                       AND published_at IS NULL
@@ -118,9 +133,11 @@ class OutboxPublisher:
                     await asyncio.to_thread(
                         self._publisher.publish,
                         self._topic,
-                        _canonical_event(row),
+                        _published_data(row),
                         {"idempotencyKey": row["idempotency_key"]},
                     )
+                except OutboxInvariantError:
+                    raise
                 except Exception:  # noqa: BLE001 -- publisher failures are retryable
                     await session.execute(
                         text(

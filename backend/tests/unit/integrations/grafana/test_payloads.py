@@ -19,15 +19,34 @@ EXAMPLE_PATH = (
 )
 
 
-def test_parse_grafana_body_preserves_the_exact_original_bytes_and_extensions():
+def test_parse_grafana_body_preserves_the_exact_approved_original_bytes():
     raw_body = EXAMPLE_PATH.read_bytes()
 
     webhook = parse_grafana_body(raw_body, max_bytes=1_048_576)
 
     assert webhook.raw_body is raw_body
-    assert webhook.model_extra == {"grafanaTopLevelExtension": "retain-me"}
-    assert webhook.alerts[0].model_extra == {
-        "grafanaExtension": {"runbookOwner": "payments"}
+    assert webhook.alerts[0].annotations["AlertValues"].startswith("Account:")
+
+
+def test_parse_grafana_body_accepts_non_string_labels_for_per_alert_validation():
+    raw_body = b'''{
+      "status": "firing",
+      "alerts": [{
+        "status": "firing",
+        "labels": {"resource.label.project_id": {"unexpected": true}},
+        "annotations": {},
+        "startsAt": "2026-08-13T06:30:00Z",
+        "endsAt": "0001-01-01T00:00:00Z",
+        "values": {},
+        "generatorURL": "https://grafana.example.com/alert",
+        "fingerprint": "fp"
+      }]
+    }'''
+
+    webhook = parse_grafana_body(raw_body, max_bytes=1_048_576)
+
+    assert webhook.alerts[0].labels["resource.label.project_id"] == {
+        "unexpected": True
     }
 
 

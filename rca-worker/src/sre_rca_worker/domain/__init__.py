@@ -1,0 +1,1 @@
+"""RCA Worker domain models."""

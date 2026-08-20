@@ -11,6 +11,7 @@ from sre_agent.api.composition import (
 from sre_agent.api.error_handlers import install_error_handlers
 from sre_agent.api.middleware.correlation_id import CorrelationIdMiddleware
 from sre_agent.api.routers.grafana_webhook import router as grafana_webhook_router
+from sre_agent.api.routers.operator_incidents import router as operator_router
 from sre_agent.config.settings import Settings
 
 
@@ -40,6 +41,7 @@ def create_app(
     application.add_middleware(CorrelationIdMiddleware)
     install_error_handlers(application)
     application.include_router(grafana_webhook_router)
+    application.include_router(operator_router)
     return application
 
 

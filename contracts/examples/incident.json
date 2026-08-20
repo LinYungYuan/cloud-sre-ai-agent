@@ -2,7 +2,7 @@
   "id": "e276fdf9-8600-41f7-8c32-fd3cbed55247",
   "incidentNumber": "INC-1042",
   "title": "Checkout API error rate elevated",
-  "severity": "CRITICAL",
+  "severity": "SEV1",
   "status": "INVESTIGATING",
   "alertState": "FIRING",
   "rcaStatus": "RUNNING",
