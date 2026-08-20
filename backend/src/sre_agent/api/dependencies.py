@@ -1,6 +1,6 @@
 from fastapi import Request
 
-from sre_agent.api.composition import ApplicationServices
+from sre_agent.api.composition import ApplicationServices, ReadinessCheck
 from sre_agent.application.alerts.ingest_grafana_alerts import IngestGrafanaAlerts
 from sre_agent.application.operator.read_models import (
     OperatorIdentityProvider,
@@ -30,3 +30,7 @@ def get_operator_identity_provider(request: Request) -> OperatorIdentityProvider
 
 def get_operator_read_service(request: Request) -> OperatorReadService:
     return _services(request).operator_reads
+
+
+def get_readiness_check(request: Request) -> ReadinessCheck:
+    return _services(request).readiness_check

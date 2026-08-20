@@ -95,6 +95,8 @@ async def test_production_resources_accept_and_commit_without_dependency_overrid
                 transport=transport,
                 base_url="http://production.test",
             ) as client:
+                liveness_response = await client.get("/health/live")
+                readiness_response = await client.get("/health/ready")
                 started = perf_counter()
                 response = await client.post(
                     f"/webhooks/v1/grafana/{SOURCE_ID}",
@@ -128,6 +130,9 @@ async def test_production_resources_accept_and_commit_without_dependency_overrid
                 alert_response = await client.get(f"/api/v1/alerts/{alert_id}")
 
         assert response.status_code == 202
+        assert liveness_response.status_code == 200
+        assert liveness_response.json() == {"status": "ok"}
+        assert readiness_response.status_code == 200
         assert elapsed < 2
         assert artifact_counts == (1, 1, 1, 1)
         assert incident_response.status_code == 200

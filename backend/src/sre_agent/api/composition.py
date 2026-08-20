@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import Protocol
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from sre_agent.application.alerts.ingest_grafana_alerts import IngestGrafanaAlerts
@@ -32,6 +33,7 @@ from sre_agent.persistence.repositories.operator_reads import (
 from sre_agent.persistence.unit_of_work import SqlAlchemyUnitOfWork, UnitOfWork
 
 UnitOfWorkFactory = Callable[[], UnitOfWork]
+ReadinessCheck = Callable[[], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +41,7 @@ class RuntimeResources:
     uow_factory: UnitOfWorkFactory
     normalization_rule_provider: NormalizationRuleProvider
     folder_scope_provider: FolderScopeProvider
+    readiness_check: ReadinessCheck
     operator_reads: OperatorReadService | None = None
 
 
@@ -48,6 +51,7 @@ class ApplicationServices:
     ingestion: IngestGrafanaAlerts
     operator_reads: OperatorReadService
     operator_identity_provider: OperatorIdentityProvider
+    readiness_check: ReadinessCheck
 
 
 class ResourceFactory(Protocol):
@@ -61,6 +65,11 @@ class ResourceFactory(Protocol):
 async def production_resources(settings: Settings) -> AsyncIterator[RuntimeResources]:
     engine = create_async_engine(settings.database_url.get_secret_value())
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def readiness_check() -> None:
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+
     try:
         async with engine.connect() as connection:
             rules = await load_normalization_rule_provider(connection)
@@ -70,6 +79,7 @@ async def production_resources(settings: Settings) -> AsyncIterator[RuntimeResou
             uow_factory=lambda: SqlAlchemyUnitOfWork(session_factory),
             normalization_rule_provider=rules,
             folder_scope_provider=folders,
+            readiness_check=readiness_check,
             operator_reads=SqlAlchemyOperatorReadRepository(session_factory),
         )
     finally:
@@ -101,6 +111,7 @@ def compose_services(
         ),
         operator_reads=operator_reads,
         operator_identity_provider=identity_provider,
+        readiness_check=resources.readiness_check,
     )
 
 
