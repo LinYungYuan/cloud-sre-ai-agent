@@ -23,7 +23,7 @@ from sre_agent.workers.outbox_worker import OutboxPublisher
 
 DATABASE_URL = os.getenv(
     "MIGRATION_TEST_DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@127.0.0.1:55432/sre_agent",
+    "postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent",
 ).replace("postgresql://", "postgresql+asyncpg://", 1)
 EVENT_ID = UUID("60000000-0000-0000-0000-000000000001")
 RESOURCE_ID = UUID("70000000-0000-0000-0000-000000000001")

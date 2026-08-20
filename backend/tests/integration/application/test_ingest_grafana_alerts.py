@@ -48,7 +48,7 @@ TOKEN_ID = "current-2026-08"
 RECEIVED_AT = datetime(2026, 8, 12, 4, 0, tzinfo=UTC)
 DATABASE_URL = os.getenv(
     "MIGRATION_TEST_DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@127.0.0.1:55432/sre_agent",
+    "postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent",
 ).replace("postgresql://", "postgresql+asyncpg://", 1)
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 

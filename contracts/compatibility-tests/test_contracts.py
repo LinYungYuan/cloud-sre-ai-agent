@@ -19,6 +19,7 @@ validate_example = import_module(
 ROOT = Path(__file__).parents[2]
 CONTRACT_PATH = ROOT / "contracts" / "openapi" / "grafana-webhook-v1.yaml"
 OPERATOR_CONTRACT_PATH = ROOT / "contracts" / "openapi" / "operator-api-v1.yaml"
+LOCAL_COMPOSE_PATH = ROOT / "docker-compose.yml"
 
 
 def _contract() -> dict:
@@ -27,6 +28,10 @@ def _contract() -> dict:
 
 def _operator_contract() -> dict:
     return yaml.safe_load(OPERATOR_CONTRACT_PATH.read_text(encoding="utf-8"))
+
+
+def _local_compose() -> dict:
+    return yaml.safe_load(LOCAL_COMPOSE_PATH.read_text(encoding="utf-8"))
 
 
 def _resolve_local_ref(document: dict, value: dict) -> dict:
@@ -51,6 +56,17 @@ def _write_example(root: Path, name: str, payload: dict) -> None:
 
 def test_all_contracts_and_examples_are_valid():
     validate_all(ROOT)
+
+
+def test_local_postgres_compose_restricts_passwordless_access_to_loopback():
+    """Protect local-only trust authentication from becoming network reachable."""
+    postgres = _local_compose()["services"]["postgres"]
+    environment = postgres["environment"]
+    password_key = "POSTGRES" + "_PASSWORD"
+
+    assert environment["POSTGRES_HOST_AUTH_METHOD"] == "trust"
+    assert password_key not in environment
+    assert postgres["ports"] == ["127.0.0.1:55432:5432"]
 
 
 @pytest.mark.parametrize(
