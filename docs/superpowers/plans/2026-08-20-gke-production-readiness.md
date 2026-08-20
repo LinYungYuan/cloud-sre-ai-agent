@@ -31,7 +31,7 @@
 
 ---
 
-### 任務 1：Backend liveness 與 database-aware readiness
+### Task 1：Backend liveness 與 database-aware readiness
 
 **檔案：**
 - 建立：`backend/src/sre_agent/api/routers/health.py`
@@ -89,7 +89,7 @@ git commit -m "feat(backend): add Kubernetes health probes"
 
 ---
 
-### 任務 2：隔離 Outbox publisher 設定
+### Task 2：隔離 Outbox publisher 設定
 
 **檔案：**
 - 建立：`backend/src/sre_agent/config/outbox_settings.py`
@@ -133,7 +133,7 @@ git commit -m "refactor(backend): isolate outbox runtime settings"
 
 ---
 
-### 任務 3：RCA Worker identity 與 Pub/Sub no-create mode
+### Task 3：RCA Worker identity 與 Pub/Sub no-create mode
 
 **檔案：**
 - 修改：`rca-worker/src/sre_rca_worker/config/settings.py`
@@ -181,7 +181,7 @@ git commit -m "feat(worker): support production Pub/Sub resources"
 
 ---
 
-### 任務 4：Backend 正式環境 image
+### Task 4：Backend 正式環境 image
 
 **檔案：**
 - 建立：`backend/Dockerfile`
@@ -228,7 +228,7 @@ git commit -m "build(backend): add production container image"
 
 ---
 
-### 任務 5：RCA Worker 正式環境 image
+### Task 5：RCA Worker 正式環境 image
 
 **檔案：**
 - 修改：`rca-worker/Dockerfile`
@@ -269,7 +269,7 @@ git commit -m "build(worker): run RCA worker in production image"
 
 ---
 
-### 任務 6：Frontend unprivileged Nginx image
+### Task 6：Frontend unprivileged Nginx image
 
 **檔案：**
 - 建立：`frontend/Dockerfile`
@@ -323,7 +323,7 @@ git commit -m "build(frontend): add unprivileged production image"
 
 ---
 
-### 任務 7：建立 Kustomize application base
+### Task 7：建立 Kustomize application base
 
 **檔案：**
 - 建立：`deploy/k8s/base/kustomization.yaml`
@@ -416,7 +416,7 @@ git commit -m "feat(deploy): add GKE application base"
 
 ---
 
-### 任務 8：Migration Jobs 與發布操作文件
+### Task 8：Migration Jobs 與發布操作文件
 
 **檔案：**
 - 建立：`deploy/k8s/jobs/backend-migration-job.yaml`
@@ -476,7 +476,7 @@ git commit -m "docs(deploy): define ordered GKE release flow"
 
 ---
 
-### 任務 9：完整 regression、image 與本機 E2E 驗證
+### Task 9：完整 regression、image 與本機 E2E 驗證
 
 **檔案：** 無；本任務只驗證已提交成果。若任何 gate 失敗，先使用 `superpowers:systematic-debugging` 找到根因，再回到擁有該檔案的任務修正並建立獨立提交。
 
