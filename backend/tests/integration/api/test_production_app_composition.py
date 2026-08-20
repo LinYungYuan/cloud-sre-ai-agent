@@ -6,9 +6,10 @@ from uuid import UUID
 import httpx
 import pytest
 from pydantic import AnyHttpUrl, SecretStr, TypeAdapter
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from sre_agent.api import composition
 from sre_agent.api.main import create_app
 from sre_agent.config.settings import Settings
 
@@ -28,7 +29,9 @@ EXAMPLE = (
 
 
 @pytest.mark.asyncio
-async def test_production_resources_accept_and_commit_without_dependency_overrides():
+async def test_production_resources_accept_and_commit_without_dependency_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+):
     engine = create_async_engine(DATABASE_URL)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as connection:
@@ -82,6 +85,14 @@ async def test_production_resources_accept_and_commit_without_dependency_overrid
         trace_mcp_url=HTTP_URL.validate_python("https://gateway/gcp/trace/mcp"),
         log_mcp_url=HTTP_URL.validate_python("https://gateway/gcp/log/mcp"),
     )
+    readiness_statements: list[str] = []
+
+    def capture_statement(_, __, statement, ___, ____, _____) -> None:
+        if statement.strip() == "SELECT 1":
+            readiness_statements.append(statement.strip())
+
+    event.listen(engine.sync_engine, "before_cursor_execute", capture_statement)
+    monkeypatch.setattr(composition, "create_async_engine", lambda _: engine)
     app = create_app(settings_factory=lambda: settings)
     assert app.dependency_overrides == {}
 
@@ -133,6 +144,7 @@ async def test_production_resources_accept_and_commit_without_dependency_overrid
         assert liveness_response.status_code == 200
         assert liveness_response.json() == {"status": "ok"}
         assert readiness_response.status_code == 200
+        assert readiness_statements == ["SELECT 1"]
         assert elapsed < 2
         assert artifact_counts == (1, 1, 1, 1)
         assert incident_response.status_code == 200
