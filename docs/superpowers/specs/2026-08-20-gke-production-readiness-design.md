@@ -1,7 +1,7 @@
 # GKE 正式環境就緒設計
 
 日期：2026-08-20
-狀態：對話中已核准，等待中文書面規格審閱
+狀態：已核准，進入實作計畫
 
 ## 目標
 
@@ -236,12 +236,16 @@ Release 順序如下：
 
 ```text
 Terraform 建立的 dependency 已可使用
+  -> 套用 Kubernetes ServiceAccount
   -> Backend migration Job 成功
   -> Worker migration Job 成功
-  -> 套用 ConfigMap、ServiceAccount、Service、CronJob 與 Deployment
+  -> 套用完整 base（再次套用 ServiceAccount 是冪等操作）
   -> Backend readiness 成功
   -> 外部 routing 可開始送入流量
 ```
+
+ServiceAccount 必須先於 migration Job 存在，否則 Job Pod 無法排程。Secret 仍由
+外部流程預先建立；migration Job 不會建立或修改 Secret。
 
 Backend rolling update 依靠 readiness 將不健康的 Pod 從 Service endpoint
 移除。Liveness 刻意不依賴 PostgreSQL。
