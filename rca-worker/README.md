@@ -4,6 +4,25 @@ This package is the independently deployable Pub/Sub consumer and RCA
 orchestrator. It shares only versioned contracts and the PostgreSQL application
 role with the Backend; it never imports Backend source code.
 
+## Production image
+
+Build the independently deployable Worker image from the repository root:
+
+```bash
+docker build -t sre-agent-rca-worker:gke-plan rca-worker
+```
+
+The image uses a frozen Worker dependency lock in a Python 3.12.9 multi-stage
+build. Its runtime contains only the Worker virtual environment, package source,
+Alembic configuration, and Worker migrations; it does not copy or import
+`backend/src`. It runs as numeric UID/GID `65532:65532` and defaults to
+`sre-agent-rca-worker`. Migrations remain available for an explicit migration
+job, for example:
+
+```bash
+docker run --rm --entrypoint alembic sre-agent-rca-worker:gke-plan upgrade head
+```
+
 ## 本機執行
 
 從 repository root 執行 `docker compose up -d postgres pubsub-emulator`，並設定

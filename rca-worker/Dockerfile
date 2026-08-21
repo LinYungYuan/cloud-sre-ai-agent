@@ -1,13 +1,38 @@
-FROM python:3.12-slim AS runtime
+# syntax=docker/dockerfile:1
+FROM python:3.12.9-slim-bookworm AS builder
 
-RUN pip install --no-cache-dir uv==0.8.15
+COPY --from=ghcr.io/astral-sh/uv:0.11.6 /uv /uvx /bin/
+
 WORKDIR /app
-COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-dev
-COPY alembic.ini ./
-COPY migrations ./migrations
-COPY src ./src
 
-ENV PATH="/app/.venv/bin:$PATH"
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
+
+# Install the frozen production dependencies before the Worker source so this
+# layer is reusable when only the application changes.
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+COPY src ./src
+RUN uv sync --frozen --no-dev
+
+COPY migrations ./migrations
+COPY alembic.ini ./alembic.ini
+
+
+FROM python:3.12.9-slim-bookworm AS runtime
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH=/app/.venv/bin:$PATH
+
+COPY --from=builder --chown=65532:65532 /app/.venv /app/.venv
+COPY --from=builder --chown=65532:65532 /app/src /app/src
+COPY --from=builder --chown=65532:65532 /app/migrations /app/migrations
+COPY --from=builder --chown=65532:65532 /app/alembic.ini /app/alembic.ini
+
 USER 65532:65532
-CMD ["python", "-c", "import sre_rca_worker; print(sre_rca_worker.__version__)"]
+
+CMD ["sre-agent-rca-worker"]
