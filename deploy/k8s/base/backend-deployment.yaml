@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sre-agent-backend
+  labels:
+    app: sre-agent-backend
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: sre-agent-backend
+  template:
+    metadata:
+      labels:
+        app: sre-agent-backend
+    spec:
+      serviceAccountName: sre-agent-backend
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: backend
+          image: sre-agent-backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sre-agent-secrets
+                  key: DATABASE_URL
+            - name: GRAFANA_TOKENS
+              valueFrom:
+                secretKeyRef:
+                  name: sre-agent-secrets
+                  key: GRAFANA_TOKENS
+            - name: PUBSUB_PROJECT_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: PUBSUB_PROJECT_ID
+            - name: RCA_TOPIC_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: RCA_TOPIC_ID
+            - name: APP_ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: APP_ENVIRONMENT
+            - name: MODEL_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: MODEL_NAME
+            - name: METRICS_MCP_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: METRICS_MCP_URL
+            - name: TRACE_MCP_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: TRACE_MCP_URL
+            - name: LOG_MCP_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: LOG_MCP_URL
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi

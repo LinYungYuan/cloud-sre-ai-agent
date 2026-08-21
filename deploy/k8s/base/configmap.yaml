@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sre-agent-config
+data:
+  APP_ENVIRONMENT: production
+  PUBSUB_PROJECT_ID: sre-agent
+  RCA_TOPIC_ID: rca-jobs
+  PUBSUB_SUBSCRIPTION_ID: rca-jobs
+  PUBSUB_AUTO_CREATE: "false"
+  MODEL_NAME: gemini-2.5-flash
+  METRICS_MCP_URL: https://agentgateway.cp.gcubut.gcp.uwccb/agw/gcp-metrics-mcp
+  TRACE_MCP_URL: https://agentgateway.cp.gcubut.gcp.uwccb/agw/gcp-trace-mcp
+  LOG_MCP_URL: https://agentgateway.cp.gcubut.gcp.uwccb/agw/gcp-log-mcp
+  MCP_CAPABILITY_MANIFEST: "[]"
+  config.json: |
+    {
+      "apiBaseUrl": "/api/v1",
+      "locale": "zh-TW",
+      "timeZone": "Asia/Taipei"
+    }
