@@ -1,23 +1,21 @@
 # SRE RCA Worker
 
-This package is the independently deployable Pub/Sub consumer and RCA
-orchestrator. It shares only versioned contracts and the PostgreSQL application
-role with the Backend; it never imports Backend source code.
+此套件是可獨立部署的 Pub/Sub 消費者與 RCA 編排器。它只與 Backend 共用版本化契約及
+PostgreSQL application role，絕不匯入 Backend 原始碼。
 
-## Production image
+## 正式環境 Image
 
-Build the independently deployable Worker image from the repository root:
+從儲存庫根目錄建置可獨立部署的 Worker image：
 
 ```bash
 docker build -t sre-agent-rca-worker:gke-plan rca-worker
 ```
 
-The image uses a frozen Worker dependency lock in a Python 3.12.9 multi-stage
-build. Its runtime contains only the Worker virtual environment, package source,
-Alembic configuration, and Worker migrations; it does not copy or import
-`backend/src`. It runs as numeric UID/GID `65532:65532` and defaults to
-`sre-agent-rca-worker`. Migrations remain available for an explicit migration
-job, for example:
+image 使用 Python 3.12.9 multi-stage build 與 frozen Worker dependency lock。
+runtime 只包含 Worker virtual environment、套件原始碼、Alembic 設定與 Worker
+migration；不會複製或匯入 `backend/src`。它以 numeric UID/GID `65532:65532`
+執行，預設命令是 `sre-agent-rca-worker`。Migration 仍可由明確的 migration Job
+執行，例如：
 
 ```bash
 docker run --rm --entrypoint alembic sre-agent-rca-worker:gke-plan upgrade head

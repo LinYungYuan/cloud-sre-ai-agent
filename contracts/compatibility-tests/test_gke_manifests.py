@@ -468,7 +468,7 @@ def test_release_runbook_fails_fast_and_orders_migrations_before_rollouts() -> N
         f"deployment runbook does not exist: {DEPLOYMENT_RUNBOOK}"
     )
     runbook = DEPLOYMENT_RUNBOOK.read_text(encoding="utf-8")
-    ordered_release = runbook.split("## Ordered release", maxsplit=1)[1]
+    ordered_release = runbook.split("## 依序發布", maxsplit=1)[1]
     release_commands = ordered_release.split("```bash", maxsplit=1)[1].split(
         "```", maxsplit=1
     )[0]
@@ -504,8 +504,8 @@ def test_release_runbook_fails_fast_and_orders_migrations_before_rollouts() -> N
 
 def test_release_runbook_assigns_all_backend_gateway_paths() -> None:
     runbook = DEPLOYMENT_RUNBOOK.read_text(encoding="utf-8")
-    routing = runbook.split("## Routing and production limitations", maxsplit=1)[1]
+    routing = runbook.split("## 路由與正式環境限制", maxsplit=1)[1]
 
     assert "`/api`" in routing
     assert "`/webhooks/v1/grafana`" in routing
-    assert "`sre-agent-backend` Service on port 8000" in routing
+    assert "port 8000 的\n`sre-agent-backend` Service" in routing
