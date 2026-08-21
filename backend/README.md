@@ -37,6 +37,19 @@ Run the ASGI app with an installed ASGI server, for example:
 uv run uvicorn sre_agent.api.main:app
 ```
 
+## Production container image
+
+Build the production image from the repository root:
+
+```sh
+docker build -t sre-agent-backend:gke-plan backend
+```
+
+The image runs as UID/GID `65532`, listens on port `8000`, and starts the ASGI
+application with Uvicorn. It includes the installed worker console scripts plus
+`alembic.ini` and `migrations/`, so the same image can be used by the API,
+outbox worker, migration, and partition-maintenance workloads.
+
 Maintain a current-plus-two-month partition runway independently from the app:
 
 ```sh
