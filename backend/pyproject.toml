@@ -16,6 +16,7 @@ dependencies = [
     "structlog",
     "opentelemetry-api",
     "pyyaml",
+    "uvicorn",
 ]
 
 [project.scripts]

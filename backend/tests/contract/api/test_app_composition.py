@@ -141,6 +141,9 @@ async def test_configured_app_accepts_valid_webhook_without_dependency_overrides
     classifiers = ClassifierProvider()
     observed_settings: list[Settings] = []
 
+    async def readiness_check() -> None:
+        return None
+
     @asynccontextmanager
     async def resources(settings: Settings) -> AsyncIterator[RuntimeResources]:
         observed_settings.append(settings)
@@ -148,6 +151,7 @@ async def test_configured_app_accepts_valid_webhook_without_dependency_overrides
             uow_factory=lambda: uow,
             normalization_rule_provider=NormalizationRuleProvider({}, frozenset()),
             folder_scope_provider=FolderScopeProvider({}),
+            readiness_check=readiness_check,
         )
 
     app = create_app(resource_factory=resources)

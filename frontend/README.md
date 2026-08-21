@@ -31,6 +31,29 @@ npm run build
 
 Production build artifacts are written beneath `dist/frontend/`.
 
+## Production container
+
+Build the production image from the repository root:
+
+```bash
+docker build -t sre-agent-frontend:gke-plan frontend
+```
+
+The image uses the unprivileged Nginx runtime and listens on port `8080`. It
+serves `/healthz`, returns the Angular shell for client-side routes, and never
+proxies `/api`; provide the API endpoint through the deployed `config.json`.
+
+For a read-only root filesystem, mount these paths as writable volumes:
+
+```text
+/tmp
+/var/cache/nginx
+/var/run
+```
+
+`index.html` and `config.json` are not cached. Only content-hashed JavaScript,
+CSS, and font build assets receive a one-year immutable cache header.
+
 ## 操作方式與範圍
 
 首頁列出 Incident 的 provider、專案／系統代碼（Grafana `folder`）、alert name、

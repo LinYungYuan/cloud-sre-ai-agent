@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sre-agent-outbox
+  labels:
+    app: sre-agent-outbox
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: sre-agent-outbox
+  template:
+    metadata:
+      labels:
+        app: sre-agent-outbox
+    spec:
+      serviceAccountName: sre-agent-outbox
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: outbox
+          image: sre-agent-backend:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - sre-agent-outbox-worker
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sre-agent-secrets
+                  key: DATABASE_URL
+            - name: PUBSUB_PROJECT_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: PUBSUB_PROJECT_ID
+            - name: RCA_TOPIC_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: RCA_TOPIC_ID
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

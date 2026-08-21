@@ -1,6 +1,7 @@
 import pytest
 from pydantic import SecretStr, ValidationError
 
+import sre_rca_worker.config.settings as settings_module
 from sre_rca_worker.config.settings import WorkerSettings
 
 
@@ -23,6 +24,24 @@ def test_local_settings_allow_the_official_emulator_without_credentials() -> Non
 
     assert settings.pubsub_emulator_host == "127.0.0.1:58085"
     assert "app@db" not in repr(settings)
+
+
+def test_pubsub_auto_create_defaults_to_false() -> None:
+    assert _settings().pubsub_auto_create is False
+
+
+def test_worker_id_defaults_to_the_runtime_hostname_when_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("WORKER_ID", raising=False)
+    monkeypatch.setattr(settings_module.socket, "gethostname", lambda: "rca-pod-7")
+
+    assert _settings().worker_id == "rca-pod-7"
+
+
+def test_worker_id_rejects_whitespace_only_values() -> None:
+    with pytest.raises(ValidationError, match="WORKER_ID must not be blank"):
+        _settings(worker_id="   ")
 
 
 def test_production_rejects_an_emulator_host() -> None:

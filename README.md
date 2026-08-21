@@ -130,7 +130,8 @@ metadata without rerunning its DDL. Future migration ownership is defined by
 it is enforced by compatibility tests rather than separate database login roles.
 
 For local Pub/Sub delivery, start the Google official emulator and configure
-both processes with `PUBSUB_EMULATOR_HOST=127.0.0.1:58085`:
+both processes with `PUBSUB_EMULATOR_HOST=127.0.0.1:58085`; configure the RCA
+Worker with `PUBSUB_AUTO_CREATE=true`:
 
 ```bash
 docker compose up -d pubsub-emulator
@@ -138,7 +139,8 @@ cd backend && UV_CACHE_DIR="$PWD/.uv-cache" uv run sre-agent-outbox-worker
 ```
 
 Production does not set `PUBSUB_EMULATOR_HOST`; Google clients use ADC and
-Workload Identity. No service-account key is stored in this repository.
+Workload Identity, and the RCA Worker keeps `PUBSUB_AUTO_CREATE=false`. No
+service-account key is stored in this repository.
 
 Before Angular starts, the frontend loads `/config.json`. Deployments must serve
 all of these fields:
@@ -154,6 +156,222 @@ all of these fields:
 Application code should inject `RUNTIME_CONFIG` rather than hard-code an API
 base URL. Local configuration files matching `.env*` are ignored; commit a
 `.env.example` template when one is needed.
+
+## GKE deployment
+
+The portable Kubernetes base and the ordered Backend-then-Worker migration
+release procedure are documented in [`deploy/k8s/README.md`](deploy/k8s/README.md).
+Namespace, immutable registry digests, Workload Identity bindings, Secret data,
+Gateway routing, and Terraform-managed dependencies are environment inputs and
+are intentionally not embedded in the base.
+
+## 完整本機啟動
+
+以下流程會啟動 PostgreSQL、Pub/Sub Emulator、Backend、outbox publisher、
+RCA Worker 與 Angular frontend。每個長時間運行的程序使用獨立 terminal。
+
+### 1. 準備相依套件
+
+從 repository root 執行：
+
+```bash
+(
+  cd backend
+  UV_CACHE_DIR="$PWD/.uv-cache" uv sync --all-groups --frozen
+)
+(
+  cd rca-worker
+  UV_CACHE_DIR="$PWD/.uv-cache" uv sync --all-groups --frozen
+)
+(
+  cd frontend
+  npm ci
+)
+```
+
+前端必須使用 Node.js `>=24.15.0 <25`。先以 `node --version` 確認版本；如果
+Node 安裝在非預設位置，將它的 `bin` 目錄放在該 terminal 的 `PATH` 最前面。
+
+### 2. 啟動 PostgreSQL 與 Pub/Sub Emulator
+
+若 `55432` 與 `58085` 都沒有被占用，可直接使用 Compose：
+
+```bash
+docker compose up -d postgres pubsub-emulator
+```
+
+本次本機環境的 `55432` 已被其他專案占用，因此 PostgreSQL 改用 `55434`，並保留
+既有容器不動。首次建立專用資料庫時執行：
+
+```bash
+docker volume create sre-agent20_postgres_data
+docker run --name sre-agent20-local-postgres \
+  -e POSTGRES_DB=sre_agent \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_HOST_AUTH_METHOD=trust \
+  -p 127.0.0.1:55434:5432 \
+  -v sre-agent20_postgres_data:/var/lib/postgresql \
+  -d postgres:18
+```
+
+之後只需重新啟動既有容器：
+
+```bash
+docker start sre-agent20-local-postgres
+```
+
+本次 `58085` 已有健康的 Google 官方 Pub/Sub Emulator，因此直接沿用。可用以下
+命令確認；若無回應且 port 未被占用，再執行
+`docker compose up -d pubsub-emulator`：
+
+```bash
+curl -fsS http://127.0.0.1:58085/v1/projects/sre-agent-local/topics
+```
+
+後續範例均使用：
+
+```bash
+export DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:55434/sre_agent'
+export PUBSUB_EMULATOR_HOST='127.0.0.1:58085'
+export PUBSUB_PROJECT_ID='sre-agent-local'
+export PUBSUB_AUTO_CREATE=true
+export RCA_TOPIC_ID='rca-jobs'
+```
+
+若使用 Compose 的預設 PostgreSQL port，將 `DATABASE_URL` 中的 `55434` 改為
+`55432`。
+
+### 3. 依序套用兩組 migration
+
+Backend migration 必須先完成，才能套用 Worker migration：
+
+```bash
+(
+  cd backend
+  UV_CACHE_DIR="$PWD/.uv-cache" uv run alembic upgrade head
+)
+(
+  cd rca-worker
+  UV_CACHE_DIR="$PWD/.uv-cache" uv run alembic upgrade head
+)
+```
+
+### 4. 建立最小本機 Grafana catalog
+
+Backend 啟動時會驗證 `GRAFANA_TOKENS` 中的 source 已在資料庫啟用。使用本次的
+專用 PostgreSQL 容器時，執行以下 idempotent seed：
+
+```bash
+docker exec sre-agent20-local-postgres psql -U postgres -d sre_agent \
+  -v ON_ERROR_STOP=1 \
+  -c "INSERT INTO teams (id, name) VALUES ('10000000-0000-0000-0000-000000000001', 'Local Team') ON CONFLICT DO NOTHING" \
+  -c "INSERT INTO projects (id, team_id, name) VALUES ('20000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000001', 'local-project') ON CONFLICT DO NOTHING" \
+  -c "INSERT INTO environments (id, project_id, name) VALUES ('30000000-0000-0000-0000-000000000001', '20000000-0000-0000-0000-000000000001', 'local') ON CONFLICT DO NOTHING" \
+  -c "INSERT INTO grafana_sources (id, project_id, environment_id, name) VALUES ('50000000-0000-0000-0000-000000000001', '20000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000001', 'local-grafana') ON CONFLICT DO NOTHING"
+```
+
+若使用 Compose PostgreSQL，將 `docker exec sre-agent20-local-postgres` 改為
+`docker compose exec -T postgres`。
+
+### 5. 啟動 Backend
+
+Backend 已將 Uvicorn 鎖定在應用程式依賴內；本機直接以 `uv run uvicorn` 啟動：
+
+```bash
+cd backend
+export DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:55434/sre_agent'
+export PUBSUB_EMULATOR_HOST='127.0.0.1:58085'
+export PUBSUB_PROJECT_ID='sre-agent-local'
+export RCA_TOPIC_ID='rca-jobs'
+export GRAFANA_TOKENS='{"50000000-0000-0000-0000-000000000001":{"local":"local-dev-token"}}'
+export APP_ENVIRONMENT='local'
+export MODEL_NAME='gemini-2.5-flash'
+export METRICS_MCP_URL='https://localhost.invalid/metrics/mcp'
+export TRACE_MCP_URL='https://localhost.invalid/traces/mcp'
+export LOG_MCP_URL='https://localhost.invalid/logs/mcp'
+UV_CACHE_DIR="$PWD/.uv-cache" uv run uvicorn \
+  sre_agent.api.main:app --host 127.0.0.1 --port 8000
+```
+
+### 6. 啟動 RCA Worker
+
+Worker 在本機明確設定 `PUBSUB_AUTO_CREATE=true` 時，會 idempotently 建立
+`rca-jobs` topic 與 `rca-jobs-local-sub` subscription：
+
+```bash
+cd rca-worker
+export DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:55434/sre_agent'
+export PUBSUB_EMULATOR_HOST='127.0.0.1:58085'
+export PUBSUB_PROJECT_ID='sre-agent-local'
+export PUBSUB_AUTO_CREATE=true
+export RCA_TOPIC_ID='rca-jobs'
+export PUBSUB_SUBSCRIPTION_ID='rca-jobs-local-sub'
+export APP_ENVIRONMENT='local'
+export MODEL_NAME='gemini-2.5-flash'
+export MCP_CAPABILITY_MANIFEST='[]'
+UV_CACHE_DIR="$PWD/.uv-cache" uv run sre-agent-rca-worker
+```
+
+空的 `MCP_CAPABILITY_MANIFEST` 會 fail closed：Worker 可以啟動、消費 job，並在
+沒有安全 evidence capability 時保存 `PARTIAL` 報告，但不會呼叫 MCP 或模型。
+若要產生有 evidence 的完整 RCA，需設定核准的 manifest、可連線的三個 MCP URL，
+以及所選 ADK model 所需的 Google AI 或 Vertex AI credentials。
+
+### 7. 啟動 outbox publisher
+
+等本機 Worker 建立 topic 後，再開另一個 terminal：
+
+```bash
+cd backend
+export DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:55434/sre_agent'
+export PUBSUB_EMULATOR_HOST='127.0.0.1:58085'
+export PUBSUB_PROJECT_ID='sre-agent-local'
+export RCA_TOPIC_ID='rca-jobs'
+UV_CACHE_DIR="$PWD/.uv-cache" uv run sre-agent-outbox-worker
+```
+
+### 8. 啟動 Angular frontend
+
+`frontend/proxy.conf.json` 會把 `/api` 轉送到本機 Backend：
+
+```bash
+cd frontend
+CI=1 NG_CLI_ANALYTICS=false npm start -- \
+  --host 127.0.0.1 --port 4200 --proxy-config proxy.conf.json
+```
+
+開啟 <http://127.0.0.1:4200/>。新資料庫的 Incident 清單一開始會是空的。
+
+### 9. 驗證與停止
+
+```bash
+curl -fsS http://127.0.0.1:4200/config.json
+curl -fsS 'http://127.0.0.1:4200/api/v1/incidents?limit=50'
+curl -fsS http://127.0.0.1:58085/v1/projects/sre-agent-local/topics
+curl -fsS http://127.0.0.1:58085/v1/projects/sre-agent-local/subscriptions
+```
+
+從 repository root 送入既有的 Grafana 範例，可驗證 Backend → outbox →
+Pub/Sub → RCA Worker 的完整路徑：
+
+```bash
+curl -fsS -X POST \
+  'http://127.0.0.1:8000/webhooks/v1/grafana/50000000-0000-0000-0000-000000000001' \
+  -H 'Authorization: Bearer local-dev-token' \
+  -H 'Content-Type: application/json' \
+  --data-binary @contracts/examples/grafana-firing.json
+```
+
+成功時 webhook 回傳 HTTP 202 與 `deliveryId`。等待 Worker 消費後重新整理前端；
+使用空 manifest 時，最新 RCA 與 worker job 應分別是 `PARTIAL` 和
+`SUCCEEDED`，outbox event 應是 `PUBLISHED`。
+
+Backend、Worker、outbox publisher 與 frontend 可在各自 terminal 按 `Ctrl-C`
+停止。此專案專用 PostgreSQL 使用：
+
+```bash
+docker stop sre-agent20-local-postgres
+```
 
 ## Full verification
 

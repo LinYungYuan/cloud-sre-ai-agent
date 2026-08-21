@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sre-agent-rca-worker
+  labels:
+    app: sre-agent-rca-worker
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: sre-agent-rca-worker
+  template:
+    metadata:
+      labels:
+        app: sre-agent-rca-worker
+    spec:
+      serviceAccountName: sre-agent-rca-worker
+      terminationGracePeriodSeconds: 330
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: rca-worker
+          image: sre-agent-rca-worker:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - sre-agent-rca-worker
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sre-agent-secrets
+                  key: DATABASE_URL
+            - name: PUBSUB_PROJECT_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: PUBSUB_PROJECT_ID
+            - name: RCA_TOPIC_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: RCA_TOPIC_ID
+            - name: PUBSUB_SUBSCRIPTION_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: PUBSUB_SUBSCRIPTION_ID
+            - name: APP_ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: APP_ENVIRONMENT
+            - name: MODEL_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: MODEL_NAME
+            - name: PUBSUB_AUTO_CREATE
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: PUBSUB_AUTO_CREATE
+            - name: WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: MCP_CAPABILITY_MANIFEST
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: MCP_CAPABILITY_MANIFEST
+            - name: METRICS_MCP_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: METRICS_MCP_URL
+            - name: TRACE_MCP_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: TRACE_MCP_URL
+            - name: LOG_MCP_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: LOG_MCP_URL
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi

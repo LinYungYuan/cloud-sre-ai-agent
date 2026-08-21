@@ -8,8 +8,8 @@ WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy
 
-# Install the frozen production dependencies before the Worker source so this
-# layer is reusable when only the application changes.
+# Install the locked production dependency set before application source so
+# dependency layers can be reused when only the application changes.
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev --no-install-project
 
@@ -35,4 +35,7 @@ COPY --from=builder --chown=65532:65532 /app/alembic.ini /app/alembic.ini
 
 USER 65532:65532
 
-CMD ["sre-agent-rca-worker"]
+EXPOSE 8000
+
+# Default: uvicorn sre_agent.api.main:app --host 0.0.0.0 --port 8000
+CMD ["uvicorn", "sre_agent.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

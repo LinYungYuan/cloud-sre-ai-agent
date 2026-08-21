@@ -1,7 +1,13 @@
+import socket
+
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from sre_rca_worker.integrations.mcp.models import ManifestEntry
+
+
+def _default_worker_id() -> str:
+    return socket.gethostname()
 
 
 class WorkerSettings(BaseSettings):
@@ -18,6 +24,8 @@ class WorkerSettings(BaseSettings):
     app_environment: str = Field(min_length=1)
     model_name: str = Field(min_length=1)
     pubsub_emulator_host: str | None = None
+    pubsub_auto_create: bool = False
+    worker_id: str = Field(default_factory=_default_worker_id, min_length=1)
     mcp_capability_manifest: tuple[ManifestEntry, ...] = ()
     metrics_mcp_url: str = (
         "https://agentgateway.cp.gcubut.gcp.uwccb/agw/gcp-metrics-mcp"
@@ -30,6 +38,13 @@ class WorkerSettings(BaseSettings):
     def validate_database_url(cls, value: SecretStr) -> SecretStr:
         if not value.get_secret_value().startswith("postgresql+asyncpg://"):
             raise ValueError("DATABASE_URL must use postgresql+asyncpg")
+        return value
+
+    @field_validator("worker_id")
+    @classmethod
+    def validate_worker_id(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("WORKER_ID must not be blank")
         return value
 
     @model_validator(mode="after")
