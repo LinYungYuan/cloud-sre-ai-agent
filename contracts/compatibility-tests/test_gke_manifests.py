@@ -7,6 +7,8 @@ import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BASE_DIR = REPOSITORY_ROOT / "deploy" / "k8s" / "base"
+JOBS_DIR = REPOSITORY_ROOT / "deploy" / "k8s" / "jobs"
+DEPLOYMENT_RUNBOOK = REPOSITORY_ROOT / "deploy" / "k8s" / "README.md"
 
 EXPECTED_RESOURCE_FILES = {
     "configmap.yaml",
@@ -69,6 +71,8 @@ def _resource(kind: str, name: str) -> dict[str, Any]:
 
 def _pod_spec(resource: dict[str, Any]) -> dict[str, Any]:
     if resource["kind"] == "Deployment":
+        return resource["spec"]["template"]["spec"]
+    if resource["kind"] == "Job":
         return resource["spec"]["template"]["spec"]
     if resource["kind"] == "CronJob":
         return resource["spec"]["jobTemplate"]["spec"]["template"]["spec"]
@@ -390,3 +394,92 @@ def test_config_map_contains_only_approved_non_secret_defaults() -> None:
         "secretkeyref",
     ):
         assert sensitive_term not in serialized
+
+
+def test_migration_jobs_are_immutable_bounded_and_least_privilege() -> None:
+    expectations = {
+        "backend-migration-job.yaml": {
+            "generate_name": "sre-agent-backend-migration-",
+            "image": "sre-agent-backend:latest",
+            "service_account": "sre-agent-backend",
+        },
+        "worker-migration-job.yaml": {
+            "generate_name": "sre-agent-worker-migration-",
+            "image": "sre-agent-rca-worker:latest",
+            "service_account": "sre-agent-rca-worker",
+        },
+    }
+    expected_resources = {
+        "requests": {"cpu": "100m", "memory": "256Mi"},
+        "limits": {"cpu": "1000m", "memory": "1Gi"},
+    }
+
+    for filename, expected in expectations.items():
+        path = JOBS_DIR / filename
+        assert path.is_file(), f"migration Job template does not exist: {path}"
+        documents = _load_yaml(path)
+        assert len(documents) == 1
+        job = documents[0]
+
+        assert job["apiVersion"] == "batch/v1"
+        assert job["kind"] == "Job"
+        assert job["metadata"]["generateName"] == expected["generate_name"]
+        assert "name" not in job["metadata"]
+        assert "namespace" not in job["metadata"]
+        assert "data" not in job and "stringData" not in job
+
+        assert job["spec"]["backoffLimit"] == 0
+        assert job["spec"]["activeDeadlineSeconds"] == 900
+        assert job["spec"]["ttlSecondsAfterFinished"] == 86400
+
+        pod_spec = _pod_spec(job)
+        assert pod_spec["restartPolicy"] == "Never"
+        assert pod_spec["serviceAccountName"] == expected["service_account"]
+        assert pod_spec["securityContext"] == {
+            "runAsNonRoot": True,
+            "runAsUser": 65532,
+            "runAsGroup": 65532,
+            "fsGroup": 65532,
+            "seccompProfile": {"type": "RuntimeDefault"},
+        }
+
+        container = _container(job)
+        assert container["image"] == expected["image"]
+        assert container["command"] == ["alembic", "upgrade", "head"]
+        environment = _environment(container)
+        assert set(environment) == {"DATABASE_URL"}
+        _assert_secret_reference(environment["DATABASE_URL"], "DATABASE_URL")
+        assert "configMapKeyRef" not in yaml.safe_dump(job)
+        assert container["securityContext"] == {
+            "runAsNonRoot": True,
+            "runAsUser": 65532,
+            "runAsGroup": 65532,
+            "allowPrivilegeEscalation": False,
+            "readOnlyRootFilesystem": True,
+            "capabilities": {"drop": ["ALL"]},
+        }
+        assert container["resources"] == expected_resources
+
+
+def test_release_runbook_waits_for_backend_then_worker_before_base_rollout() -> None:
+    assert DEPLOYMENT_RUNBOOK.is_file(), (
+        f"deployment runbook does not exist: {DEPLOYMENT_RUNBOOK}"
+    )
+    runbook = DEPLOYMENT_RUNBOOK.read_text(encoding="utf-8")
+    ordered_commands = [
+        "kubectl apply -f deploy/k8s/base/serviceaccounts.yaml",
+        (
+            "BACKEND_JOB=$(kubectl create -f "
+            "deploy/k8s/jobs/backend-migration-job.yaml"
+        ),
+        'kubectl wait --for=condition=complete --timeout=15m "job/${BACKEND_JOB}"',
+        (
+            "WORKER_JOB=$(kubectl create -f "
+            "deploy/k8s/jobs/worker-migration-job.yaml"
+        ),
+        'kubectl wait --for=condition=complete --timeout=15m "job/${WORKER_JOB}"',
+        "kubectl apply -k deploy/k8s/base",
+    ]
+
+    positions = [runbook.index(command) for command in ordered_commands]
+    assert positions == sorted(positions)

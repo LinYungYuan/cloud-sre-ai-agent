@@ -157,6 +157,14 @@ Application code should inject `RUNTIME_CONFIG` rather than hard-code an API
 base URL. Local configuration files matching `.env*` are ignored; commit a
 `.env.example` template when one is needed.
 
+## GKE deployment
+
+The portable Kubernetes base and the ordered Backend-then-Worker migration
+release procedure are documented in [`deploy/k8s/README.md`](deploy/k8s/README.md).
+Namespace, immutable registry digests, Workload Identity bindings, Secret data,
+Gateway routing, and Terraform-managed dependencies are environment inputs and
+are intentionally not embedded in the base.
+
 ## 完整本機啟動
 
 以下流程會啟動 PostgreSQL、Pub/Sub Emulator、Backend、outbox publisher、
