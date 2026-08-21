@@ -68,6 +68,10 @@ kubectl wait --for=condition=complete --timeout=15m "job/${BACKEND_JOB}"
 WORKER_JOB=$(kubectl create -f deploy/k8s/jobs/worker-migration-job.yaml -o jsonpath='{.metadata.name}')
 kubectl wait --for=condition=complete --timeout=15m "job/${WORKER_JOB}"
 kubectl apply -k deploy/k8s/base
+kubectl rollout restart deployment/sre-agent-backend
+kubectl rollout restart deployment/sre-agent-frontend
+kubectl rollout restart deployment/sre-agent-outbox
+kubectl rollout restart deployment/sre-agent-rca-worker
 kubectl rollout status deployment/sre-agent-backend --timeout=5m
 kubectl rollout status deployment/sre-agent-frontend --timeout=5m
 kubectl rollout status deployment/sre-agent-outbox --timeout=5m
@@ -87,9 +91,10 @@ kubectl logs "job/${WORKER_JOB}"
 
 ## Routing and production limitations
 
-The external Gateway must route `/api` to the `sre-agent-backend` Service on
-port 8000 and frontend traffic to `sre-agent-frontend` on port 8080. Gateway,
-DNS, TLS, and load-balancer configuration remain outside this portable base.
+The external Gateway must route both `/api` and `/webhooks/v1/grafana` to the
+`sre-agent-backend` Service on port 8000, and frontend traffic to
+`sre-agent-frontend` on port 8080. Gateway, DNS, TLS, and load-balancer
+configuration remain outside this portable base.
 
 Operator API authentication is not implemented for production. With
 `APP_ENVIRONMENT=production`, Operator API requests continue to fail closed with

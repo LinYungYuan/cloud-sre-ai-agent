@@ -275,8 +275,7 @@ docker exec sre-agent20-local-postgres psql -U postgres -d sre_agent \
 
 ### 5. 啟動 Backend
 
-Backend 未將 ASGI server 固定在應用程式依賴內；本機可用 `uv --with` 暫時提供
-Uvicorn，而不修改 lock file：
+Backend 已將 Uvicorn 鎖定在應用程式依賴內；本機直接以 `uv run uvicorn` 啟動：
 
 ```bash
 cd backend
@@ -290,8 +289,8 @@ export MODEL_NAME='gemini-2.5-flash'
 export METRICS_MCP_URL='https://localhost.invalid/metrics/mcp'
 export TRACE_MCP_URL='https://localhost.invalid/traces/mcp'
 export LOG_MCP_URL='https://localhost.invalid/logs/mcp'
-UV_CACHE_DIR="$PWD/.uv-cache" uv run --with uvicorn \
-  uvicorn sre_agent.api.main:app --host 127.0.0.1 --port 8000
+UV_CACHE_DIR="$PWD/.uv-cache" uv run uvicorn \
+  sre_agent.api.main:app --host 127.0.0.1 --port 8000
 ```
 
 ### 6. 啟動 RCA Worker
@@ -328,12 +327,6 @@ export DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:55434/sre_agent'
 export PUBSUB_EMULATOR_HOST='127.0.0.1:58085'
 export PUBSUB_PROJECT_ID='sre-agent-local'
 export RCA_TOPIC_ID='rca-jobs'
-export GRAFANA_TOKENS='{"50000000-0000-0000-0000-000000000001":{"local":"local-dev-token"}}'
-export APP_ENVIRONMENT='local'
-export MODEL_NAME='gemini-2.5-flash'
-export METRICS_MCP_URL='https://localhost.invalid/metrics/mcp'
-export TRACE_MCP_URL='https://localhost.invalid/traces/mcp'
-export LOG_MCP_URL='https://localhost.invalid/logs/mcp'
 UV_CACHE_DIR="$PWD/.uv-cache" uv run sre-agent-outbox-worker
 ```
 

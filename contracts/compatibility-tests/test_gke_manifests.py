@@ -247,6 +247,7 @@ def test_backend_probes_service_and_environment_are_wired_explicitly() -> None:
 def test_frontend_probes_runtime_config_service_and_writable_paths_are_wired() -> None:
     deployment = _resource("Deployment", "sre-agent-frontend")
     pod_spec = _pod_spec(deployment)
+    assert pod_spec["automountServiceAccountToken"] is False
     container = _container(deployment)
     assert container["ports"] == [{"name": "http", "containerPort": 8080}]
     assert container["livenessProbe"]["httpGet"] == {"path": "/healthz", "port": "http"}
@@ -351,6 +352,7 @@ def test_partition_cronjob_has_bounded_daily_execution_contract() -> None:
     assert spec["successfulJobsHistoryLimit"] == 2
     assert spec["failedJobsHistoryLimit"] == 2
     assert spec["jobTemplate"]["spec"]["backoffLimit"] == 2
+    assert spec["jobTemplate"]["spec"]["activeDeadlineSeconds"] == 1800
 
     pod_spec = _pod_spec(cronjob)
     assert pod_spec["restartPolicy"] == "Never"
@@ -484,6 +486,10 @@ def test_release_runbook_fails_fast_and_orders_migrations_before_rollouts() -> N
         ),
         'kubectl wait --for=condition=complete --timeout=15m "job/${WORKER_JOB}"',
         "kubectl apply -k deploy/k8s/base",
+        "kubectl rollout restart deployment/sre-agent-backend",
+        "kubectl rollout restart deployment/sre-agent-frontend",
+        "kubectl rollout restart deployment/sre-agent-outbox",
+        "kubectl rollout restart deployment/sre-agent-rca-worker",
         "kubectl rollout status deployment/sre-agent-backend --timeout=5m",
         "kubectl rollout status deployment/sre-agent-frontend --timeout=5m",
         "kubectl rollout status deployment/sre-agent-outbox --timeout=5m",
@@ -494,3 +500,12 @@ def test_release_runbook_fails_fast_and_orders_migrations_before_rollouts() -> N
         assert command in release_commands
     positions = [release_commands.index(command) for command in ordered_commands]
     assert positions == sorted(positions)
+
+
+def test_release_runbook_assigns_all_backend_gateway_paths() -> None:
+    runbook = DEPLOYMENT_RUNBOOK.read_text(encoding="utf-8")
+    routing = runbook.split("## Routing and production limitations", maxsplit=1)[1]
+
+    assert "`/api`" in routing
+    assert "`/webhooks/v1/grafana`" in routing
+    assert "`sre-agent-backend` Service on port 8000" in routing

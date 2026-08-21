@@ -19,6 +19,7 @@ spec:
       labels:
         app: sre-agent-frontend
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 101
