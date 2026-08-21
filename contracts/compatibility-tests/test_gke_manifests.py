@@ -461,12 +461,17 @@ def test_migration_jobs_are_immutable_bounded_and_least_privilege() -> None:
         assert container["resources"] == expected_resources
 
 
-def test_release_runbook_waits_for_backend_then_worker_before_base_rollout() -> None:
+def test_release_runbook_fails_fast_and_orders_migrations_before_rollouts() -> None:
     assert DEPLOYMENT_RUNBOOK.is_file(), (
         f"deployment runbook does not exist: {DEPLOYMENT_RUNBOOK}"
     )
     runbook = DEPLOYMENT_RUNBOOK.read_text(encoding="utf-8")
+    ordered_release = runbook.split("## Ordered release", maxsplit=1)[1]
+    release_commands = ordered_release.split("```bash", maxsplit=1)[1].split(
+        "```", maxsplit=1
+    )[0]
     ordered_commands = [
+        "set -euo pipefail",
         "kubectl apply -f deploy/k8s/base/serviceaccounts.yaml",
         (
             "BACKEND_JOB=$(kubectl create -f "
@@ -479,7 +484,13 @@ def test_release_runbook_waits_for_backend_then_worker_before_base_rollout() -> 
         ),
         'kubectl wait --for=condition=complete --timeout=15m "job/${WORKER_JOB}"',
         "kubectl apply -k deploy/k8s/base",
+        "kubectl rollout status deployment/sre-agent-backend --timeout=5m",
+        "kubectl rollout status deployment/sre-agent-frontend --timeout=5m",
+        "kubectl rollout status deployment/sre-agent-outbox --timeout=5m",
+        "kubectl rollout status deployment/sre-agent-rca-worker --timeout=5m",
     ]
 
-    positions = [runbook.index(command) for command in ordered_commands]
+    for command in ordered_commands:
+        assert command in release_commands
+    positions = [release_commands.index(command) for command in ordered_commands]
     assert positions == sorted(positions)

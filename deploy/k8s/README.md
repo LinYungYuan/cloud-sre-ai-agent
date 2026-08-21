@@ -61,6 +61,7 @@ the Worker migration until the Backend migration is complete, and do not apply
 the full base until both migrations are complete.
 
 ```bash
+set -euo pipefail
 kubectl apply -f deploy/k8s/base/serviceaccounts.yaml
 BACKEND_JOB=$(kubectl create -f deploy/k8s/jobs/backend-migration-job.yaml -o jsonpath='{.metadata.name}')
 kubectl wait --for=condition=complete --timeout=15m "job/${BACKEND_JOB}"
