@@ -116,6 +116,7 @@ def test_kustomization_references_each_base_manifest() -> None:
 
     assert kustomization["apiVersion"] == "kustomize.config.k8s.io/v1beta1"
     assert kustomization["kind"] == "Kustomization"
+    assert "namespace" not in kustomization
     assert set(kustomization["resources"]) == EXPECTED_RESOURCE_FILES
     assert len(kustomization["resources"]) == len(EXPECTED_RESOURCE_FILES)
     for relative_path in kustomization["resources"]:
