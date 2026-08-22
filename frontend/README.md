@@ -1,15 +1,15 @@
-# SRE Agent frontend
+# SRE Agent Frontend
 
-Independent Angular 22 standalone application for the SRE Agent web interface.
+SRE Agent Web 介面的獨立 Angular 22 standalone 應用程式。
 
-## Requirements
+## 前置需求
 
 - Node.js `>=24.15.0 <25`
 - npm 11
 
-## Runtime configuration
+## 執行期設定
 
-The application fetches `/config.json` before Angular starts. Deployment must provide all three fields:
+應用程式會在 Angular 啟動前取得 `/config.json`。部署環境必須提供以下三個欄位：
 
 ```json
 {
@@ -19,9 +19,10 @@ The application fetches `/config.json` before Angular starts. Deployment must pr
 }
 ```
 
-Startup fails if the response is unavailable or invalid. Feature code should inject `RUNTIME_CONFIG` rather than hard-code an API base URL.
+若 response 無法取得或格式無效，啟動就會失敗。功能程式碼應注入
+`RUNTIME_CONFIG`，不得寫死 API base URL。
 
-## Commands
+## 常用命令
 
 ```bash
 npm start
@@ -29,21 +30,21 @@ npm test -- --watch=false
 npm run build
 ```
 
-Production build artifacts are written beneath `dist/frontend/`.
+正式環境建置產物會寫入 `dist/frontend/`。
 
-## Production container
+## 正式環境 Container
 
-Build the production image from the repository root:
+從儲存庫根目錄建置正式環境 image：
 
 ```bash
 docker build -t sre-agent-frontend:gke-plan frontend
 ```
 
-The image uses the unprivileged Nginx runtime and listens on port `8080`. It
-serves `/healthz`, returns the Angular shell for client-side routes, and never
-proxies `/api`; provide the API endpoint through the deployed `config.json`.
+image 使用 unprivileged Nginx runtime 並監聽 port `8080`。它提供 `/healthz`、
+針對 client-side route 回傳 Angular shell，而且絕不代理 `/api`；API endpoint 必須
+透過部署的 `config.json` 提供。
 
-For a read-only root filesystem, mount these paths as writable volumes:
+若 root filesystem 設為唯讀，請將以下路徑掛載為可寫入 volume：
 
 ```text
 /tmp
@@ -51,8 +52,8 @@ For a read-only root filesystem, mount these paths as writable volumes:
 /var/run
 ```
 
-`index.html` and `config.json` are not cached. Only content-hashed JavaScript,
-CSS, and font build assets receive a one-year immutable cache header.
+`index.html` 與 `config.json` 不會被快取。只有包含 content hash 的 JavaScript、
+CSS 與字型建置產物會收到一年期限的 immutable cache header。
 
 ## 操作方式與範圍
 

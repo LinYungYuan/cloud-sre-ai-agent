@@ -1,34 +1,31 @@
-# SRE Agent Platform
+# SRE Agent 平台
 
-This monorepo contains three independently buildable and deployable packages for
-the SRE Agent platform:
+此單一儲存庫（monorepo）包含三個可獨立建置與部署的 SRE Agent 套件：
 
-- `backend/`: FastAPI webhook and Operator REST API.
-- `rca-worker/`: Pub/Sub consumer, ADK/MCP orchestration, evidence, and RCA reports.
-- `frontend/`: Angular operator interface in Traditional Chinese.
+- `backend/`：FastAPI webhook 與 Operator REST API。
+- `rca-worker/`：Pub/Sub 消費者、ADK/MCP 編排、證據與 RCA 報告。
+- `frontend/`：使用繁體中文的 Angular 操作介面。
 
-`contracts/` is not a fourth deployable service. It contains versioned OpenAPI,
-JSON Schema, examples, database ownership metadata, and compatibility tests used
-by the three packages. Packages may consume these published formats but must not
-import one another's source code. Infrastructure provisioning is outside this
-repository.
+`contracts/` 不是第四個可部署服務。它保存三個套件共用的版本化 OpenAPI、JSON
+Schema、範例、資料庫所有權中繼資料與相容性測試。各套件可以使用這些已發布格式，
+但不得匯入彼此的原始碼。基礎設施建置不在此儲存庫的範圍內。
 
-## Prerequisites
+## 前置需求
 
-- Python 3.11 or later and [uv](https://docs.astral.sh/uv/)
-- Node.js `>=24.15.0 <25` and npm 11
+- Python 3.11 以上版本與 [uv](https://docs.astral.sh/uv/)
+- Node.js `>=24.15.0 <25` 與 npm 11
 
-## Backend setup
+## Backend 設定
 
-Set up the backend from its project directory. The cache location keeps uv's
-downloaded artifacts inside this repository instead of a user-home cache.
+請在 Backend 專案目錄中完成設定。以下快取位置會將 uv 下載的產物保存在此儲存庫，
+而不是使用者家目錄的快取中。
 
 ```bash
 cd backend
 UV_CACHE_DIR="$PWD/.uv-cache" uv sync --all-groups
 ```
 
-Run backend tests and static analysis independently:
+獨立執行 Backend 測試與靜態分析：
 
 ```bash
 cd backend
@@ -37,16 +34,15 @@ UV_CACHE_DIR="$PWD/.uv-cache" uv run ruff check src tests
 UV_CACHE_DIR="$PWD/.uv-cache" uv run pyright src
 ```
 
-From the repository root, the equivalent command is:
+在儲存庫根目錄可使用等效命令：
 
 ```bash
 make test-backend
 ```
 
-## Frontend setup
+## Frontend 設定
 
-Install the Angular 22 application dependencies, then run its test suite or a
-production build:
+安裝 Angular 22 應用程式相依套件，再執行測試套件或正式環境建置：
 
 ```bash
 cd frontend
@@ -55,15 +51,14 @@ npm test -- --watch=false
 CI=1 NG_BUILD_MAX_WORKERS=1 npm run build
 ```
 
-`make test-frontend` uses the current `PATH` for Node and npm. If Node is in a
-non-default location, prepend its bin directory without changing the Makefile:
+`make test-frontend` 會從目前的 `PATH` 尋找 Node 與 npm。若 Node 安裝在非預設
+位置，請將其 `bin` 目錄放在 `PATH` 最前面，不需要修改 Makefile：
 
 ```bash
 NODE_BIN_DIR=/path/to/node/bin make test-frontend
 ```
 
-The frontend retrieves data only through the REST API. Refresh the page manually
-to retrieve the latest data.
+Frontend 只透過 REST API 取得資料；需要手動重新整理頁面才能取得最新資料。
 
 Provider 判斷只有一條規則：alert labels 存在且非空的
 `resource.label.project_id` 就是 GCP；key 不存在就是 AWS。Grafana `folder` 是
@@ -73,11 +68,11 @@ Provider 判斷只有一條規則：alert labels 存在且非空的
 outbox event。Angular 只在使用者按「重新整理」時重新讀 REST；Chat/SSE/WebSocket
 保留至日後獨立的 `sre-chat-backend` 設計。
 
-## RCA Worker setup
+## RCA Worker 設定
 
-The RCA Worker is a separate Python project with its own dependencies, lock file,
-tests, migrations, Dockerfile, startup command, image, and release. It must not
-import `backend/src`; Backend must not import `rca-worker/src`.
+RCA Worker 是獨立的 Python 專案，擁有自己的相依套件、鎖定檔、測試、資料庫遷移
+（migration）、Dockerfile、啟動命令、image 與發布流程。它不得匯入
+`backend/src`；Backend 也不得匯入 `rca-worker/src`。
 
 ```bash
 cd rca-worker
@@ -87,63 +82,59 @@ UV_CACHE_DIR="$PWD/.uv-cache" uv run ruff check src tests
 UV_CACHE_DIR="$PWD/.uv-cache" uv run pyright src
 ```
 
-Worker migrations use `alembic_version_rca_worker` and are applied only after
-the Backend migrations have reached their required revision.
+Worker migration 使用 `alembic_version_rca_worker`，且只能在 Backend migration
+到達必要 revision 後套用。
 
-## Contracts
+## 契約（Contracts）
 
-Contracts prevent independently released packages from silently disagreeing on
-payload fields, API shapes, or database ownership. They contain data formats and
-compatibility checks only; they contain no business logic and are not deployed.
+契約可避免獨立發布的套件在 payload 欄位、API 結構或資料庫所有權上產生未被察覺的
+差異。契約只包含資料格式與相容性檢查，不含商業邏輯，也不會部署成服務。
 
-Contract compatibility tests validate the OpenAPI documents and checked-in
-examples using the backend project's development dependencies:
+契約相容性測試使用 Backend 專案的開發相依套件，驗證 OpenAPI 文件與提交至儲存庫的
+範例：
 
 ```bash
 UV_CACHE_DIR="$PWD/backend/.uv-cache" uv run --project backend pytest contracts/compatibility-tests
 ```
 
-Or use:
+或使用：
 
 ```bash
 make test-contracts
 ```
 
-## Runtime configuration
+## 執行期設定
 
-The backend ASGI entry point is `sre_agent.api.main:app`. Backend settings are
-validated during application lifespan startup rather than module import. See
-[`backend/README.md`](backend/README.md) for the required `DATABASE_URL`, opaque
-Grafana bearer-token JSON format, rotation guidance, and the independently
-runnable partition-maintenance command. Invalid backend configuration fails
-startup instead of turning valid webhook requests into generic 500 responses.
+Backend ASGI 進入點是 `sre_agent.api.main:app`。Backend 設定會在應用程式 lifespan
+啟動期間驗證，而不是在匯入模組時驗證。必要的 `DATABASE_URL`、不透明 Grafana
+Bearer Token JSON 格式、輪替方式與可獨立執行的 partition maintenance 命令，請參閱
+[`backend/README.md`](backend/README.md)。無效設定會使 Backend 啟動失敗，而不會讓
+原本有效的 webhook request 變成通用 HTTP 500 response。
 
-Backend, RCA Worker, and both Alembic migration streams use one shared Cloud SQL
-PostgreSQL 18 application role. Angular never connects to PostgreSQL. The role
-has application DML and migration DDL, but no superuser, role-management,
-database-owner, or unrelated-schema privileges. New environments use that role
-to run Backend migrations (`alembic_version_backend`) before RCA Worker
-migrations (`alembic_version_rca_worker`). The legacy `0001_alert_incident_schema` revision
-predates the package split; the implementation plan migrates its version-table
-metadata without rerunning its DDL. Future migration ownership is defined by
-`contracts/database/table-ownership.yaml` once that planned contract is added;
-it is enforced by compatibility tests rather than separate database login roles.
+Backend、RCA Worker 與兩條 Alembic migration stream 共用一個 Cloud SQL
+PostgreSQL 18 application role；Angular 不會連線 PostgreSQL。該 role 具有應用程式
+DML 與 migration DDL 權限，但沒有 superuser、role 管理、database owner 或無關
+schema 的權限。新環境會先用此 role 執行 Backend migration
+（`alembic_version_backend`），再執行 RCA Worker migration
+（`alembic_version_rca_worker`）。舊版 `0001_alert_incident_schema` revision 早於套件
+拆分；實作計畫只遷移其 version table 中繼資料，不會重新執行 DDL。加入規劃中的
+`contracts/database/table-ownership.yaml` 後，後續 migration 所有權會由該檔案定義，
+並透過相容性測試而不是不同的資料庫登入 role 強制執行。
 
-For local Pub/Sub delivery, start the Google official emulator and configure
-both processes with `PUBSUB_EMULATOR_HOST=127.0.0.1:58085`; configure the RCA
-Worker with `PUBSUB_AUTO_CREATE=true`:
+本機 Pub/Sub 傳遞使用 Google 官方 Emulator。兩個程序都需設定
+`PUBSUB_EMULATOR_HOST=127.0.0.1:58085`，RCA Worker 另需設定
+`PUBSUB_AUTO_CREATE=true`：
 
 ```bash
 docker compose up -d pubsub-emulator
 cd backend && UV_CACHE_DIR="$PWD/.uv-cache" uv run sre-agent-outbox-worker
 ```
 
-Production does not set `PUBSUB_EMULATOR_HOST`; Google clients use ADC and
-Workload Identity, and the RCA Worker keeps `PUBSUB_AUTO_CREATE=false`. No
-service-account key is stored in this repository.
+正式環境不設定 `PUBSUB_EMULATOR_HOST`；Google client 使用 ADC 與 Workload
+Identity，RCA Worker 維持 `PUBSUB_AUTO_CREATE=false`。此儲存庫不保存任何
+service account key。
 
-Before Angular starts, the frontend loads `/config.json`. Deployments must serve
-all of these fields:
+Angular 啟動前，Frontend 會載入 `/config.json`。部署環境必須提供以下全部欄位：
 
 ```json
 {
@@ -153,17 +144,15 @@ all of these fields:
 }
 ```
 
-Application code should inject `RUNTIME_CONFIG` rather than hard-code an API
-base URL. Local configuration files matching `.env*` are ignored; commit a
-`.env.example` template when one is needed.
+應用程式應注入 `RUNTIME_CONFIG`，不得寫死 API base URL。符合 `.env*` 的本機設定檔
+會被忽略；需要範本時請提交 `.env.example`。
 
-## GKE deployment
+## GKE 部署
 
-The portable Kubernetes base and the ordered Backend-then-Worker migration
-release procedure are documented in [`deploy/k8s/README.md`](deploy/k8s/README.md).
-Namespace, immutable registry digests, Workload Identity bindings, Secret data,
-Gateway routing, and Terraform-managed dependencies are environment inputs and
-are intentionally not embedded in the base.
+可攜式 Kubernetes base 與依序執行 Backend、Worker migration 的發布流程，記錄於
+[`deploy/k8s/README.md`](deploy/k8s/README.md)。Namespace、不可變 registry digest、
+Workload Identity 綁定、Secret 資料、Gateway 路由及 Terraform 管理的相依資源都是
+環境輸入，因此不會寫入 base。
 
 ## 完整本機啟動
 
@@ -373,13 +362,13 @@ Backend、Worker、outbox publisher 與 frontend 可在各自 terminal 按 `Ctrl
 docker stop sre-agent20-local-postgres
 ```
 
-## Full verification
+## 完整驗證
 
-After all three packages have been set up, run the full repository gate from the root:
+完成三個套件的設定後，請從儲存庫根目錄執行完整 gate：
 
 ```bash
 make check
 ```
 
-It validates contracts, runs Backend and RCA Worker tests plus their independent
-Ruff/Pyright gates, then runs the Angular tests and production build.
+此命令會驗證契約、執行 Backend 與 RCA Worker 測試及各自的 Ruff／Pyright gate，
+最後執行 Angular 測試與正式環境建置。

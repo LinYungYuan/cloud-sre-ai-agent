@@ -1,16 +1,15 @@
 # SRE Agent Backend
 
-The backend service for the Observability RCA platform.
+Observability RCA 平台的 Backend 服務。
 
-## Grafana ingestion runtime
+## Grafana 接收執行期
 
-The ASGI entry point is `sre_agent.api.main:app`. Creating or importing the app
-does not read configuration, credentials, or connect to PostgreSQL. Its lifespan
-validates configuration, loads the enabled Grafana source/classification catalog,
-and creates the SQLAlchemy resources; invalid configuration or database/catalog
-drift fails startup.
+ASGI 進入點是 `sre_agent.api.main:app`。建立或匯入 app 時不會讀取設定與
+credential，也不會連線 PostgreSQL。應用程式 lifespan 會驗證設定、載入已啟用的
+Grafana source／classification catalog，並建立 SQLAlchemy resource；無效設定或
+database／catalog drift 會使啟動失敗。
 
-Required variables for this phase include the existing platform settings plus:
+此階段除了既有平台設定外，還需要以下環境變數：
 
 ```sh
 export DATABASE_URL='postgresql+asyncpg://app:password@db:5432/sre_agent'
@@ -24,33 +23,32 @@ export TRACE_MCP_URL='https://gateway.example/traces/mcp'
 export LOG_MCP_URL='https://gateway.example/logs/mcp'
 ```
 
-`GRAFANA_TOKENS` is JSON with this exact hierarchy: source UUID → non-secret
-token ID → opaque bearer credential. Token IDs use 1–128 ASCII letters, digits,
-`.`, `_`, `:`, or `-`; credentials must be non-empty ASCII without whitespace.
-Rotation is done by temporarily configuring current and previous token IDs. Only
-the matching token ID is persisted; token values are `SecretStr` values and must
-never be logged. These are opaque bearer tokens, not JWTs.
+`GRAFANA_TOKENS` 是具有固定階層的 JSON：source UUID → 非機密 token ID → 不透明
+Bearer credential。Token ID 必須由 1–128 個 ASCII 字母、數字、`.`、`_`、`:` 或
+`-` 組成；credential 必須是非空白且不含空格的 ASCII。輪替時暫時同時設定目前與上一版
+token ID。系統只保存符合的 token ID；token value 使用 `SecretStr`，絕對不可寫入
+log。這些是不透明 Bearer Token，不是 JWT。
 
-Run the ASGI app with an installed ASGI server, for example:
+使用已安裝的 ASGI server 啟動應用程式，例如：
 
 ```sh
 uv run uvicorn sre_agent.api.main:app
 ```
 
-## Production container image
+## 正式環境 Container Image
 
-Build the production image from the repository root:
+從儲存庫根目錄建置正式環境 image：
 
 ```sh
 docker build -t sre-agent-backend:gke-plan backend
 ```
 
-The image runs as UID/GID `65532`, listens on port `8000`, and starts the ASGI
-application with Uvicorn. It includes the installed worker console scripts plus
-`alembic.ini` and `migrations/`, so the same image can be used by the API,
-outbox worker, migration, and partition-maintenance workloads.
+image 以 UID/GID `65532` 執行、監聽 port `8000`，並使用 Uvicorn 啟動 ASGI
+應用程式。它包含已安裝的 Worker console script、`alembic.ini` 與 `migrations/`，
+因此同一個 image 可供 API、Outbox Worker、Migration 與 Partition Maintenance
+workload 使用。
 
-Maintain a current-plus-two-month partition runway independently from the app:
+使用獨立於應用程式的命令，維持本月與未來兩個月的 partition runway：
 
 ```sh
 uv run sre-agent-ensure-partitions
@@ -58,5 +56,5 @@ uv run sre-agent-ensure-partitions
 uv run python -m sre_agent.workers.partition_worker
 ```
 
-The partition command reads `DATABASE_URL` only when invoked, returns nonzero on
-failure or catalog drift, and does not provision or schedule infrastructure.
+Partition 命令只會在執行時讀取 `DATABASE_URL`；若失敗或發現 catalog drift，會回傳
+非零 exit code。此命令不會建立或排程任何基礎設施。
