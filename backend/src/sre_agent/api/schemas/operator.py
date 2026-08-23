@@ -20,6 +20,9 @@ RcaRunStatus = Literal[
     "FAILED",
     "CANCELLED",
 ]
+TraceStatus = Literal["OK", "ERROR", "UNSET"]
+TraceSpanKind = Literal["INTERNAL", "SERVER", "CLIENT", "PRODUCER", "CONSUMER"]
+TraceAttributeValue = str | int | float | bool
 
 
 def _camel(name: str) -> str:
@@ -145,3 +148,33 @@ class RcaReport(OperatorModel):
     hypotheses: list[dict[str, Any]]
     claims: list[dict[str, Any]]
     created_at: datetime
+
+
+class TraceWaterfallSpan(OperatorModel):
+    span_id: str = Field(min_length=1, max_length=128)
+    parent_span_id: str | None = Field(min_length=1, max_length=128)
+    service_name: str = Field(min_length=1, max_length=128)
+    operation_name: str = Field(min_length=1, max_length=128)
+    start_offset_ms: float = Field(ge=0)
+    duration_ms: float = Field(ge=0)
+    status: TraceStatus
+    kind: TraceSpanKind
+    critical_path: bool
+    attributes: dict[str, TraceAttributeValue]
+
+
+class TraceWaterfall(OperatorModel):
+    schema_version: Literal[1]
+    trace_id: str = Field(min_length=1, max_length=128)
+    root_service_name: str = Field(min_length=1, max_length=128)
+    root_operation_name: str = Field(min_length=1, max_length=128)
+    started_at: datetime
+    duration_ms: float = Field(ge=0)
+    span_count: int = Field(ge=1)
+    representative_score: float = Field(ge=0)
+    truncated: bool
+    spans: list[TraceWaterfallSpan] = Field(min_length=1, max_length=100)
+
+
+class TraceWaterfallResponse(OperatorModel):
+    trace: TraceWaterfall | None
