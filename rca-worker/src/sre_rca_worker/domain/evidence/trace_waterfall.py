@@ -36,6 +36,16 @@ _JSON_SCALAR = StrictStr | StrictInt | StrictFloat | StrictBool
 _STATUS = Literal["OK", "ERROR", "UNSET"]
 _KIND = Literal["INTERNAL", "SERVER", "CLIENT", "PRODUCER", "CONSUMER"]
 _TOKEN_PATTERN = re.compile(r"[a-z0-9][a-z0-9._/-]*")
+_UNSAFE_DISPLAY_TEXT_PATTERN = re.compile(
+    r"""(?ix)
+    \b(?:select|insert|update|delete|alter|drop|create|grant|revoke)\b
+    | \b(?:authorization|bearer|token|password|secret|cookie|baggage)\b
+    | \b(?:email|e-mail|ssn|social[ -]?security)\b
+    | [\[\]{}]
+    | [\w.+-]+@[\w.-]+\.[a-z]{2,}
+    | \b[a-z][a-z0-9_-]*=[^\s]+
+    """
+)
 _MAX_RESPONSE_SPANS = 100
 
 
@@ -52,6 +62,13 @@ class _InputSpan(BaseModel):
     kind: _KIND
     critical_path: StrictBool
     attributes: dict[str, _JSON_SCALAR]
+
+    @field_validator("service_name", "operation_name")
+    @classmethod
+    def _safe_display_text(cls, value: str) -> str:
+        if _UNSAFE_DISPLAY_TEXT_PATTERN.search(value):
+            raise ValueError("service and operation names must not contain raw data")
+        return value
 
     @field_validator("start_offset_ms", "duration_ms", mode="before")
     @classmethod
@@ -146,11 +163,7 @@ class _CandidateTrace(BaseModel):
 
     @property
     def has_error(self) -> bool:
-        return any(
-            span.status == "ERROR"
-            and (span.parent_span_id is None or span.critical_path)
-            for span in self.spans
-        )
+        return any(span.status == "ERROR" for span in self.spans)
 
 
 class _SelectedTrace(BaseModel):
@@ -385,13 +398,10 @@ def _truncate(candidate: _CandidateTrace, *, max_spans: int) -> _SelectedTrace:
         selected_ids = set(
             _topological_order(candidate, critical_closure)[:max_spans]
         )
-        for span_id in _stable_span_ids(candidate, error_ids):
-            _add_with_ancestors(spans, selected_ids, span_id, max_spans)
     else:
         selected_ids = set(required_ids)
-
-    for span_id in _stable_span_ids(candidate, set(spans)):
-        _add_with_ancestors(spans, selected_ids, span_id, max_spans)
+        for span_id in _stable_span_ids(candidate, set(spans)):
+            _add_with_ancestors(spans, selected_ids, span_id, max_spans)
 
     selected_span_ids = tuple(_topological_order(candidate, selected_ids))
     representative_score = _representative_score(candidate)
