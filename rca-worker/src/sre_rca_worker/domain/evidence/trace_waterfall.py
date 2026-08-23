@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import re
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
@@ -43,6 +46,7 @@ _HTTP_OPERATION_PATTERN = re.compile(
 _IDENTIFIER_OPERATION_PATTERN = re.compile(
     r"^/?[A-Za-z][A-Za-z0-9_-]{0,31}(?:[./][A-Za-z][A-Za-z0-9_-]{0,31}){0,7}$"
 )
+_BASE64URL_PART_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _MAX_RESPONSE_SPANS = 100
 
 
@@ -63,7 +67,10 @@ class _InputSpan(BaseModel):
     @field_validator("service_name")
     @classmethod
     def _safe_service_name(cls, value: str) -> str:
-        if _SERVICE_NAME_PATTERN.fullmatch(value) is None:
+        if (
+            _SERVICE_NAME_PATTERN.fullmatch(value) is None
+            or _is_compact_jwt(value)
+        ):
             raise ValueError("serviceName must be a conventional service identifier")
         return value
 
@@ -73,7 +80,7 @@ class _InputSpan(BaseModel):
         if (
             _HTTP_OPERATION_PATTERN.fullmatch(value) is None
             and _IDENTIFIER_OPERATION_PATTERN.fullmatch(value) is None
-        ):
+        ) or _is_compact_jwt(value):
             raise ValueError("operationName must be a canonical operation label")
         return value
 
@@ -228,6 +235,34 @@ _SPAN_ALIASES = {
     "critical_path": "critical_path",
     "attributes": "attributes",
 }
+
+
+def _is_compact_jwt(value: str) -> bool:
+    parts = value.split(".")
+    if (
+        len(parts) != 3
+        or any(
+            _BASE64URL_PART_PATTERN.fullmatch(part) is None
+            or len(part) % 4 == 1
+            for part in parts
+        )
+    ):
+        return False
+    try:
+        header = _decode_base64url_json_object(parts[0])
+        payload = _decode_base64url_json_object(parts[1])
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return isinstance(header.get("alg"), str) and isinstance(payload, dict)
+
+
+def _decode_base64url_json_object(value: str) -> dict[str, Any]:
+    padding = "=" * (-len(value) % 4)
+    decoded = base64.urlsafe_b64decode(value + padding)
+    parsed = json.loads(decoded)
+    if not isinstance(parsed, dict):
+        raise json.JSONDecodeError("expected object", value, 0)
+    return parsed
 
 
 def normalize_trace_evidence(

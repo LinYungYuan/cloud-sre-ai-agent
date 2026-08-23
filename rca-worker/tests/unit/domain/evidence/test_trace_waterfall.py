@@ -7,6 +7,8 @@ import pytest
 
 from sre_rca_worker.domain.evidence.trace_waterfall import normalize_trace_evidence
 
+_COMPACT_JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhIn0.sig"
+
 
 def test_normalizes_and_selects_error_trace_without_sensitive_attributes() -> None:
     payload: dict[str, Any] = {
@@ -104,7 +106,9 @@ def test_normalizes_and_selects_error_trace_without_sensitive_attributes() -> No
         ),
         ("operationName", "authorization: Ada credentials"),
         ("operationName", "GET /checkout?customer=Ada"),
+        ("operationName", _COMPACT_JWT),
         ("serviceName", "customer-ada@example.com"),
+        ("serviceName", _COMPACT_JWT),
     ],
 )
 def test_does_not_store_unsafe_service_or_operation_values(
@@ -168,6 +172,7 @@ def test_does_not_store_unsafe_service_or_operation_values(
         ("token-service", "POST /checkout"),
         ("email-service", "db.connection.acquire"),
         ("authorization-service", "/select"),
+        ("checkout.api.v2", "db.connection.acquire"),
     ],
 )
 def test_retains_conventional_display_labels(
