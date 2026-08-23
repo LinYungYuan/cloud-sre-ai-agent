@@ -93,6 +93,17 @@ def test_normalizes_and_selects_error_trace_without_sensitive_attributes() -> No
         ("operationName", "SELECT secret FROM users"),
         ("operationName", '{"email":"ada@example.com","password":"secret"}'),
         ("operationName", "Bearer secret-token"),
+        ("operationName", "POST /checkout <name>Ada</name>"),
+        (
+            "operationName",
+            (
+                "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+                "eyJzdWIiOiJhZGEtMTIzNDU2Nzg5MCIsIm5hbWUiOiJBZGEifQ."
+                "QmFyQmF6UXV4UXV1eFJhbmRvbVNpZ25hdHVyZVZhbHVlMTIzNDU"
+            ),
+        ),
+        ("operationName", "authorization: Ada credentials"),
+        ("operationName", "GET /checkout?customer=Ada"),
         ("serviceName", "customer-ada@example.com"),
     ],
 )
@@ -149,6 +160,45 @@ def test_does_not_store_unsafe_service_or_operation_values(
     assert result is not None
     assert result["traceId"] == "safe-trace"
     assert unsafe_value not in repr(result)
+
+
+@pytest.mark.parametrize(
+    ("service_name", "operation_name"),
+    [
+        ("token-service", "POST /checkout"),
+        ("email-service", "db.connection.acquire"),
+        ("authorization-service", "/select"),
+    ],
+)
+def test_retains_conventional_display_labels(
+    service_name: str,
+    operation_name: str,
+) -> None:
+    result = normalize_trace_evidence(
+        {
+            "traceId": "conventional-trace",
+            "startedAt": "2026-08-23T04:21:00Z",
+            "spans": [
+                {
+                    "spanId": "root",
+                    "parentSpanId": None,
+                    "serviceName": service_name,
+                    "operationName": operation_name,
+                    "startOffsetMs": 0,
+                    "durationMs": 10,
+                    "status": "OK",
+                    "kind": "SERVER",
+                    "criticalPath": True,
+                    "attributes": {},
+                }
+            ],
+        },
+        alert_issue="checkout latency",
+    )
+
+    assert result is not None
+    assert result["rootServiceName"] == service_name
+    assert result["rootOperationName"] == operation_name
 
 
 def test_selects_trace_with_a_nested_non_critical_error() -> None:

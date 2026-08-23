@@ -36,15 +36,12 @@ _JSON_SCALAR = StrictStr | StrictInt | StrictFloat | StrictBool
 _STATUS = Literal["OK", "ERROR", "UNSET"]
 _KIND = Literal["INTERNAL", "SERVER", "CLIENT", "PRODUCER", "CONSUMER"]
 _TOKEN_PATTERN = re.compile(r"[a-z0-9][a-z0-9._/-]*")
-_UNSAFE_DISPLAY_TEXT_PATTERN = re.compile(
-    r"""(?ix)
-    \b(?:select|insert|update|delete|alter|drop|create|grant|revoke)\b
-    | \b(?:authorization|bearer|token|password|secret|cookie|baggage)\b
-    | \b(?:email|e-mail|ssn|social[ -]?security)\b
-    | [\[\]{}]
-    | [\w.+-]+@[\w.-]+\.[a-z]{2,}
-    | \b[a-z][a-z0-9_-]*=[^\s]+
-    """
+_SERVICE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_HTTP_OPERATION_PATTERN = re.compile(
+    r"^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|CONNECT) /[A-Za-z0-9._~:/-]{0,127}$"
+)
+_IDENTIFIER_OPERATION_PATTERN = re.compile(
+    r"^/?[A-Za-z][A-Za-z0-9_-]{0,31}(?:[./][A-Za-z][A-Za-z0-9_-]{0,31}){0,7}$"
 )
 _MAX_RESPONSE_SPANS = 100
 
@@ -63,11 +60,21 @@ class _InputSpan(BaseModel):
     critical_path: StrictBool
     attributes: dict[str, _JSON_SCALAR]
 
-    @field_validator("service_name", "operation_name")
+    @field_validator("service_name")
     @classmethod
-    def _safe_display_text(cls, value: str) -> str:
-        if _UNSAFE_DISPLAY_TEXT_PATTERN.search(value):
-            raise ValueError("service and operation names must not contain raw data")
+    def _safe_service_name(cls, value: str) -> str:
+        if _SERVICE_NAME_PATTERN.fullmatch(value) is None:
+            raise ValueError("serviceName must be a conventional service identifier")
+        return value
+
+    @field_validator("operation_name")
+    @classmethod
+    def _safe_operation_name(cls, value: str) -> str:
+        if (
+            _HTTP_OPERATION_PATTERN.fullmatch(value) is None
+            and _IDENTIFIER_OPERATION_PATTERN.fullmatch(value) is None
+        ):
+            raise ValueError("operationName must be a canonical operation label")
         return value
 
     @field_validator("start_offset_ms", "duration_ms", mode="before")
