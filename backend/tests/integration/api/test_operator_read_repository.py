@@ -1,5 +1,6 @@
 import json
 import os
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -472,3 +473,79 @@ async def test_trace_waterfall_hides_missing_and_unauthorized_runs(
             OperatorIdentity("viewer@example.com"),
             UUID("9a000000-0000-0000-0000-000000000099"),
         )
+
+
+@pytest.mark.asyncio
+async def test_trace_waterfall_rejects_a_compact_jwt_trace_id(
+    repository: SqlAlchemyOperatorReadRepository,
+) -> None:
+    malformed = deepcopy(TRACE_WATERFALL)
+    malformed["traceId"] = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.sig"
+    await _insert_trace_evidence(
+        repository, malformed, observed_at=AT + timedelta(seconds=1)
+    )
+
+    waterfall = await repository.get_trace_waterfall(
+        OperatorIdentity("viewer@example.com"), RUN_ID
+    )
+
+    assert waterfall == {"trace": None}
+
+
+@pytest.mark.asyncio
+async def test_trace_waterfall_rejects_compact_jwt_span_and_parent_ids(
+    repository: SqlAlchemyOperatorReadRepository,
+) -> None:
+    malformed = deepcopy(TRACE_WATERFALL)
+    token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.sig"
+    malformed["spans"][0]["spanId"] = token
+    malformed["spans"][1]["parentSpanId"] = token
+    await _insert_trace_evidence(
+        repository, malformed, observed_at=AT + timedelta(seconds=1)
+    )
+
+    waterfall = await repository.get_trace_waterfall(
+        OperatorIdentity("viewer@example.com"), RUN_ID
+    )
+
+    assert waterfall == {"trace": None}
+
+
+@pytest.mark.asyncio
+async def test_trace_waterfall_omits_risky_attributes_and_keeps_safe_scalars(
+    repository: SqlAlchemyOperatorReadRepository,
+) -> None:
+    normalized = deepcopy(TRACE_WATERFALL)
+    normalized["spans"][0]["attributes"] = {
+        "http.request.method": "POST",
+        "http.response.status_code": 500,
+    }
+    normalized["spans"][1]["attributes"] = {"rpc.system": "not-supported"}
+    normalized["spans"][2]["attributes"] = {"rpc.service": "secret-marker"}
+    normalized["spans"][3]["attributes"] = {
+        "db.system": "postgresql",
+        "server.port": 0,
+    }
+    normalized["spans"][4]["attributes"] = {
+        "server.address": "secret-marker",
+        "server.port": 5432,
+    }
+    await _insert_trace_evidence(
+        repository, normalized, observed_at=AT + timedelta(seconds=1)
+    )
+
+    waterfall = await repository.get_trace_waterfall(
+        OperatorIdentity("viewer@example.com"), RUN_ID
+    )
+
+    assert waterfall["trace"] is not None
+    spans = waterfall["trace"]["spans"]
+    assert spans[0]["attributes"] == {
+        "http.request.method": "POST",
+        "http.response.status_code": 500,
+    }
+    assert spans[1]["attributes"] == {}
+    assert spans[2]["attributes"] == {}
+    assert spans[3]["attributes"] == {"db.system": "postgresql"}
+    assert spans[4]["attributes"] == {"server.port": 5432}
+    assert "secret-marker" not in str(waterfall)

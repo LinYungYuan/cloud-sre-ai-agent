@@ -38,6 +38,13 @@ _ALLOWED_ATTRIBUTES = frozenset(
         "server.port",
     }
 )
+_HTTP_METHODS = frozenset(
+    {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT"}
+)
+_RPC_SYSTEMS = frozenset({"grpc", "http", "jsonrpc", "aws-api"})
+_DB_SYSTEMS = frozenset(
+    {"postgresql", "mysql", "sqlite", "mssql", "mongodb", "redis"}
+)
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SERVICE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _HTTP_OPERATION_PATTERN = re.compile(
@@ -66,7 +73,9 @@ class StoredTraceSpan(BaseModel):
     @field_validator("span_id", "parent_span_id")
     @classmethod
     def _safe_span_identifier(cls, value: str | None) -> str | None:
-        if value is not None and _IDENTIFIER_PATTERN.fullmatch(value) is None:
+        if value is not None and (
+            _IDENTIFIER_PATTERN.fullmatch(value) is None or _is_compact_jwt(value)
+        ):
             raise ValueError("span ID must be a conventional identifier")
         return value
 
@@ -111,7 +120,7 @@ class StoredTraceSpan(BaseModel):
     ) -> dict[str, _JSON_SCALAR]:
         if any(key not in _ALLOWED_ATTRIBUTES for key in value):
             raise ValueError("Trace attribute is not allowlisted")
-        return value
+        return _safe_attributes(value)
 
 
 class StoredTraceWaterfall(BaseModel):
@@ -131,7 +140,7 @@ class StoredTraceWaterfall(BaseModel):
     @field_validator("trace_id")
     @classmethod
     def _safe_trace_identifier(cls, value: str) -> str:
-        if _IDENTIFIER_PATTERN.fullmatch(value) is None:
+        if _IDENTIFIER_PATTERN.fullmatch(value) is None or _is_compact_jwt(value):
             raise ValueError("trace ID must be a conventional identifier")
         return value
 
@@ -252,3 +261,29 @@ def _decode_base64url_json_object(value: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise json.JSONDecodeError("expected object", value, 0)
     return parsed
+
+
+def _safe_attributes(
+    attributes: dict[str, _JSON_SCALAR],
+) -> dict[str, _JSON_SCALAR]:
+    safe: dict[str, _JSON_SCALAR] = {}
+    for key, value in attributes.items():
+        if key == "http.request.method":
+            if value in _HTTP_METHODS:
+                safe[key] = value
+            continue
+        if key == "http.response.status_code":
+            if type(value) is int and 100 <= value <= 599:
+                safe[key] = value
+            continue
+        if key == "rpc.system":
+            if value in _RPC_SYSTEMS:
+                safe[key] = value
+            continue
+        if key == "db.system":
+            if value in _DB_SYSTEMS:
+                safe[key] = value
+            continue
+        if key == "server.port" and type(value) is int and 1 <= value <= 65535:
+            safe[key] = value
+    return safe
