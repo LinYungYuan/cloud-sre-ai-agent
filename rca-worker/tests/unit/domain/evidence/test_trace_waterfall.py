@@ -206,7 +206,7 @@ def test_retains_conventional_display_labels(
     assert result["rootOperationName"] == operation_name
 
 
-def test_selects_trace_with_a_nested_non_critical_error() -> None:
+def test_non_critical_leaf_error_does_not_outrank_stronger_latency_anomaly() -> None:
     payload = {
         "traces": [
             {
@@ -264,7 +264,176 @@ def test_selects_trace_with_a_nested_non_critical_error() -> None:
     result = normalize_trace_evidence(payload, alert_issue="checkout latency")
 
     assert result is not None
-    assert result["traceId"] == "nested-error-trace"
+    assert result["traceId"] == "slow-ok-trace"
+
+
+def test_selects_trace_with_a_nested_critical_path_error() -> None:
+    payload = {
+        "traces": [
+            {
+                "traceId": "slow-ok-trace",
+                "startedAt": "2026-08-23T04:20:00Z",
+                "latencyAnomalyScore": 1.0,
+                "spans": [
+                    {
+                        "spanId": "slow-ok-root",
+                        "parentSpanId": None,
+                        "serviceName": "checkout-api",
+                        "operationName": "POST /checkout",
+                        "startOffsetMs": 0,
+                        "durationMs": 1000,
+                        "status": "OK",
+                        "kind": "SERVER",
+                        "criticalPath": True,
+                        "attributes": {},
+                    }
+                ],
+            },
+            {
+                "traceId": "critical-error-trace",
+                "startedAt": "2026-08-23T04:21:00Z",
+                "spans": [
+                    {
+                        "spanId": "critical-root",
+                        "parentSpanId": None,
+                        "serviceName": "checkout-api",
+                        "operationName": "POST /checkout",
+                        "startOffsetMs": 0,
+                        "durationMs": 100,
+                        "status": "OK",
+                        "kind": "SERVER",
+                        "criticalPath": True,
+                        "attributes": {},
+                    },
+                    {
+                        "spanId": "critical-error",
+                        "parentSpanId": "critical-root",
+                        "serviceName": "inventory-service",
+                        "operationName": "inventory.reserve",
+                        "startOffsetMs": 10,
+                        "durationMs": 20,
+                        "status": "ERROR",
+                        "kind": "CLIENT",
+                        "criticalPath": True,
+                        "attributes": {},
+                    },
+                ],
+            },
+        ]
+    }
+
+    result = normalize_trace_evidence(payload, alert_issue="checkout latency")
+
+    assert result is not None
+    assert result["traceId"] == "critical-error-trace"
+
+
+def test_preserves_only_semantically_bounded_diagnostic_attributes() -> None:
+    result = normalize_trace_evidence(
+        {
+            "traceId": "diagnostic-trace",
+            "startedAt": "2026-08-23T04:21:00Z",
+            "spans": [
+                {
+                    "spanId": "root",
+                    "parentSpanId": None,
+                    "serviceName": "checkout-api",
+                    "operationName": "POST /checkout",
+                    "startOffsetMs": 0,
+                    "durationMs": 100,
+                    "status": "OK",
+                    "kind": "SERVER",
+                    "criticalPath": True,
+                    "attributes": {},
+                },
+                {
+                    "spanId": "rpc",
+                    "parentSpanId": "root",
+                    "serviceName": "inventory-service",
+                    "operationName": "inventory.reserve",
+                    "startOffsetMs": 10,
+                    "durationMs": 30,
+                    "status": "OK",
+                    "kind": "CLIENT",
+                    "criticalPath": True,
+                    "attributes": {
+                        "rpc.service": "inventory",
+                        "rpc.method": "reserve",
+                    },
+                },
+                {
+                    "spanId": "db",
+                    "parentSpanId": "rpc",
+                    "serviceName": "inventory-service",
+                    "operationName": "db.connection.acquire",
+                    "startOffsetMs": 20,
+                    "durationMs": 10,
+                    "status": "OK",
+                    "kind": "INTERNAL",
+                    "criticalPath": True,
+                    "attributes": {
+                        "db.operation.name": "connection.acquire",
+                        "server.address": "postgres.internal",
+                    },
+                },
+            ],
+        },
+        alert_issue="inventory latency",
+    )
+
+    assert result is not None
+    assert result["spans"][1]["attributes"] == {
+        "rpc.service": "inventory",
+        "rpc.method": "reserve",
+    }
+    assert result["spans"][2]["attributes"] == {
+        "db.operation.name": "connection.acquire",
+        "server.address": "postgres.internal",
+    }
+
+
+@pytest.mark.parametrize(
+    ("attribute", "unsafe_value"),
+    [
+        ("rpc.service", _COMPACT_JWT),
+        ("rpc.service", "ada@example.com"),
+        ("rpc.method", "Bearer secret-token"),
+        ("rpc.method", "reserve?customer=Ada"),
+        ("db.operation.name", "SELECT * FROM users"),
+        ("db.operation.name", "<query>reserve</query>"),
+        ("server.address", "authorization: secret-token"),
+        ("server.address", "postgres.internal/path?email=ada@example.com"),
+    ],
+)
+def test_omits_unsafe_diagnostic_attribute_values(
+    attribute: str,
+    unsafe_value: str,
+) -> None:
+    result = normalize_trace_evidence(
+        {
+            "traceId": "unsafe-diagnostic-trace",
+            "startedAt": "2026-08-23T04:21:00Z",
+            "spans": [
+                {
+                    "spanId": "root",
+                    "parentSpanId": None,
+                    "serviceName": "inventory-service",
+                    "operationName": "inventory.reserve",
+                    "startOffsetMs": 0,
+                    "durationMs": 10,
+                    "status": "OK",
+                    "kind": "SERVER",
+                    "criticalPath": True,
+                    "attributes": {attribute: unsafe_value},
+                }
+            ],
+        },
+        alert_issue="inventory latency",
+    )
+
+    assert result is not None
+    assert result["spans"][0]["attributes"] == {}
+    assert unsafe_value not in repr(result)
 
 
 def test_truncation_keeps_a_late_error_span_and_its_ancestors() -> None:

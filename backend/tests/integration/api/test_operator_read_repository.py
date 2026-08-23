@@ -44,7 +44,7 @@ TRACE_WATERFALL = {
     "traceId": "trace-1",
     "rootServiceName": "checkout-api",
     "rootOperationName": "POST /checkout",
-    "startedAt": "2026-08-13T06:30:00Z",
+    "startedAt": "2026-08-13T14:30:00+08:00",
     "durationMs": 1925.0,
     "spanCount": 5,
     "representativeScore": 0.96,
@@ -427,6 +427,7 @@ async def test_trace_waterfall_projects_only_normalized_trace_data(
 
     assert waterfall["trace"] is not None
     assert waterfall["trace"]["trace_id"] == "trace-1"
+    assert waterfall["trace"]["started_at"].isoformat() == "2026-08-13T06:30:00+00:00"
     assert waterfall["trace"]["spans"][3]["operation_name"] == "db.connection.acquire"
     assert "raw_result" not in str(waterfall)
     assert "secret-marker" not in str(waterfall)
@@ -521,13 +522,18 @@ async def test_trace_waterfall_omits_risky_attributes_and_keeps_safe_scalars(
         "http.response.status_code": 500,
     }
     normalized["spans"][1]["attributes"] = {"rpc.system": "not-supported"}
-    normalized["spans"][2]["attributes"] = {"rpc.service": "secret-marker"}
+    normalized["spans"][2]["attributes"] = {
+        "rpc.service": "inventory",
+        "rpc.method": "reserve",
+        "server.address": "secret-marker",
+    }
     normalized["spans"][3]["attributes"] = {
         "db.system": "postgresql",
+        "db.operation.name": "connection.acquire",
         "server.port": 0,
     }
     normalized["spans"][4]["attributes"] = {
-        "server.address": "secret-marker",
+        "server.address": "redis.internal",
         "server.port": 5432,
     }
     await _insert_trace_evidence(
@@ -545,7 +551,16 @@ async def test_trace_waterfall_omits_risky_attributes_and_keeps_safe_scalars(
         "http.response.status_code": 500,
     }
     assert spans[1]["attributes"] == {}
-    assert spans[2]["attributes"] == {}
-    assert spans[3]["attributes"] == {"db.system": "postgresql"}
-    assert spans[4]["attributes"] == {"server.port": 5432}
+    assert spans[2]["attributes"] == {
+        "rpc.service": "inventory",
+        "rpc.method": "reserve",
+    }
+    assert spans[3]["attributes"] == {
+        "db.system": "postgresql",
+        "db.operation.name": "connection.acquire",
+    }
+    assert spans[4]["attributes"] == {
+        "server.address": "redis.internal",
+        "server.port": 5432,
+    }
     assert "secret-marker" not in str(waterfall)

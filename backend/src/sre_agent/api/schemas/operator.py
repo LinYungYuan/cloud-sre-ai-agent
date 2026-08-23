@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Provider = Literal["GCP", "AWS"]
 CanonicalSeverity = Literal["SEV1", "SEV3", "UNMAPPED"]
@@ -174,6 +174,13 @@ class TraceWaterfall(OperatorModel):
     representative_score: float = Field(ge=0)
     truncated: bool
     spans: list[TraceWaterfallSpan] = Field(min_length=1, max_length=100)
+
+    @field_validator("started_at")
+    @classmethod
+    def _normalize_started_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("startedAt must be timezone-aware")
+        return value.astimezone(UTC)
 
 
 class TraceWaterfallResponse(OperatorModel):

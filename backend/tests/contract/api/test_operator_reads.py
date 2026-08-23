@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
@@ -167,7 +167,9 @@ class FakeReads:
                 "trace_id": "trace-inc-227",
                 "root_service_name": "checkout-api",
                 "root_operation_name": "POST /checkout",
-                "started_at": NOW,
+                "started_at": datetime(
+                    2026, 8, 13, 14, 30, tzinfo=timezone(timedelta(hours=8))
+                ),
                 "duration_ms": 1925.0,
                 "span_count": 5,
                 "representative_score": 0.96,
@@ -350,6 +352,7 @@ async def test_trace_waterfall_route_serializes_the_safe_camel_case_projection()
     assert reads.trace_waterfall_run_ids == [RUN_ID]
     body = response.json()
     assert body["trace"]["rootServiceName"] == "checkout-api"
+    assert body["trace"]["startedAt"] == "2026-08-13T06:30:00Z"
     assert body["trace"]["spans"][3]["criticalPath"] is True
     assert body["trace"]["spans"][4]["attributes"] == {"server.port": 6379}
     assert set(body["trace"]["spans"][0]) == {

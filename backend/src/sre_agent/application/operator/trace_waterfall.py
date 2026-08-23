@@ -5,7 +5,8 @@ import binascii
 import json
 import re
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime
+from ipaddress import ip_address
 from math import isfinite
 from typing import Any, Literal
 
@@ -18,6 +19,7 @@ from pydantic import (
     StrictInt,
     StrictStr,
     ValidationError,
+    ValidationInfo,
     field_validator,
 )
 
@@ -54,6 +56,13 @@ _IDENTIFIER_OPERATION_PATTERN = re.compile(
     r"^/?[A-Za-z][A-Za-z0-9_-]{0,31}(?:[./][A-Za-z][A-Za-z0-9_-]{0,31}){0,7}$"
 )
 _BASE64URL_PART_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+_DIAGNOSTIC_LABEL_PATTERN = re.compile(
+    r"^[A-Za-z][A-Za-z0-9_-]{0,31}(?:[./][A-Za-z][A-Za-z0-9_-]{0,31}){0,7}$"
+)
+_SEMANTIC_TERM_PATTERN = re.compile(r"[A-Za-z0-9]+")
+_HOST_LABEL_PATTERN = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
+)
 
 
 class StoredTraceSpan(BaseModel):
@@ -116,11 +125,21 @@ class StoredTraceSpan(BaseModel):
     @field_validator("attributes")
     @classmethod
     def _allowed_scalar_attributes(
-        cls, value: dict[str, _JSON_SCALAR]
+        cls,
+        value: dict[str, _JSON_SCALAR],
+        info: ValidationInfo,
     ) -> dict[str, _JSON_SCALAR]:
         if any(key not in _ALLOWED_ATTRIBUTES for key in value):
             raise ValueError("Trace attribute is not allowlisted")
-        return _safe_attributes(value)
+        service_name = info.data.get("service_name")
+        operation_name = info.data.get("operation_name")
+        if not isinstance(service_name, str) or not isinstance(operation_name, str):
+            return {}
+        return _safe_attributes(
+            value,
+            service_name=service_name,
+            operation_name=operation_name,
+        )
 
 
 class StoredTraceWaterfall(BaseModel):
@@ -166,7 +185,7 @@ class StoredTraceWaterfall(BaseModel):
     def _timestamp_must_be_aware(cls, value: datetime) -> datetime:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("startedAt must be timezone-aware")
-        return value
+        return value.astimezone(UTC)
 
     @field_validator("duration_ms", "representative_score", mode="before")
     @classmethod
@@ -265,6 +284,9 @@ def _decode_base64url_json_object(value: str) -> dict[str, Any]:
 
 def _safe_attributes(
     attributes: dict[str, _JSON_SCALAR],
+    *,
+    service_name: str,
+    operation_name: str,
 ) -> dict[str, _JSON_SCALAR]:
     safe: dict[str, _JSON_SCALAR] = {}
     for key, value in attributes.items():
@@ -280,10 +302,57 @@ def _safe_attributes(
             if value in _RPC_SYSTEMS:
                 safe[key] = value
             continue
+        if key == "rpc.service":
+            if _is_related_diagnostic_label(value, service_name, operation_name):
+                safe[key] = value
+            continue
+        if key == "rpc.method":
+            if _is_related_diagnostic_label(value, operation_name):
+                safe[key] = value
+            continue
         if key == "db.system":
             if value in _DB_SYSTEMS:
+                safe[key] = value
+            continue
+        if key == "db.operation.name":
+            if _is_related_diagnostic_label(value, operation_name):
+                safe[key] = value
+            continue
+        if key == "server.address":
+            if _is_safe_server_address(value):
                 safe[key] = value
             continue
         if key == "server.port" and type(value) is int and 1 <= value <= 65535:
             safe[key] = value
     return safe
+
+
+def _is_related_diagnostic_label(value: object, *related: str) -> bool:
+    if (
+        not isinstance(value, str)
+        or _DIAGNOSTIC_LABEL_PATTERN.fullmatch(value) is None
+        or _is_compact_jwt(value)
+    ):
+        return False
+    value_terms = {term.lower() for term in _SEMANTIC_TERM_PATTERN.findall(value)}
+    related_terms = {
+        term.lower()
+        for label in related
+        for term in _SEMANTIC_TERM_PATTERN.findall(label)
+    }
+    return bool(value_terms) and value_terms <= related_terms
+
+
+def _is_safe_server_address(value: object) -> bool:
+    if not isinstance(value, str) or len(value) > 253 or _is_compact_jwt(value):
+        return False
+    try:
+        ip_address(value)
+    except ValueError:
+        labels = value.split(".")
+        return (
+            len(labels) >= 2
+            and not all(label.isdigit() for label in labels)
+            and all(_HOST_LABEL_PATTERN.fullmatch(label) is not None for label in labels)
+        )
+    return True
