@@ -57,6 +57,10 @@ class OperatorReadService(Protocol):
         self, identity: OperatorIdentity, rca_run_id: UUID
     ) -> dict[str, Any]: ...
 
+    async def get_trace_waterfall(
+        self, identity: OperatorIdentity, rca_run_id: UUID
+    ) -> dict[str, Any]: ...
+
 
 class UnavailableOperatorReadService:
     @staticmethod
@@ -97,6 +101,12 @@ class UnavailableOperatorReadService:
         self._raise()
 
     async def get_rca_report(
+        self, identity: OperatorIdentity, rca_run_id: UUID
+    ) -> dict[str, Any]:
+        del identity, rca_run_id
+        self._raise()
+
+    async def get_trace_waterfall(
         self, identity: OperatorIdentity, rca_run_id: UUID
     ) -> dict[str, Any]:
         del identity, rca_run_id

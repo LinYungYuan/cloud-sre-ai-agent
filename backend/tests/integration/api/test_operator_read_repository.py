@@ -1,9 +1,11 @@
+import json
 import os
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from sre_agent.application.operator.read_models import (
@@ -31,8 +33,84 @@ INSTANCE_ID = UUID("98000000-0000-0000-0000-000000000001")
 INCIDENT_ID = UUID("99000000-0000-0000-0000-000000000001")
 OLDER_INCIDENT_ID = UUID("99000000-0000-0000-0000-000000000002")
 RUN_ID = UUID("9a000000-0000-0000-0000-000000000001")
+NO_TRACE_RUN_ID = UUID("9a000000-0000-0000-0000-000000000002")
 REPORT_ID = UUID("9b000000-0000-0000-0000-000000000001")
+TRACE_SPECIALIST_RUN_ID = UUID("9c000000-0000-0000-0000-000000000001")
 AT = datetime(2026, 8, 13, 6, 30, tzinfo=UTC)
+
+TRACE_WATERFALL = {
+    "schemaVersion": 1,
+    "traceId": "trace-1",
+    "rootServiceName": "checkout-api",
+    "rootOperationName": "POST /checkout",
+    "startedAt": "2026-08-13T06:30:00Z",
+    "durationMs": 1925.0,
+    "spanCount": 5,
+    "representativeScore": 0.96,
+    "truncated": False,
+    "spans": [
+        {
+            "spanId": "root",
+            "parentSpanId": None,
+            "serviceName": "checkout-api",
+            "operationName": "POST /checkout",
+            "startOffsetMs": 0.0,
+            "durationMs": 1925.0,
+            "status": "ERROR",
+            "kind": "SERVER",
+            "criticalPath": True,
+            "attributes": {"http.response.status_code": 500},
+        },
+        {
+            "spanId": "inventory-client",
+            "parentSpanId": "root",
+            "serviceName": "checkout-api",
+            "operationName": "inventory.reserve",
+            "startOffsetMs": 20.0,
+            "durationMs": 1810.0,
+            "status": "ERROR",
+            "kind": "CLIENT",
+            "criticalPath": True,
+            "attributes": {"rpc.system": "grpc"},
+        },
+        {
+            "spanId": "inventory-server",
+            "parentSpanId": "inventory-client",
+            "serviceName": "inventory-service",
+            "operationName": "inventory.reserve",
+            "startOffsetMs": 35.0,
+            "durationMs": 1760.0,
+            "status": "ERROR",
+            "kind": "SERVER",
+            "criticalPath": True,
+            "attributes": {"rpc.service": "inventory"},
+        },
+        {
+            "spanId": "db",
+            "parentSpanId": "inventory-server",
+            "serviceName": "inventory-service",
+            "operationName": "db.connection.acquire",
+            "startOffsetMs": 320.0,
+            "durationMs": 1480.0,
+            "status": "ERROR",
+            "kind": "INTERNAL",
+            "criticalPath": True,
+            "attributes": {"db.system": "postgresql"},
+        },
+        {
+            "spanId": "cache",
+            "parentSpanId": "inventory-server",
+            "serviceName": "inventory-service",
+            "operationName": "cache.lookup",
+            "startOffsetMs": 75.0,
+            "durationMs": 120.0,
+            "status": "OK",
+            "kind": "CLIENT",
+            "criticalPath": False,
+            "attributes": {"server.address": "redis"},
+        },
+    ],
+}
 
 
 @pytest_asyncio.fixture
@@ -178,6 +256,36 @@ async def repository():
                 (RUN_ID, INCIDENT_ID, AT),
             ),
             (
+                """INSERT INTO rca_runs (
+                    id, incident_id, status, created_at, updated_at
+                ) VALUES ($1, $2, 'SUCCEEDED', $3, $3)""",
+                (NO_TRACE_RUN_ID, OLDER_INCIDENT_ID, AT),
+            ),
+            (
+                """INSERT INTO specialist_runs (
+                    id, rca_run_id, specialist_type, status, created_at
+                ) VALUES ($1, $2, 'TRACES', 'SUCCEEDED', $3)""",
+                (TRACE_SPECIALIST_RUN_ID, RUN_ID, AT),
+            ),
+            (
+                """INSERT INTO evidence_records (
+                    partition_timestamp, observed_at, rca_run_id, specialist_run_id,
+                    evidence_type, source_agent, source_endpoint, tool_name,
+                    time_window_start, time_window_end, structured_data, raw_result,
+                    metadata, content_hash
+                ) VALUES (
+                    $1, $1, $2, $3, 'trace.query', 'TRACE', 'trace', 'trace_query',
+                    $1, $1, $4::jsonb, $5, '{}'::jsonb, 'trace-hash'
+                )""",
+                (
+                    AT,
+                    RUN_ID,
+                    TRACE_SPECIALIST_RUN_ID,
+                    json.dumps(TRACE_WATERFALL),
+                    b'{"raw":"secret-marker"}',
+                ),
+            ),
+            (
                 """INSERT INTO rca_reports (
                     id, rca_run_id, version, summary, report, created_at,
                     result_status
@@ -197,6 +305,39 @@ async def repository():
         finally:
             await transaction.rollback()
     await engine.dispose()
+
+
+async def _insert_trace_evidence(
+    repository: SqlAlchemyOperatorReadRepository,
+    structured_data: object,
+    *,
+    observed_at: datetime,
+) -> None:
+    async with repository._session_factory() as session:
+        await session.execute(
+            text(
+                """INSERT INTO evidence_records (
+                    partition_timestamp, observed_at, rca_run_id, specialist_run_id,
+                    evidence_type, source_agent, source_endpoint, tool_name,
+                    time_window_start, time_window_end, structured_data, raw_result,
+                    metadata, content_hash
+                ) VALUES (
+                    :partition_timestamp, :observed_at, :rca_run_id, :specialist_run_id,
+                    'trace.query', 'TRACE', 'trace', 'trace_query',
+                    :partition_timestamp, :partition_timestamp,
+                    CAST(:structured_data AS JSONB), :raw_result, '{}'::jsonb,
+                    'newer-trace-hash'
+                )"""
+            ),
+            {
+                "partition_timestamp": AT,
+                "observed_at": observed_at,
+                "rca_run_id": RUN_ID,
+                "specialist_run_id": TRACE_SPECIALIST_RUN_ID,
+                "structured_data": json.dumps(structured_data),
+                "raw_result": b'{"raw":"newer-secret-marker"}',
+            },
+        )
 
 
 @pytest.mark.asyncio
@@ -272,4 +413,62 @@ async def test_invalid_cursor_is_rejected_without_querying_an_unbounded_page(
             OperatorIdentity("viewer@example.com"),
             cursor="not-a-valid-cursor",
             limit=100,
+        )
+
+
+@pytest.mark.asyncio
+async def test_trace_waterfall_projects_only_normalized_trace_data(
+    repository: SqlAlchemyOperatorReadRepository,
+) -> None:
+    waterfall = await repository.get_trace_waterfall(
+        OperatorIdentity("viewer@example.com"), RUN_ID
+    )
+
+    assert waterfall["trace"] is not None
+    assert waterfall["trace"]["trace_id"] == "trace-1"
+    assert waterfall["trace"]["spans"][3]["operation_name"] == "db.connection.acquire"
+    assert "raw_result" not in str(waterfall)
+    assert "secret-marker" not in str(waterfall)
+
+
+@pytest.mark.asyncio
+async def test_trace_waterfall_is_null_when_an_authorized_run_has_no_trace(
+    repository: SqlAlchemyOperatorReadRepository,
+) -> None:
+    waterfall = await repository.get_trace_waterfall(
+        OperatorIdentity("viewer@example.com"), NO_TRACE_RUN_ID
+    )
+
+    assert waterfall == {"trace": None}
+
+
+@pytest.mark.asyncio
+async def test_trace_waterfall_does_not_fall_back_when_the_newest_trace_is_malformed(
+    repository: SqlAlchemyOperatorReadRepository,
+) -> None:
+    await _insert_trace_evidence(
+        repository,
+        {"schemaVersion": 1, "traceId": "malformed"},
+        observed_at=AT + timedelta(seconds=1),
+    )
+
+    waterfall = await repository.get_trace_waterfall(
+        OperatorIdentity("viewer@example.com"), RUN_ID
+    )
+
+    assert waterfall == {"trace": None}
+
+
+@pytest.mark.asyncio
+async def test_trace_waterfall_hides_missing_and_unauthorized_runs(
+    repository: SqlAlchemyOperatorReadRepository,
+) -> None:
+    with pytest.raises(OperatorResourceNotFound):
+        await repository.get_trace_waterfall(
+            OperatorIdentity("not-granted@example.com"), RUN_ID
+        )
+    with pytest.raises(OperatorResourceNotFound):
+        await repository.get_trace_waterfall(
+            OperatorIdentity("viewer@example.com"),
+            UUID("9a000000-0000-0000-0000-000000000099"),
         )
