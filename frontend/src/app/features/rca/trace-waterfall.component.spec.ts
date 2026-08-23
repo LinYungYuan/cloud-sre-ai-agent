@@ -83,6 +83,24 @@ describe('TraceWaterfallComponent', () => {
     expect(fixture.nativeElement.querySelector('[data-trace-details]').textContent).toContain('reserve-items');
   });
 
+  it('selects the deepest latest critical error when several critical spans failed', () => {
+    const multipleErrors: TraceWaterfall = {
+      ...traceFixture,
+      spans: traceFixture.spans.map((span, index) => ({
+        ...span,
+        status: index < 4 ? 'ERROR' : span.status,
+        criticalPath: index < 4 ? true : span.criticalPath,
+      })),
+    };
+
+    fixture.componentRef.setInput('state', { status: 'ready', trace: multipleErrors });
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-span-id="checkout"]').getAttribute('aria-selected')).toBe('false');
+    expect(fixture.nativeElement.querySelector('[data-span-id="db-connection"]').getAttribute('aria-selected')).toBe('true');
+    expect(fixture.nativeElement.querySelector('[data-trace-details]').textContent).toContain('db.connection.acquire');
+  });
+
   it('resets selection for a different trace even when it shares the old span id', () => {
     fixture.componentRef.setInput('state', { status: 'ready', trace: traceFixture });
     fixture.detectChanges();
@@ -92,9 +110,10 @@ describe('TraceWaterfallComponent', () => {
     const nextTrace: TraceWaterfall = {
       ...traceFixture,
       traceId: 'different-trace-id',
-      spans: traceFixture.spans.map((span) =>
-        span.spanId === 'checkout' ? { ...span, status: 'ERROR' } : span,
-      ),
+      spans: traceFixture.spans.map((span) => ({
+        ...span,
+        status: span.spanId === 'checkout' ? 'ERROR' : 'OK',
+      })),
     };
     fixture.componentRef.setInput('state', { status: 'ready', trace: nextTrace });
     fixture.detectChanges();

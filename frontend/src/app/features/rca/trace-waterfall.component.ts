@@ -198,10 +198,11 @@ function buildRows(trace: TraceWaterfall | null): TraceWaterfallRow[] {
 }
 
 function defaultSpan(trace: TraceWaterfall): TraceWaterfallSpan | null {
-  return trace.spans.find((span) => span.status === 'ERROR' && span.criticalPath)
-    ?? trace.spans.find((span) => span.parentSpanId === null)
-    ?? trace.spans[0]
-    ?? null;
+  for (let index = trace.spans.length - 1; index >= 0; index -= 1) {
+    const span = trace.spans[index];
+    if (span.status === 'ERROR' && span.criticalPath) return span;
+  }
+  return trace.spans.find((span) => span.parentSpanId === null) ?? trace.spans[0] ?? null;
 }
 
 function clampPercent(value: number): number {
