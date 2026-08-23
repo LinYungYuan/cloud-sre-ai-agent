@@ -1,13 +1,25 @@
 import { AsyncPipe, DatePipe } from '@angular/common';
 import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
 import { ActivatedRoute, RouterLink } from '@angular/router';
-import { BehaviorSubject, forkJoin, Observable, of, switchMap } from 'rxjs';
+import {
+  BehaviorSubject,
+  catchError,
+  combineLatest,
+  forkJoin,
+  map,
+  Observable,
+  of,
+  shareReplay,
+  startWith,
+  switchMap,
+} from 'rxjs';
 import { OperatorApiClient } from '../../core/api/operator-api.client';
 import type {
   AlertDetail,
   IncidentDetail,
   RcaReport,
   RcaRun,
+  TraceWaterfallLoadState,
 } from '../../core/api/operator-api.models';
 import { AlertDetailComponent } from '../alerts/alert-detail.component';
 import { RcaReportComponent } from '../rca/rca-report.component';
@@ -39,6 +51,8 @@ import { incidentStatusLabel, severityLabel } from '../../shared/presentation/in
       <app-alert-detail [alert]="view.alert" /><app-rca-report
         [run]="view.run"
         [report]="view.report"
+        [traceState]="(traceState$ | async) ?? { status: 'loading' }"
+        (retryTrace)="retryTrace()"
       />
     } @else {
       <p>載入中…</p>
@@ -102,31 +116,62 @@ export class IncidentDetailComponent {
   private readonly api = inject(OperatorApiClient);
   private readonly id = inject(ActivatedRoute).snapshot.paramMap.get('id')!;
   private readonly reload = new BehaviorSubject<void>(undefined);
+  private readonly traceReload = new BehaviorSubject<void>(undefined);
   readonly view$: Observable<{
     incident: IncidentDetail;
     alert: AlertDetail | null;
     run: RcaRun | null;
     report: RcaReport | null;
-  }> = this.reload.pipe(
-    switchMap(() => this.api.getIncident(this.id)),
-    switchMap((incident) =>
-      forkJoin({
-        incident: of(incident),
-        alert: incident.alertIds[0] ? this.api.getAlert(incident.alertIds[0]) : of(null),
-        runs: this.api.listRcaRuns(incident.id),
-      }),
+  }> = this.loadView().pipe(shareReplay({ bufferSize: 1, refCount: true }));
+  readonly traceState$: Observable<TraceWaterfallLoadState> = combineLatest([
+    this.view$,
+    this.traceReload,
+  ]).pipe(
+    switchMap(([view]) =>
+      view.run
+        ? this.api.getTraceWaterfall(view.run.id).pipe(
+            map(({ trace }) =>
+              trace ? ({ status: 'ready', trace } as const) : ({ status: 'empty' } as const),
+            ),
+            startWith({ status: 'loading' } as const),
+            catchError(() => of({ status: 'error' } as const)),
+          )
+        : of({ status: 'empty' } as const),
     ),
-    switchMap(({ incident, alert, runs }) => {
-      const run = runs.items[0] ?? null;
-      const report: Observable<RcaReport | null> = run?.reportId
-        ? this.api.getRcaReport(run.id)
-        : of(null);
-      return forkJoin({ incident: of(incident), alert: of(alert), run: of(run), report });
-    }),
   );
   readonly severity = severityLabel;
   readonly status = incidentStatusLabel;
+
   refresh(): void {
     this.reload.next();
+  }
+
+  retryTrace(): void {
+    this.traceReload.next();
+  }
+
+  private loadView(): Observable<{
+    incident: IncidentDetail;
+    alert: AlertDetail | null;
+    run: RcaRun | null;
+    report: RcaReport | null;
+  }> {
+    return this.reload.pipe(
+      switchMap(() => this.api.getIncident(this.id)),
+      switchMap((incident) =>
+        forkJoin({
+          incident: of(incident),
+          alert: incident.alertIds[0] ? this.api.getAlert(incident.alertIds[0]) : of(null),
+          runs: this.api.listRcaRuns(incident.id),
+        }),
+      ),
+      switchMap(({ incident, alert, runs }) => {
+        const run = runs.items[0] ?? null;
+        const report: Observable<RcaReport | null> = run?.reportId
+          ? this.api.getRcaReport(run.id)
+          : of(null);
+        return forkJoin({ incident: of(incident), alert: of(alert), run: of(run), report });
+      }),
+    );
   }
 }
