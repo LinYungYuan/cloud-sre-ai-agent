@@ -11,6 +11,7 @@ import type {
   ProblemDetails,
   RcaReport,
   RcaRun,
+  TraceWaterfallResponse,
 } from './operator-api.models';
 
 export class OperatorApiError extends Error {
@@ -42,6 +43,9 @@ export class OperatorApiClient {
   }
   getRcaReport(runId: string): Observable<RcaReport> {
     return this.get(`/rca-runs/${encodeURIComponent(runId)}/report`);
+  }
+  getTraceWaterfall(runId: string): Observable<TraceWaterfallResponse> {
+    return this.get(`/rca-runs/${encodeURIComponent(runId)}/trace-waterfall`);
   }
 
   private get<T>(path: string, params?: HttpParams): Observable<T> {

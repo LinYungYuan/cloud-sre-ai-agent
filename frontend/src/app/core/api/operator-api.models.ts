@@ -108,6 +108,40 @@ export interface RcaReport {
   claims: Record<string, unknown>[];
   createdAt: string;
 }
+export type TraceSpanStatus = 'OK' | 'ERROR' | 'UNSET';
+export type TraceSpanKind = 'INTERNAL' | 'SERVER' | 'CLIENT' | 'PRODUCER' | 'CONSUMER';
+export interface TraceWaterfallSpan {
+  spanId: string;
+  parentSpanId: string | null;
+  serviceName: string;
+  operationName: string;
+  startOffsetMs: number;
+  durationMs: number;
+  status: TraceSpanStatus;
+  kind: TraceSpanKind;
+  criticalPath: boolean;
+  attributes: Record<string, string | number | boolean>;
+}
+export interface TraceWaterfall {
+  schemaVersion: 1;
+  traceId: string;
+  rootServiceName: string;
+  rootOperationName: string;
+  startedAt: string;
+  durationMs: number;
+  spanCount: number;
+  representativeScore: number;
+  truncated: boolean;
+  spans: TraceWaterfallSpan[];
+}
+export interface TraceWaterfallResponse {
+  trace: TraceWaterfall | null;
+}
+export type TraceWaterfallLoadState =
+  | { status: 'loading' }
+  | { status: 'empty' }
+  | { status: 'error' }
+  | { status: 'ready'; trace: TraceWaterfall };
 export interface ProblemDetails {
   type: string;
   title: string;
