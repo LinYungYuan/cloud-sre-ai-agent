@@ -533,7 +533,7 @@ async def test_trace_waterfall_omits_risky_attributes_and_keeps_safe_scalars(
         "server.port": 0,
     }
     normalized["spans"][4]["attributes"] = {
-        "server.address": "redis.internal",
+        "server.address": "10.24.8.5",
         "server.port": 5432,
     }
     await _insert_trace_evidence(
@@ -560,7 +560,64 @@ async def test_trace_waterfall_omits_risky_attributes_and_keeps_safe_scalars(
         "db.operation.name": "connection.acquire",
     }
     assert spans[4]["attributes"] == {
-        "server.address": "redis.internal",
+        "server.address": "10.24.8.5",
         "server.port": 5432,
     }
     assert "secret-marker" not in str(waterfall)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server_address", ["10.24.8.5", "2001:db8::15"])
+async def test_trace_waterfall_preserves_canonical_unscoped_ip_server_addresses(
+    repository: SqlAlchemyOperatorReadRepository,
+    server_address: str,
+) -> None:
+    normalized = deepcopy(TRACE_WATERFALL)
+    normalized["spans"][4]["attributes"] = {
+        "server.address": server_address
+    }
+    await _insert_trace_evidence(
+        repository, normalized, observed_at=AT + timedelta(seconds=1)
+    )
+
+    waterfall = await repository.get_trace_waterfall(
+        OperatorIdentity("viewer@example.com"), RUN_ID
+    )
+
+    assert waterfall["trace"] is not None
+    assert waterfall["trace"]["spans"][4]["attributes"] == {
+        "server.address": server_address
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "unsafe_address",
+    [
+        "fe80::1%ada@example.com",
+        "fe80::1%authorization:secret-token",
+        "fe80::1%secret-marker",
+        "authorization.secret",
+        "secret-marker.internal",
+        "raw.payload",
+    ],
+)
+async def test_trace_waterfall_omits_scoped_ips_and_hostnames(
+    repository: SqlAlchemyOperatorReadRepository,
+    unsafe_address: str,
+) -> None:
+    normalized = deepcopy(TRACE_WATERFALL)
+    normalized["spans"][4]["attributes"] = {
+        "server.address": unsafe_address
+    }
+    await _insert_trace_evidence(
+        repository, normalized, observed_at=AT + timedelta(seconds=1)
+    )
+
+    waterfall = await repository.get_trace_waterfall(
+        OperatorIdentity("viewer@example.com"), RUN_ID
+    )
+
+    assert waterfall["trace"] is not None
+    assert waterfall["trace"]["spans"][4]["attributes"] == {}
+    assert unsafe_address not in str(waterfall)

@@ -52,9 +52,6 @@ _DIAGNOSTIC_LABEL_PATTERN = re.compile(
     r"^[A-Za-z][A-Za-z0-9_-]{0,31}(?:[./][A-Za-z][A-Za-z0-9_-]{0,31}){0,7}$"
 )
 _SEMANTIC_TERM_PATTERN = re.compile(r"[A-Za-z0-9]+")
-_HOST_LABEL_PATTERN = re.compile(
-    r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
-)
 _HTTP_METHODS = frozenset(
     {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT"}
 )
@@ -488,18 +485,17 @@ def _is_related_diagnostic_label(value: object, *related: str) -> bool:
 
 
 def _is_safe_server_address(value: object) -> bool:
-    if not isinstance(value, str) or len(value) > 253 or _is_compact_jwt(value):
+    if (
+        not isinstance(value, str)
+        or "%" in value
+        or _is_compact_jwt(value)
+    ):
         return False
     try:
-        ip_address(value)
+        parsed = ip_address(value)
     except ValueError:
-        labels = value.split(".")
-        return (
-            len(labels) >= 2
-            and not all(label.isdigit() for label in labels)
-            and all(_HOST_LABEL_PATTERN.fullmatch(label) is not None for label in labels)
-        )
-    return True
+        return False
+    return str(parsed) == value
 
 
 def _issue_match_score(candidate: _CandidateTrace, alert_issue: str) -> int:

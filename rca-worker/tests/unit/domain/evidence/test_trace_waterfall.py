@@ -373,7 +373,7 @@ def test_preserves_only_semantically_bounded_diagnostic_attributes() -> None:
                     "criticalPath": True,
                     "attributes": {
                         "db.operation.name": "connection.acquire",
-                        "server.address": "postgres.internal",
+                        "server.address": "10.24.8.5",
                     },
                 },
             ],
@@ -388,7 +388,39 @@ def test_preserves_only_semantically_bounded_diagnostic_attributes() -> None:
     }
     assert result["spans"][2]["attributes"] == {
         "db.operation.name": "connection.acquire",
-        "server.address": "postgres.internal",
+        "server.address": "10.24.8.5",
+    }
+
+
+@pytest.mark.parametrize("server_address", ["10.24.8.5", "2001:db8::15"])
+def test_preserves_canonical_unscoped_ip_server_addresses(
+    server_address: str,
+) -> None:
+    result = normalize_trace_evidence(
+        {
+            "traceId": "server-address-trace",
+            "startedAt": "2026-08-23T04:21:00Z",
+            "spans": [
+                {
+                    "spanId": "root",
+                    "parentSpanId": None,
+                    "serviceName": "inventory-service",
+                    "operationName": "inventory.reserve",
+                    "startOffsetMs": 0,
+                    "durationMs": 10,
+                    "status": "OK",
+                    "kind": "SERVER",
+                    "criticalPath": True,
+                    "attributes": {"server.address": server_address},
+                }
+            ],
+        },
+        alert_issue="inventory latency",
+    )
+
+    assert result is not None
+    assert result["spans"][0]["attributes"] == {
+        "server.address": server_address
     }
 
 
@@ -403,6 +435,12 @@ def test_preserves_only_semantically_bounded_diagnostic_attributes() -> None:
         ("db.operation.name", "<query>reserve</query>"),
         ("server.address", "authorization: secret-token"),
         ("server.address", "postgres.internal/path?email=ada@example.com"),
+        ("server.address", "fe80::1%ada@example.com"),
+        ("server.address", "fe80::1%authorization:secret-token"),
+        ("server.address", "fe80::1%secret-marker"),
+        ("server.address", "authorization.secret"),
+        ("server.address", "secret-marker.internal"),
+        ("server.address", "raw.payload"),
     ],
 )
 def test_omits_unsafe_diagnostic_attribute_values(
