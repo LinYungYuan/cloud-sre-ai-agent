@@ -4,7 +4,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -92,6 +92,11 @@ class McpSpecialist:
                 structured = {"content": raw.decode("utf-8", errors="replace")}
             if not isinstance(structured, (dict, list)):
                 structured = {"value": structured}
+            normalized = self._normalize_structured(structured, request)
+            if normalized is None:
+                missing.append("INVALID_TRACE_EVIDENCE")
+                continue
+            structured = normalized
             encoded_input = json.dumps(
                 arguments, sort_keys=True, separators=(",", ":")
             ).encode()
@@ -123,6 +128,13 @@ class McpSpecialist:
             findings=tuple(findings),
             missing_evidence=tuple(missing),
         )
+
+    def _normalize_structured(
+        self,
+        structured: dict[str, Any] | list[Any],
+        request: SpecialistRequest,
+    ) -> dict[str, Any] | list[Any] | None:
+        return structured
 
     @staticmethod
     def _arguments(
