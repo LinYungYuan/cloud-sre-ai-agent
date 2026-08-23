@@ -51,6 +51,7 @@ describe('TraceWaterfallComponent', () => {
     const rows = fixture.nativeElement.querySelectorAll('[data-span-id]');
     expect(rows.length).toBe(5);
     expect(rows[3].getAttribute('aria-selected')).toBe('true');
+    expect(rows[3].getAttribute('aria-level')).toBe('4');
     expect(rows[3].textContent).toContain('db.connection.acquire');
     expect(fixture.nativeElement.textContent).toContain('1,480ms');
     expect(fixture.nativeElement.textContent).toContain('Critical path');
@@ -80,6 +81,44 @@ describe('TraceWaterfallComponent', () => {
 
     expect(row.getAttribute('aria-selected')).toBe('true');
     expect(fixture.nativeElement.querySelector('[data-trace-details]').textContent).toContain('reserve-items');
+  });
+
+  it('resets selection for a different trace even when it shares the old span id', () => {
+    fixture.componentRef.setInput('state', { status: 'ready', trace: traceFixture });
+    fixture.detectChanges();
+    (fixture.nativeElement.querySelector('[data-span-id="reserve-items"]') as HTMLButtonElement).click();
+    fixture.detectChanges();
+
+    const nextTrace: TraceWaterfall = {
+      ...traceFixture,
+      traceId: 'different-trace-id',
+      spans: traceFixture.spans.map((span) =>
+        span.spanId === 'checkout' ? { ...span, status: 'ERROR' } : span,
+      ),
+    };
+    fixture.componentRef.setInput('state', { status: 'ready', trace: nextTrace });
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[data-span-id="checkout"]').getAttribute('aria-selected')).toBe('true');
+    expect(fixture.nativeElement.querySelector('[data-trace-details]').textContent).toContain('POST /checkout');
+  });
+
+  it('clamps timeline bars for zero totals and out-of-range values', () => {
+    const component = fixture.componentInstance;
+    const span = traceFixture.spans[0];
+
+    expect(component.barStyle({ ...span, startOffsetMs: 0, durationMs: 0 }, 0)).toEqual({ left: '0%', width: '0.5%' });
+    expect(component.barStyle({ ...span, startOffsetMs: 400, durationMs: 300 }, 100)).toEqual({ left: '100%', width: '100%' });
+    expect(component.barStyle({ ...span, startOffsetMs: -5, durationMs: -1 }, 100)).toEqual({ left: '0%', width: '0.5%' });
+  });
+
+  it('uses stable service colors while reserving red for error and critical spans', () => {
+    const component = fixture.componentInstance;
+    const plain = { ...traceFixture.spans[4], serviceName: 'audit-service', status: 'OK' as const, criticalPath: false };
+
+    expect(component.barColor(plain)).toBe(component.barColor({ ...plain }));
+    expect(component.barColor({ ...plain, status: 'ERROR' })).toBe('#c2413b');
+    expect(component.barColor({ ...plain, criticalPath: true })).toBe('#c2413b');
   });
 
   it('shows a loading skeleton while the trace is loading', () => {

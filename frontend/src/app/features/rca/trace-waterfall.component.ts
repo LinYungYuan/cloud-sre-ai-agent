@@ -10,6 +10,11 @@ interface TraceWaterfallRow {
   depth: number;
 }
 
+interface TraceSelection {
+  traceId: string;
+  spanId: string;
+}
+
 const SERVICE_COLORS = ['#0f766e', '#2563eb', '#7c3aed', '#b45309', '#be185d', '#0369a1'];
 const CRITICAL_COLOR = '#c2413b';
 
@@ -127,7 +132,7 @@ export class TraceWaterfallComponent {
   readonly state = input<TraceWaterfallLoadState>({ status: 'loading' });
   readonly retry = output<void>();
 
-  private readonly selectedSpanId = signal<string | null>(null);
+  private readonly selection = signal<TraceSelection | null>(null);
   readonly readyTrace = computed(() => {
     const state = this.state();
     return state.status === 'ready' ? state.trace : null;
@@ -136,11 +141,15 @@ export class TraceWaterfallComponent {
   readonly selectedSpan = computed(() => {
     const trace = this.readyTrace();
     if (!trace) return null;
-    return trace.spans.find((span) => span.spanId === this.selectedSpanId()) ?? defaultSpan(trace);
+    const selection = this.selection();
+    return selection?.traceId === trace.traceId
+      ? trace.spans.find((span) => span.spanId === selection.spanId) ?? defaultSpan(trace)
+      : defaultSpan(trace);
   });
 
   selectSpan(spanId: string): void {
-    this.selectedSpanId.set(spanId);
+    const trace = this.readyTrace();
+    if (trace) this.selection.set({ traceId: trace.traceId, spanId });
   }
 
   onRowKeydown(event: KeyboardEvent, spanId: string): void {
