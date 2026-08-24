@@ -38,7 +38,7 @@ const DISPLAYED_ATTRIBUTE_KEYS = new Set([
   selector: 'app-trace-waterfall',
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `<section class="trace-waterfall" aria-labelledby="trace-waterfall-heading">
-    <h3 id="trace-waterfall-heading">Trace 瀑布圖</h3>
+    <h5 id="trace-waterfall-heading">Trace 瀑布圖</h5>
     @if (readyTrace(); as trace) {
       <div class="trace-summary" data-trace-summary>
         <strong class="root-service">{{ trace.rootServiceName }}</strong>
@@ -95,7 +95,7 @@ const DISPLAYED_ATTRIBUTE_KEYS = new Set([
           aria-live="polite"
           aria-label="選取的 Span 詳細資料"
         >
-          <h4>{{ span.operationName }}</h4>
+          <h6>{{ span.operationName }}</h6>
           <dl>
             <div>
               <dt>服務</dt>
@@ -115,7 +115,7 @@ const DISPLAYED_ATTRIBUTE_KEYS = new Set([
             </div>
           </dl>
           @if (selectedAttributes().length) {
-            <h5>Attributes</h5>
+            <p class="attributes-heading">Attributes</p>
             <dl class="attributes" data-trace-attributes>
               @for (attribute of selectedAttributes(); track attribute.key) {
                 <div>
@@ -148,7 +148,7 @@ const DISPLAYED_ATTRIBUTE_KEYS = new Set([
       .trace-waterfall {
         color: #172033;
       }
-      h3 {
+      h5 {
         margin: 0 0 12px;
         font-size: 1.1rem;
       }
@@ -282,13 +282,14 @@ const DISPLAYED_ATTRIBUTE_KEYS = new Set([
         border-radius: 10px;
         background: #f4f7fb;
       }
-      h4 {
+      h6 {
         margin: 0 0 8px;
         font-size: 1rem;
       }
-      h5 {
+      .attributes-heading {
         margin: 14px 0 8px;
         font-size: 0.875rem;
+        font-weight: 700;
       }
       dl {
         display: grid;
