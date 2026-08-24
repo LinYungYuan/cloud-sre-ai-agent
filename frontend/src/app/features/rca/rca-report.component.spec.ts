@@ -103,6 +103,38 @@ describe('RcaReportComponent', () => {
     ]);
   });
 
+  it('stacks impact signals without colored card backgrounds', () => {
+    fixture.componentRef.setInput('report', {
+      id: 'r',
+      rcaRunId: 'run',
+      incidentId: 'i',
+      reportVersion: 1,
+      status: 'SUCCEEDED',
+      summary: '摘要',
+      rootCause: '連線池耗盡',
+      confidence: 0.88,
+      impact: 'Metrics：p95 1840ms；Logs：843 筆錯誤；Traces：連線等待 1480ms',
+      recommendations: [],
+      hypotheses: [],
+      claims: [],
+      createdAt: '2026-08-13T06:30:00Z',
+    });
+    fixture.detectChanges();
+
+    const signals = fixture.nativeElement.querySelector('.impact-signals') as HTMLElement;
+    const sections = Array.from(
+      signals.querySelectorAll('[data-impact-signal]') as NodeListOf<HTMLElement>,
+    );
+
+    expect(getComputedStyle(signals).display).toBe('flex');
+    expect(getComputedStyle(signals).flexDirection).toBe('column');
+    for (const section of sections) {
+      const style = getComputedStyle(section);
+      expect(style.backgroundColor).toBe('rgba(0, 0, 0, 0)');
+      expect(style.borderLeftWidth).toBe('0px');
+    }
+  });
+
   it('keeps an unstructured legacy impact without dropping the trace waterfall', () => {
     fixture.componentRef.setInput('report', {
       id: 'r',

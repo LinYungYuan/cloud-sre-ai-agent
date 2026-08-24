@@ -73,30 +73,20 @@ interface ImpactSignals {
   styles: [
     `
       .impact-signals {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-        gap: 14px;
+        display: flex;
+        flex-direction: column;
         margin: 12px 0 22px;
       }
       .impact-signal {
-        border: 1px solid #dbe3ef;
-        border-left: 4px solid #64748b;
-        border-radius: 10px;
-        padding: 14px 16px;
-        background: #f8fafc;
+        border: 0;
+        border-radius: 0;
+        padding: 16px 0;
+        background: transparent;
       }
-      .impact-signal.metrics {
-        border-left-color: #0284c7;
-        background: #f0f9ff;
-      }
-      .impact-signal.logs {
-        border-left-color: #d97706;
-        background: #fffbeb;
+      .impact-signal + .impact-signal {
+        border-top: 1px solid #dbe3ef;
       }
       .impact-signal.traces {
-        grid-column: 1 / -1;
-        border-left-color: #7c3aed;
-        background: #faf5ff;
         margin-bottom: 22px;
       }
       .impact-signals .impact-signal.traces {
