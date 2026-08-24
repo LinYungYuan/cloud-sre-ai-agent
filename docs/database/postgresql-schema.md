@@ -15,6 +15,25 @@ allowlisted `failure_code`，不保存可能包含 credential 的 exception 文�
 保存 `raw_result BYTEA`、`structured_data JSONB`、`metadata JSONB`、SHA-256
 `content_hash` 與 provenance。
 
+Worker revision `0002_adk_specialist_analysis` 在 `specialist_runs` 保存驗證後的
+specialist analysis audit：`analysis_result` 必須是 JSON object，`skill_sha256` 必須是
+小寫 64 位 hexadecimal SHA-256。`analysis_result` 不得複製 raw telemetry；原始 tool
+result 仍只屬於 `evidence_records.raw_result`。`PARTIAL` 表示已有可用 observations，
+但 evidence 缺失或 analysis input 遭截斷。
+
+三張 Worker lifecycle tables 的 failure-code CHECK 保留 legacy
+`DEADLINE_EXCEEDED`、`MCP_TIMEOUT`、`MCP_TRANSPORT`、`POLICY_DENIED`、
+`VALIDATION_FAILED`、`INTERNAL_ERROR`，並允許十個 stable specialist codes：
+`NO_SAFE_MCP_CAPABILITY`、`MCP_TIMEOUT`、`MCP_TRANSPORT`、
+`MCP_PAYLOAD_TOO_LARGE`、`MCP_RESULT_INVALID`、`ANALYSIS_TIMEOUT`、
+`ANALYSIS_SCHEMA_INVALID`、`ANALYSIS_UNKNOWN_EVIDENCE`、
+`ANALYSIS_INPUT_TRUNCATED`、`ANALYSIS_FAILED`。兩組重疊後共有 14 個唯一合法值。
+
+將 Worker revision `0002` downgrade 回 `0001` 時，migration 只反轉本 revision：
+移除五個 analysis audit 欄位，將 `specialist_runs.PARTIAL` 保守映射為 `FAILED`，
+並將只存在於新 allowlist 的 failure codes 映射回最接近的 legacy code，再恢復舊
+constraints。這個 downgrade 不刪除 RCA tables、evidence 或 reports。
+
 Worker migration 的 downgrade 會捨棄新格式的 evidence bytes 與 metadata，並只能寫入
 明確的 legacy marker；被捨棄的精確 evidence **無法還原**。因此 production rollback
 前必須先備份，不能把 downgrade 當作無損轉換。
@@ -293,18 +312,41 @@ CREATE TABLE rca_runs (
     completed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    error_message TEXT
+    failure_code TEXT CHECK (failure_code IS NULL OR failure_code IN (
+        'DEADLINE_EXCEEDED', 'MCP_TIMEOUT', 'MCP_TRANSPORT', 'POLICY_DENIED',
+        'VALIDATION_FAILED', 'INTERNAL_ERROR', 'NO_SAFE_MCP_CAPABILITY',
+        'MCP_PAYLOAD_TOO_LARGE', 'MCP_RESULT_INVALID', 'ANALYSIS_TIMEOUT',
+        'ANALYSIS_SCHEMA_INVALID', 'ANALYSIS_UNKNOWN_EVIDENCE',
+        'ANALYSIS_INPUT_TRUNCATED', 'ANALYSIS_FAILED'
+    ))
 )
 
 CREATE TABLE specialist_runs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     rca_run_id UUID NOT NULL REFERENCES rca_runs(id),
     specialist_type TEXT NOT NULL CHECK (specialist_type IN ('METRICS', 'TRACES', 'LOGS')),
-    status TEXT NOT NULL CHECK (status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'SKIPPED')),
+    status TEXT NOT NULL CHECK (status IN (
+        'QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'SKIPPED', 'PARTIAL'
+    )),
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    error_message TEXT,
+    failure_code TEXT CHECK (failure_code IS NULL OR failure_code IN (
+        'DEADLINE_EXCEEDED', 'MCP_TIMEOUT', 'MCP_TRANSPORT', 'POLICY_DENIED',
+        'VALIDATION_FAILED', 'INTERNAL_ERROR', 'NO_SAFE_MCP_CAPABILITY',
+        'MCP_PAYLOAD_TOO_LARGE', 'MCP_RESULT_INVALID', 'ANALYSIS_TIMEOUT',
+        'ANALYSIS_SCHEMA_INVALID', 'ANALYSIS_UNKNOWN_EVIDENCE',
+        'ANALYSIS_INPUT_TRUNCATED', 'ANALYSIS_FAILED'
+    )),
+    analysis_result JSONB CHECK (
+        analysis_result IS NULL OR jsonb_typeof(analysis_result) = 'object'
+    ),
+    model_name TEXT,
+    skill_name TEXT,
+    skill_sha256 TEXT CHECK (
+        skill_sha256 IS NULL OR skill_sha256 ~ '^[0-9a-f]{64}$'
+    ),
+    analyzed_at TIMESTAMPTZ,
     UNIQUE (rca_run_id, specialist_type)
 )
 
@@ -367,7 +409,13 @@ CREATE TABLE worker_jobs (
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    lease_owner TEXT,
+    lease_expires_at TIMESTAMPTZ,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (
+        attempt_count >= 0 AND attempt_count <= 3
+    ),
+    CHECK ((lease_owner IS NULL) = (lease_expires_at IS NULL))
 )
 
 CREATE TABLE worker_attempts (
@@ -376,7 +424,13 @@ CREATE TABLE worker_attempts (
     attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
     started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at TIMESTAMPTZ,
-    error_message TEXT,
+    failure_code TEXT CHECK (failure_code IS NULL OR failure_code IN (
+        'DEADLINE_EXCEEDED', 'MCP_TIMEOUT', 'MCP_TRANSPORT', 'POLICY_DENIED',
+        'VALIDATION_FAILED', 'INTERNAL_ERROR', 'NO_SAFE_MCP_CAPABILITY',
+        'MCP_PAYLOAD_TOO_LARGE', 'MCP_RESULT_INVALID', 'ANALYSIS_TIMEOUT',
+        'ANALYSIS_SCHEMA_INVALID', 'ANALYSIS_UNKNOWN_EVIDENCE',
+        'ANALYSIS_INPUT_TRUNCATED', 'ANALYSIS_FAILED'
+    )),
     UNIQUE (worker_job_id, attempt_number)
 )
 
