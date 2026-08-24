@@ -4,15 +4,20 @@ import asyncio
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any, Literal
-from uuid import uuid4
+from typing import Any, Literal, NoReturn, cast
+from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 
 from sre_rca_worker.agents.rca.synthesizer import RcaSynthesizer
-from sre_rca_worker.domain.evidence.analysis import SpecialistAnalysisDraft
+from sre_rca_worker.domain.evidence.analysis import (
+    SpecialistAnalysisDraft,
+    SpecialistObservation,
+    StableSpecialistCode,
+)
 from sre_rca_worker.domain.evidence.models import EvidenceReference
 from sre_rca_worker.domain.rca.models import RcaReportDraft
+from sre_rca_worker.integrations.mcp.models import SpecialistKind
 
 _APP_NAME = "sre_rca_worker"
 _TIMEOUT_MESSAGE = "RCA synthesis deadline expired"
@@ -20,6 +25,192 @@ _ValidationCode = Literal[
     "UNKNOWN_EVIDENCE_REFERENCE",
     "REPORT_SCHEMA_INVALID",
 ]
+_AnalysisStatus = Literal["COMPLETE", "PARTIAL", "FAILED"]
+_ObservationRelation = Literal["SUPPORTS", "CONTRADICTS", "MISSING"]
+_ANALYSIS_FIELDS = frozenset(
+    {"specialist", "status", "observations", "missing_evidence"}
+)
+_OBSERVATION_FIELDS = frozenset({"statement", "confidence", "relation", "evidence"})
+_REFERENCE_FIELDS = frozenset({"id", "partition_timestamp"})
+
+
+def _reject_boundary(code: _ValidationCode = "REPORT_SCHEMA_INVALID") -> NoReturn:
+    raise ValueError(code)
+
+
+def _exact_model_values(
+    value: object,
+    *,
+    expected_type: type[object],
+    expected_fields: frozenset[str],
+) -> dict[str, object]:
+    if type(value) is not expected_type:
+        _reject_boundary()
+    try:
+        values = object.__getattribute__(value, "__dict__")
+        extra = object.__getattribute__(value, "__pydantic_extra__")
+    except AttributeError:
+        _reject_boundary()
+    if (
+        type(values) is not dict
+        or any(type(key) is not str for key in values)
+        or frozenset(values) != expected_fields
+        or not (extra is None or (type(extra) is dict and not extra))
+    ):
+        _reject_boundary()
+    return cast(dict[str, object], values)
+
+
+def _canonical_reference(value: object) -> EvidenceReference:
+    values = _exact_model_values(
+        value,
+        expected_type=EvidenceReference,
+        expected_fields=_REFERENCE_FIELDS,
+    )
+    identifier = values["id"]
+    partition_timestamp = values["partition_timestamp"]
+    if type(identifier) is not UUID or type(partition_timestamp) is not datetime:
+        _reject_boundary()
+    try:
+        return EvidenceReference(
+            id=identifier,
+            partition_timestamp=partition_timestamp,
+        )
+    except (TypeError, ValidationError, ValueError):
+        _reject_boundary()
+
+
+def _canonical_observation(value: object) -> SpecialistObservation:
+    values = _exact_model_values(
+        value,
+        expected_type=SpecialistObservation,
+        expected_fields=_OBSERVATION_FIELDS,
+    )
+    statement = values["statement"]
+    confidence = values["confidence"]
+    relation = values["relation"]
+    evidence = values["evidence"]
+    if (
+        type(statement) is not str
+        or type(confidence) is not float
+        or type(relation) is not str
+        or relation not in {"SUPPORTS", "CONTRADICTS", "MISSING"}
+        or type(evidence) is not tuple
+    ):
+        _reject_boundary()
+    canonical_evidence = tuple(_canonical_reference(item) for item in evidence)
+    try:
+        return SpecialistObservation(
+            statement=statement,
+            confidence=confidence,
+            relation=cast(_ObservationRelation, relation),
+            evidence=canonical_evidence,
+        )
+    except (TypeError, ValidationError, ValueError):
+        _reject_boundary()
+
+
+def _canonical_analysis(value: object) -> SpecialistAnalysisDraft:
+    values = _exact_model_values(
+        value,
+        expected_type=SpecialistAnalysisDraft,
+        expected_fields=_ANALYSIS_FIELDS,
+    )
+    specialist = values["specialist"]
+    status = values["status"]
+    observations = values["observations"]
+    missing_evidence = values["missing_evidence"]
+    if (
+        type(specialist) is not SpecialistKind
+        or type(status) is not str
+        or status not in {"COMPLETE", "PARTIAL", "FAILED"}
+        or type(observations) is not tuple
+        or type(missing_evidence) is not tuple
+        or any(type(code) is not str for code in missing_evidence)
+    ):
+        _reject_boundary()
+    canonical_observations = tuple(
+        _canonical_observation(observation) for observation in observations
+    )
+    try:
+        return SpecialistAnalysisDraft(
+            specialist=specialist,
+            status=cast(_AnalysisStatus, status),
+            observations=canonical_observations,
+            missing_evidence=cast(
+                tuple[StableSpecialistCode, ...],
+                missing_evidence,
+            ),
+        )
+    except (TypeError, ValidationError, ValueError):
+        _reject_boundary()
+
+
+def _canonical_known_evidence(
+    known_evidence: object,
+) -> tuple[EvidenceReference, ...]:
+    if type(known_evidence) is not tuple:
+        _reject_boundary()
+    return tuple(_canonical_reference(reference) for reference in known_evidence)
+
+
+def _canonical_active_inputs(
+    specialist_analyses: object,
+    known_evidence: object,
+) -> tuple[
+    tuple[SpecialistAnalysisDraft, ...],
+    tuple[EvidenceReference, ...],
+]:
+    if type(specialist_analyses) is not tuple:
+        _reject_boundary()
+    canonical_analyses = tuple(
+        _canonical_analysis(analysis) for analysis in specialist_analyses
+    )
+    canonical_known = _canonical_known_evidence(known_evidence)
+    known_pairs = {
+        (reference.id, reference.partition_timestamp) for reference in canonical_known
+    }
+    cited_pairs = {
+        (reference.id, reference.partition_timestamp)
+        for analysis in canonical_analyses
+        for observation in analysis.observations
+        for reference in observation.evidence
+    }
+    if not cited_pairs <= known_pairs:
+        _reject_boundary("UNKNOWN_EVIDENCE_REFERENCE")
+    return canonical_analyses, canonical_known
+
+
+def _reference_payload(reference: EvidenceReference) -> dict[str, object]:
+    return {
+        "id": str(reference.id),
+        "partition_timestamp": reference.partition_timestamp.isoformat().replace(
+            "+00:00",
+            "Z",
+        ),
+    }
+
+
+def _observation_payload(observation: SpecialistObservation) -> dict[str, object]:
+    return {
+        "statement": observation.statement,
+        "confidence": observation.confidence,
+        "relation": observation.relation,
+        "evidence": [
+            _reference_payload(reference) for reference in observation.evidence
+        ],
+    }
+
+
+def _analysis_payload(analysis: SpecialistAnalysisDraft) -> dict[str, object]:
+    return {
+        "specialist": analysis.specialist.value,
+        "status": analysis.status,
+        "observations": [
+            _observation_payload(observation) for observation in analysis.observations
+        ],
+        "missing_evidence": list(analysis.missing_evidence),
+    }
 
 
 class AdkRcaAgent:
@@ -48,19 +239,23 @@ class AdkRcaAgent:
         known_evidence: tuple[EvidenceReference, ...],
         deadline: datetime,
     ) -> RcaReportDraft:
-        prompt = self.build_prompt(
+        canonical_analyses, canonical_known = _canonical_active_inputs(
+            specialist_analyses,
+            known_evidence,
+        )
+        prompt = self._build_active_prompt(
             alert_issue=alert_issue,
-            specialist_analyses=specialist_analyses,
-            known_evidence=known_evidence,
+            specialist_analyses=canonical_analyses,
+            known_evidence=canonical_known,
         )
         draft = await self._synthesize_prompt(
             prompt=prompt,
-            known_evidence=known_evidence,
+            known_evidence=canonical_known,
             deadline=deadline,
         )
         return RcaSynthesizer().with_incomplete_specialist_analyses(
             draft,
-            specialist_analyses=specialist_analyses,
+            specialist_analyses=canonical_analyses,
         )
 
     async def synthesize_legacy(
@@ -72,14 +267,15 @@ class AdkRcaAgent:
         deadline: datetime,
     ) -> RcaReportDraft:
         """Serve DISABLED/SHADOW rollback until the ACTIVE rollout is complete."""
-        prompt = self.build_legacy_prompt(
+        canonical_known = _canonical_known_evidence(known_evidence)
+        prompt = self._build_legacy_prompt(
             alert_issue=alert_issue,
             evidence_summaries=evidence_summaries,
-            known_evidence=known_evidence,
+            known_evidence=canonical_known,
         )
         return await self._synthesize_prompt(
             prompt=prompt,
-            known_evidence=known_evidence,
+            known_evidence=canonical_known,
             deadline=deadline,
         )
 
@@ -117,7 +313,6 @@ class AdkRcaAgent:
             prompt = self._correction_prompt(
                 approved_prompt,
                 code=validation_code,
-                allowed_evidence=known_evidence,
             )
         raise AssertionError("unreachable")
 
@@ -156,9 +351,7 @@ class AdkRcaAgent:
                 raise TimeoutError(_TIMEOUT_MESSAGE) from None
         finally:
             await runner.close()
-        if not final_text:
-            raise ValueError("REPORT_SCHEMA_INVALID")
-        return final_text
+        return final_text or ""
 
     def _build_agent(self) -> Any:
         from google.adk.agents import LlmAgent
@@ -185,12 +378,8 @@ class AdkRcaAgent:
         approved_prompt: str,
         *,
         code: _ValidationCode,
-        allowed_evidence: tuple[EvidenceReference, ...],
     ) -> str:
         correction = json.loads(approved_prompt)
-        correction["allowedEvidenceReferences"] = [
-            item.model_dump(mode="json") for item in allowed_evidence
-        ]
         correction["validationCorrection"] = code
         correction["instruction"] = (
             "Return a schema-valid report using only allowedEvidenceReferences."
@@ -204,11 +393,23 @@ class AdkRcaAgent:
         specialist_analyses: tuple[SpecialistAnalysisDraft, ...],
         known_evidence: tuple[EvidenceReference, ...],
     ) -> str:
-        for analysis in specialist_analyses:
-            if not isinstance(analysis, SpecialistAnalysisDraft):
-                raise TypeError(
-                    "specialist_analyses must contain SpecialistAnalysisDraft values"
-                )
+        canonical_analyses, canonical_known = _canonical_active_inputs(
+            specialist_analyses,
+            known_evidence,
+        )
+        return AdkRcaAgent._build_active_prompt(
+            alert_issue=alert_issue,
+            specialist_analyses=canonical_analyses,
+            known_evidence=canonical_known,
+        )
+
+    @staticmethod
+    def _build_active_prompt(
+        *,
+        alert_issue: str,
+        specialist_analyses: tuple[SpecialistAnalysisDraft, ...],
+        known_evidence: tuple[EvidenceReference, ...],
+    ) -> str:
         return json.dumps(
             {
                 "alertIssue": {
@@ -219,10 +420,10 @@ class AdkRcaAgent:
                     ),
                 },
                 "specialistAnalyses": [
-                    analysis.model_dump(mode="json") for analysis in specialist_analyses
+                    _analysis_payload(analysis) for analysis in specialist_analyses
                 ],
                 "allowedEvidenceReferences": [
-                    item.model_dump(mode="json") for item in known_evidence
+                    _reference_payload(item) for item in known_evidence
                 ],
                 "outputLanguage": "zh-TW",
                 "mutationAllowed": False,
@@ -233,6 +434,20 @@ class AdkRcaAgent:
 
     @staticmethod
     def build_legacy_prompt(
+        *,
+        alert_issue: str,
+        evidence_summaries: tuple[dict[str, object], ...],
+        known_evidence: tuple[EvidenceReference, ...],
+    ) -> str:
+        canonical_known = _canonical_known_evidence(known_evidence)
+        return AdkRcaAgent._build_legacy_prompt(
+            alert_issue=alert_issue,
+            evidence_summaries=evidence_summaries,
+            known_evidence=canonical_known,
+        )
+
+    @staticmethod
+    def _build_legacy_prompt(
         *,
         alert_issue: str,
         evidence_summaries: tuple[dict[str, object], ...],
@@ -249,7 +464,7 @@ class AdkRcaAgent:
                 },
                 "persistedEvidence": evidence_summaries,
                 "allowedEvidenceReferences": [
-                    item.model_dump(mode="json") for item in known_evidence
+                    _reference_payload(item) for item in known_evidence
                 ],
                 "outputLanguage": "zh-TW",
                 "mutationAllowed": False,

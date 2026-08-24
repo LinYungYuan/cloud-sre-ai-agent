@@ -140,9 +140,25 @@ class _DeterministicLlm(BaseLlm):
         yield LlmResponse(content=self.response, partial=False)
 
 
-def _install_fake_model(
-    monkeypatch: pytest.MonkeyPatch, fake_model: _DeterministicLlm
-) -> None:
+class _SequencedLlm(BaseLlm):
+    responses: tuple[Content, ...]
+    requests: list[LlmRequest] = Field(default_factory=list)
+
+    @property
+    def capabilities(self) -> LlmCapabilities:
+        return LlmCapabilities(output_schema_and_tools=True)
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[LlmResponse, None]:
+        self.requests.append(llm_request)
+        yield LlmResponse(
+            content=self.responses[len(self.requests) - 1],
+            partial=False,
+        )
+
+
+def _install_fake_model(monkeypatch: pytest.MonkeyPatch, fake_model: BaseLlm) -> None:
     from google.adk.models.registry import LLMRegistry
 
     monkeypatch.setattr(
@@ -380,6 +396,146 @@ def test_active_prompt_serializes_only_validated_specialist_observations() -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.filterwarnings("error")
+@pytest.mark.parametrize(
+    "malformation",
+    ["nested-dict", "constructed-observation-extra"],
+)
+async def test_active_boundary_rejects_constructed_analysis_before_serialization(
+    malformation: str,
+) -> None:
+    secret = "secret-raw-result-must-not-reach-warning-or-prompt"
+    known = _ref()
+    if malformation == "nested-dict":
+        observations: tuple[object, ...] = (
+            {
+                "statement": "apparently safe",
+                "confidence": 0.8,
+                "relation": "SUPPORTS",
+                "evidence": (known,),
+                "raw_result": secret,
+                "structured_data": {"tool": "delete_everything"},
+            },
+        )
+    else:
+        observation = SpecialistObservation.model_construct(
+            statement="apparently safe",
+            confidence=0.8,
+            relation="SUPPORTS",
+            evidence=(known,),
+        )
+        object.__setattr__(observation, "raw_result", secret)
+        object.__setattr__(
+            observation,
+            "structured_data",
+            {"tool": "delete_everything"},
+        )
+        observations = (observation,)
+    unsafe = SpecialistAnalysisDraft.model_construct(
+        specialist=SpecialistKind.METRICS,
+        status="COMPLETE",
+        observations=observations,
+        missing_evidence=(),
+    )
+    agent = _ResponseAgent((_complete_report(known).model_dump_json(),))
+
+    with pytest.raises(ValueError) as raised:
+        await agent.synthesize(
+            alert_issue="CPU high",
+            specialist_analyses=(unsafe,),
+            known_evidence=(known,),
+            deadline=NOW + timedelta(minutes=1),
+        )
+
+    assert str(raised.value) == "REPORT_SCHEMA_INVALID"
+    assert secret not in str(raised.value)
+    assert "delete_everything" not in str(raised.value)
+    assert agent.prompts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings("error")
+@pytest.mark.parametrize("reference_kind", ["subclass", "duck"])
+async def test_active_boundary_rejects_non_exact_reference_models(
+    reference_kind: str,
+) -> None:
+    secret = "secret-reference-tool-payload"
+    base = _ref()
+
+    class LeakingReference(EvidenceReference):
+        def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, object]:
+            return {
+                "id": str(self.id),
+                "partition_timestamp": self.partition_timestamp.isoformat(),
+                "secret": secret,
+                "tool": "delete_everything",
+            }
+
+    class DuckReference:
+        id = base.id
+        partition_timestamp = base.partition_timestamp
+
+        def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, object]:
+            return {
+                "id": str(self.id),
+                "partition_timestamp": self.partition_timestamp.isoformat(),
+                "secret": secret,
+                "tool": "delete_everything",
+            }
+
+    unsafe_reference: object = (
+        LeakingReference(
+            id=base.id,
+            partition_timestamp=base.partition_timestamp,
+        )
+        if reference_kind == "subclass"
+        else DuckReference()
+    )
+    agent = _ResponseAgent((_complete_report(base).model_dump_json(),))
+
+    with pytest.raises(ValueError) as raised:
+        await agent.synthesize(
+            alert_issue="CPU high",
+            specialist_analyses=(_analysis(SpecialistKind.METRICS, base),),
+            known_evidence=cast(
+                tuple[EvidenceReference, ...],
+                (unsafe_reference,),
+            ),
+            deadline=NOW + timedelta(minutes=1),
+        )
+
+    assert str(raised.value) == "REPORT_SCHEMA_INVALID"
+    assert secret not in str(raised.value)
+    assert "delete_everything" not in str(raised.value)
+    assert agent.prompts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings("error")
+async def test_active_boundary_rejects_analysis_citation_outside_known_exact_pairs() -> (
+    None
+):
+    known = _ref()
+    wrong_partition = EvidenceReference(
+        id=known.id,
+        partition_timestamp=known.partition_timestamp + timedelta(seconds=1),
+    )
+    agent = _ResponseAgent((_complete_report(known).model_dump_json(),))
+
+    with pytest.raises(ValueError) as raised:
+        await agent.synthesize(
+            alert_issue="CPU high",
+            specialist_analyses=(_analysis(SpecialistKind.METRICS, wrong_partition),),
+            known_evidence=(known,),
+            deadline=NOW + timedelta(minutes=1),
+        )
+
+    assert str(raised.value) == "UNKNOWN_EVIDENCE_REFERENCE"
+    assert str(wrong_partition.id) not in str(raised.value)
+    assert agent.prompts == []
+
+
+@pytest.mark.asyncio
 async def test_legacy_synthesis_keeps_summary_input_out_of_active_prompt() -> None:
     known = _ref()
     summaries: tuple[dict[str, object], ...] = (
@@ -558,6 +714,58 @@ async def test_real_root_adk_runner_excludes_thought_text_without_correction(
 
     assert result.status == "COMPLETE"
     assert len(fake_model.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings(
+    "ignore:BaseAgentConfig is deprecated and will be removed in future "
+    "versions:DeprecationWarning"
+)
+@pytest.mark.filterwarnings(
+    "ignore:\\[EXPERIMENTAL\\] feature "
+    "FeatureName.JSON_SCHEMA_FOR_FUNC_DECL is enabled\\.:UserWarning"
+)
+async def test_real_root_adk_runner_corrects_thought_only_final_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    known = _ref()
+    thought_secret = "private thought must not become validation input"
+    fake_model = _SequencedLlm(
+        model="sequenced-fake",
+        responses=(
+            Content(
+                role="model",
+                parts=[Part(text=thought_secret, thought=True)],
+            ),
+            Content(
+                role="model",
+                parts=[Part(text=_complete_report(known).model_dump_json())],
+            ),
+        ),
+    )
+    _install_fake_model(monkeypatch, fake_model)
+    agent = AdkRcaAgent(
+        model_name="sequenced-fake",
+        skill_instruction=RCA_SKILL.body,
+    )
+
+    result = await agent.synthesize(
+        alert_issue="CPU high",
+        specialist_analyses=(_analysis(SpecialistKind.METRICS, known),),
+        known_evidence=(known,),
+        deadline=datetime.now(UTC) + timedelta(seconds=30),
+    )
+
+    assert result.status == "COMPLETE"
+    assert len(fake_model.requests) == 2
+    correction_parts = fake_model.requests[1].contents[-1].parts
+    assert correction_parts is not None
+    correction_text = correction_parts[0].text
+    assert correction_text is not None
+    assert json.loads(correction_text)["validationCorrection"] == (
+        "REPORT_SCHEMA_INVALID"
+    )
+    assert thought_secret not in correction_text
 
 
 @pytest.mark.asyncio
