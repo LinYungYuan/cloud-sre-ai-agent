@@ -51,6 +51,7 @@ class ProductionRcaProcessor:
             factory,
             context.scope,
             self._settings.mcp_capability_manifest,
+            self._skills.required_capabilities(),
         )
         specialists = {
             SpecialistKind.METRICS: MetricsSpecialist(

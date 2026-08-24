@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from sre_rca_worker.integrations.mcp.capability_resolver import CapabilityResolver
 from sre_rca_worker.integrations.mcp.client import McpClient
 from sre_rca_worker.integrations.mcp.factories import McpClientFactory
@@ -15,6 +17,7 @@ async def discover_capabilities(
     factory: McpClientFactory,
     scope: CloudScope | None,
     manifest: tuple[ManifestEntry, ...],
+    required_by_specialist: Mapping[SpecialistKind, tuple[str, ...]],
 ) -> tuple[CapabilitySet, dict[SpecialistKind, McpClient]]:
     clients: dict[SpecialistKind, McpClient] = {}
     allowed = {}
@@ -25,7 +28,7 @@ async def discover_capabilities(
         entries = tuple(
             item for item in manifest if item.endpoint_identity == kind.value
         )
-        required = tuple(dict.fromkeys(item.capability for item in entries))
+        required = required_by_specialist.get(kind, ())
         if not required:
             allowed[kind] = ()
             continue
