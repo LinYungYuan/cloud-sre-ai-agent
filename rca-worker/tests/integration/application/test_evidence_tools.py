@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -11,15 +12,22 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import Session
 
-from sre_rca_worker.agents.specialists.base import SpecialistRequest
+from sre_rca_worker.agents.specialists.base import (
+    SpecialistRequest,
+    SpecialistResult,
+)
 from sre_rca_worker.agents.specialists.metrics_agent import MetricsSpecialist
 from sre_rca_worker.agents.specialists.trace_agent import TraceSpecialist
 from sre_rca_worker.application.rca.evidence_tools import (
     EvidenceToolError,
     EvidenceToolSession,
 )
+from sre_rca_worker.domain.evidence.models import EvidenceDraft, Finding
 from sre_rca_worker.integrations.mcp.models import AllowedTool, CloudScope
-from sre_rca_worker.persistence.repositories.rca import RcaRepository
+from sre_rca_worker.persistence.repositories.rca import (
+    AmbiguousEvidenceError,
+    RcaRepository,
+)
 
 DATABASE_URL = os.getenv(
     "MIGRATION_TEST_DATABASE_URL",
@@ -39,6 +47,24 @@ class CountingClient:
     async def call(self, tool_name, arguments, deadline):
         self.calls += 1
         return b'{"cpu":85.23,"series":[1,2,3]}'
+
+
+class DraftCollector:
+    kind = MetricsSpecialist.kind
+
+    def __init__(self, drafts: tuple[EvidenceDraft, ...]) -> None:
+        self.calls = 0
+        self._drafts = drafts
+
+    async def run(self, request, deadline):
+        self.calls += 1
+        return SpecialistResult(
+            specialist=self.kind,
+            findings=tuple(
+                Finding(summary="collected", confidence=0.5, evidence=(draft,))
+                for draft in self._drafts
+            ),
+        )
 
 
 def _tool(index: int = 0) -> AllowedTool:
@@ -65,6 +91,28 @@ def _request(run_id: UUID, *, tool_count: int = 1) -> SpecialistRequest:
         window_start=now - timedelta(minutes=15),
         window_end=now,
         available_tools=tuple(_tool(index) for index in range(tool_count)),
+    )
+
+
+def _draft(
+    request: SpecialistRequest, *, observed_at: datetime, marker: str
+) -> EvidenceDraft:
+    assert request.scope is not None
+    return EvidenceDraft(
+        endpoint_identity="metrics",
+        capability="metrics.query",
+        tool="metrics_query_0",
+        input_scope=request.scope,
+        normalized_scope=request.scope,
+        observed_at=observed_at,
+        request_window_start=request.window_start,
+        request_window_end=request.window_end,
+        window_start=request.window_start,
+        window_end=request.window_end,
+        structured_json={"marker": marker},
+        raw_result=json.dumps({"marker": marker}).encode(),
+        content_type="application/json",
+        input_sha256=("a" if marker == "late" else "b") * 64,
     )
 
 
@@ -266,6 +314,57 @@ async def test_collect_commits_before_return_and_reuses_after_process_crash() ->
 
 
 @pytest.mark.asyncio
+async def test_initial_multi_evidence_receipt_uses_canonical_db_rebuild_order() -> None:
+    engine = create_async_engine(DATABASE_URL)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    run_id, specialist_id = uuid4(), uuid4()
+    parents = await _seed_run(
+        sessions, run_id=run_id, specialist_ids={"METRICS": specialist_id}
+    )
+    request = _request(run_id)
+    collector = DraftCollector(
+        (
+            _draft(request, observed_at=request.window_end, marker="late"),
+            _draft(
+                request,
+                observed_at=request.window_end - timedelta(seconds=1),
+                marker="early",
+            ),
+        )
+    )
+    try:
+        first = await _tools(
+            request=request,
+            specialist_run_id=specialist_id,
+            collector=collector,
+            sessions=sessions,
+        ).collect_evidence()
+        rebuilt = await _tools(
+            request=request,
+            specialist_run_id=specialist_id,
+            collector=collector,
+            sessions=sessions,
+        ).collect_evidence()
+
+        assert first == rebuilt
+        assert [chunk.content for chunk in first.first_chunks] == [
+            '{"marker":"early"}',
+            '{"marker":"late"}',
+        ]
+        assert collector.calls == 1
+    finally:
+        await _cleanup_run(
+            sessions,
+            run_id=run_id,
+            team_id=parents[0],
+            project_id=parents[1],
+            environment_id=parents[2],
+            incident_id=parents[3],
+        )
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_repository_reads_require_run_specialist_and_evidence_ownership() -> None:
     engine = create_async_engine(DATABASE_URL)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -341,6 +440,81 @@ async def test_repository_reads_require_run_specialist_and_evidence_ownership() 
 
 
 @pytest.mark.asyncio
+async def test_duplicate_partitioned_evidence_id_fails_closed() -> None:
+    engine = create_async_engine(DATABASE_URL)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    run_id, specialist_id = uuid4(), uuid4()
+    parents = await _seed_run(
+        sessions, run_id=run_id, specialist_ids={"METRICS": specialist_id}
+    )
+    evidence_id = uuid4()
+    now = datetime.now(UTC)
+    async with sessions() as session, session.begin():
+        for offset, marker in enumerate(("first", "second")):
+            observed_at = now + timedelta(microseconds=offset)
+            await session.execute(
+                text(
+                    """INSERT INTO evidence_records(
+                           id,partition_timestamp,observed_at,rca_run_id,
+                           specialist_run_id,evidence_type,source_agent,
+                           source_endpoint,tool_name,time_window_start,
+                           time_window_end,structured_data,content_hash,
+                           raw_result,metadata)
+                       VALUES (:id,:observed,:observed,:run,:specialist,
+                               'metrics.query','METRICS','metrics',
+                               'metrics_query_0',:observed,:observed,
+                               CAST(:structured AS JSONB),:hash,:raw,
+                               CAST('{}' AS JSONB))"""
+                ),
+                {
+                    "id": evidence_id,
+                    "observed": observed_at,
+                    "run": run_id,
+                    "specialist": specialist_id,
+                    "structured": json.dumps({"marker": marker}),
+                    "hash": marker,
+                    "raw": marker.encode(),
+                },
+            )
+    client = CountingClient()
+    request = _request(run_id)
+    try:
+        tools = _tools(
+            request=request,
+            specialist_run_id=specialist_id,
+            collector=MetricsSpecialist(lambda: client),
+            sessions=sessions,
+        )
+
+        with pytest.raises(EvidenceToolError) as read_error:
+            await tools.read_evidence_chunk(evidence_id, 0)
+        with pytest.raises(EvidenceToolError) as collect_error:
+            await tools.collect_evidence()
+
+        assert read_error.value.code == "ANALYSIS_UNKNOWN_EVIDENCE"
+        assert collect_error.value.code == "ANALYSIS_UNKNOWN_EVIDENCE"
+        async with sessions() as session:
+            repository = RcaRepository(session)
+            with pytest.raises(AmbiguousEvidenceError):
+                await repository.get_specialist_evidence(
+                    run_id, specialist_id, evidence_id
+                )
+            with pytest.raises(AmbiguousEvidenceError):
+                await repository.list_specialist_evidence(run_id, specialist_id)
+        assert client.calls == 0
+    finally:
+        await _cleanup_run(
+            sessions,
+            run_id=run_id,
+            team_id=parents[0],
+            project_id=parents[1],
+            environment_id=parents[2],
+            incident_id=parents[3],
+        )
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_more_than_five_allowed_tools_never_make_a_sixth_mcp_call() -> None:
     engine = create_async_engine(DATABASE_URL)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -388,7 +562,7 @@ async def test_failed_transaction_rolls_back_all_evidence_and_returns_no_receipt
     async def fail_second_insert(self, rca_run_id, specialist_run_id, draft):
         nonlocal inserts
         inserts += 1
-        if inserts == 2:
+        if inserts % 2 == 0:
             raise RuntimeError("sensitive database detail")
         return await original_insert(self, rca_run_id, specialist_run_id, draft)
 
@@ -401,11 +575,18 @@ async def test_failed_transaction_rolls_back_all_evidence_and_returns_no_receipt
             sessions=sessions,
         )
 
-        with pytest.raises(EvidenceToolError) as raised:
-            await tools.collect_evidence()
+        failures = []
+        for _ in range(2):
+            with pytest.raises(EvidenceToolError) as raised:
+                await tools.collect_evidence()
+            failures.append(raised.value)
 
-        assert raised.value.code == "ANALYSIS_FAILED"
-        assert "sensitive" not in str(raised.value)
+        assert [failure.code for failure in failures] == [
+            "ANALYSIS_FAILED",
+            "ANALYSIS_FAILED",
+        ]
+        assert all("sensitive" not in str(failure) for failure in failures)
+        assert client.calls == 2
         async with sessions() as session:
             count = await session.scalar(
                 text("SELECT count(*) FROM evidence_records WHERE rca_run_id=:run"),

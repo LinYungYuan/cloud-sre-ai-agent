@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 from uuid import UUID
 
+from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -22,7 +23,10 @@ from sre_rca_worker.domain.evidence.chunking import (
 )
 from sre_rca_worker.domain.evidence.models import EvidenceDraft, EvidenceReference
 from sre_rca_worker.integrations.mcp.models import AllowedTool, SpecialistKind
-from sre_rca_worker.persistence.repositories.rca import PersistedEvidence
+from sre_rca_worker.persistence.repositories.rca import (
+    AmbiguousEvidenceError,
+    PersistedEvidence,
+)
 
 _MAX_MCP_CALLS = 5
 _MAX_CHUNK_CHARS = 8_000
@@ -52,7 +56,7 @@ class EvidenceToolError(RuntimeError):
     """Safe application-boundary failure exposed to an agent tool adapter."""
 
     def __init__(self, code: StableSpecialistCode) -> None:
-        self.code = code
+        self.code: StableSpecialistCode = code
         super().__init__(code)
 
 
@@ -99,21 +103,24 @@ class EvidenceToolSession:
         self._lock = asyncio.Lock()
         self._tool_calls = 0
         self._receipt: EvidenceReceipt | None = None
+        self._terminal_error_code: StableSpecialistCode | None = None
 
     async def collect_evidence(self) -> EvidenceReceipt:
         async with self._lock:
+            if self._terminal_error_code is not None:
+                raise EvidenceToolError(self._terminal_error_code)
             self._admit_tool_call()
             if self._receipt is not None:
                 return self._receipt
             try:
-                persisted = await self._list_persisted()
-                if persisted:
-                    self._receipt = self._build_receipt(persisted)
-                    return self._receipt
-
                 approved_tools = self._approved_tools()
                 if approved_tools is None:
                     self._receipt = self._empty_receipt()
+                    return self._receipt
+
+                persisted = await self._list_persisted()
+                if persisted:
+                    self._receipt = self._build_receipt(persisted)
                     return self._receipt
 
                 bounded_request = self._request.model_copy(
@@ -130,22 +137,29 @@ class EvidenceToolSession:
                     self._receipt = self._empty_receipt()
                     return self._receipt
 
-                references = await self._persist_all(drafts)
-                committed = tuple(
-                    self._record_from_committed(reference, draft)
-                    for reference, draft in zip(references, drafts, strict=True)
-                )
+                await self._persist_all(drafts)
+                committed = await self._list_persisted()
+                if not committed:
+                    raise EvidenceToolError("ANALYSIS_FAILED")
                 self._receipt = self._build_receipt(committed)
                 return self._receipt
-            except EvidenceToolError:
+            except EvidenceToolError as error:
+                self._terminal_error_code = error.code
                 raise
             except TimeoutError:
+                self._terminal_error_code = "ANALYSIS_TIMEOUT"
                 raise EvidenceToolError("ANALYSIS_TIMEOUT") from None
             except McpPayloadTooLargeError:
+                self._terminal_error_code = "MCP_PAYLOAD_TOO_LARGE"
                 raise EvidenceToolError("MCP_PAYLOAD_TOO_LARGE") from None
+            except AmbiguousEvidenceError:
+                self._terminal_error_code = "ANALYSIS_UNKNOWN_EVIDENCE"
+                raise EvidenceToolError("ANALYSIS_UNKNOWN_EVIDENCE") from None
             except (ConnectionError, OSError):
+                self._terminal_error_code = "MCP_TRANSPORT"
                 raise EvidenceToolError("MCP_TRANSPORT") from None
             except Exception:  # noqa: BLE001 - stable public failure boundary
+                self._terminal_error_code = "ANALYSIS_FAILED"
                 raise EvidenceToolError("ANALYSIS_FAILED") from None
 
     async def read_evidence_chunk(
@@ -160,23 +174,30 @@ class EvidenceToolSession:
             if chunk_index < 0:
                 raise EvidenceToolError("ANALYSIS_UNKNOWN_EVIDENCE")
             try:
-                async with self._sessions() as session:
-                    persisted = await PersistEvidence(
-                        session
-                    ).get_specialist_evidence(
-                        self._request.rca_run_id,
-                        self._specialist_run_id,
-                        evidence_id,
-                    )
+                async with asyncio.timeout(self._remaining_seconds()):
+                    async with self._sessions() as session:
+                        persisted = await PersistEvidence(
+                            session
+                        ).get_specialist_evidence(
+                            self._request.rca_run_id,
+                            self._specialist_run_id,
+                            evidence_id,
+                        )
+                self._ensure_before_deadline()
                 if persisted is None:
                     raise EvidenceToolError("ANALYSIS_UNKNOWN_EVIDENCE")
                 self._ensure_record_owned(persisted)
                 chunks = self._chunks(persisted)
+                self._ensure_before_deadline()
                 if chunk_index >= len(chunks):
                     raise EvidenceToolError("ANALYSIS_UNKNOWN_EVIDENCE")
                 return chunks[chunk_index]
             except EvidenceToolError:
                 raise
+            except TimeoutError:
+                raise EvidenceToolError("ANALYSIS_TIMEOUT") from None
+            except AmbiguousEvidenceError:
+                raise EvidenceToolError("ANALYSIS_UNKNOWN_EVIDENCE") from None
             except Exception:  # noqa: BLE001 - stable public failure boundary
                 raise EvidenceToolError("ANALYSIS_FAILED") from None
 
@@ -204,22 +225,34 @@ class EvidenceToolSession:
         return remaining
 
     async def _list_persisted(self) -> tuple[PersistedEvidence, ...]:
-        async with self._sessions() as session:
-            return await PersistEvidence(session).list_specialist_evidence(
-                self._request.rca_run_id, self._specialist_run_id
-            )
+        async with asyncio.timeout(self._remaining_seconds()):
+            async with self._sessions() as session:
+                persisted = await PersistEvidence(
+                    session
+                ).list_specialist_evidence(
+                    self._request.rca_run_id, self._specialist_run_id
+                )
+        self._ensure_before_deadline()
+        return persisted
 
     def _approved_tools(self) -> tuple[AllowedTool, ...] | None:
         scope = self._request.scope
         if scope is None or scope.provider != "GCP" or not scope.safe:
             return None
-        approved = tuple(
-            tool
-            for tool in self._request.available_tools
-            if tool.endpoint_identity == self._collector.kind.value
-            and tool.capability.startswith(f"{self._collector.kind.value}.")
-        )[:_MAX_MCP_CALLS]
-        return approved or None
+        if not self._request.available_tools:
+            return None
+        canonical_capability = f"{self._collector.kind.value}.query"
+        names: set[str] = set()
+        for tool in self._request.available_tools:
+            if (
+                tool.endpoint_identity != self._collector.kind.value
+                or tool.capability != canonical_capability
+                or tool.name in names
+            ):
+                raise EvidenceToolError("ANALYSIS_FAILED")
+            Draft202012Validator.check_schema(tool.input_schema)
+            names.add(tool.name)
+        return self._request.available_tools[:_MAX_MCP_CALLS]
 
     def _validated_drafts(
         self,
@@ -248,43 +281,32 @@ class EvidenceToolSession:
         self, drafts: tuple[EvidenceDraft, ...]
     ) -> tuple[EvidenceReference, ...]:
         references: list[EvidenceReference] = []
-        async with self._sessions() as session, session.begin():
-            persistence = PersistEvidence(session)
-            for draft in drafts:
-                references.append(
-                    await persistence.save(
-                        self._request.rca_run_id,
-                        self._specialist_run_id,
-                        draft,
+        async with asyncio.timeout(self._remaining_seconds()):
+            async with self._sessions() as session, session.begin():
+                persistence = PersistEvidence(session)
+                for draft in drafts:
+                    self._ensure_before_deadline()
+                    references.append(
+                        await persistence.save(
+                            self._request.rca_run_id,
+                            self._specialist_run_id,
+                            draft,
+                        )
                     )
-                )
+                    self._ensure_before_deadline()
+        self._ensure_before_deadline()
         return tuple(references)
-
-    def _record_from_committed(
-        self, reference: EvidenceReference, draft: EvidenceDraft
-    ) -> PersistedEvidence:
-        return PersistedEvidence(
-            reference=reference,
-            rca_run_id=self._request.rca_run_id,
-            specialist_run_id=self._specialist_run_id,
-            evidence_type=draft.capability,
-            source_endpoint=draft.endpoint_identity,
-            tool_name=draft.tool,
-            structured_data=draft.structured_json,
-            metadata={
-                "contentType": draft.content_type,
-                "inputSha256": draft.input_sha256,
-            },
-        )
 
     def _build_receipt(
         self, persisted: tuple[PersistedEvidence, ...]
     ) -> EvidenceReceipt:
         all_chunks: list[tuple[EvidenceChunk, ...]] = []
         for record in persisted:
+            self._ensure_before_deadline()
             self._ensure_record_owned(record)
             all_chunks.append(self._chunks(record))
-        return EvidenceReceipt(
+            self._ensure_before_deadline()
+        receipt = EvidenceReceipt(
             specialist=self._collector.kind,
             references=tuple(record.reference for record in persisted),
             first_chunks=tuple(chunks[0] for chunks in all_chunks if chunks),
@@ -293,15 +315,19 @@ class EvidenceToolSession:
                 chunk.truncated for chunks in all_chunks for chunk in chunks
             ),
         )
+        self._ensure_before_deadline()
+        return receipt
 
     def _empty_receipt(self) -> EvidenceReceipt:
-        return EvidenceReceipt(
+        receipt = EvidenceReceipt(
             specialist=self._collector.kind,
             references=(),
             first_chunks=(),
             total_chunks=0,
             truncated=False,
         )
+        self._ensure_before_deadline()
+        return receipt
 
     def _ensure_record_owned(self, record: PersistedEvidence) -> None:
         if (

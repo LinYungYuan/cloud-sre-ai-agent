@@ -24,6 +24,10 @@ class PersistedEvidence:
     metadata: dict[str, Any]
 
 
+class AmbiguousEvidenceError(LookupError):
+    """Raised when a partitioned evidence UUID is not unique in its owner."""
+
+
 class RcaRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -108,7 +112,13 @@ class RcaRepository:
             .mappings()
             .all()
         )
-        return tuple(self._persisted_evidence(row) for row in rows)
+        persisted = tuple(self._persisted_evidence(row) for row in rows)
+        seen: set[UUID] = set()
+        for record in persisted:
+            if record.reference.id in seen:
+                raise AmbiguousEvidenceError("partitioned evidence UUID is ambiguous")
+            seen.add(record.reference.id)
+        return persisted
 
     async def get_specialist_evidence(
         self,
@@ -116,7 +126,7 @@ class RcaRepository:
         specialist_run_id: UUID,
         evidence_id: UUID,
     ) -> PersistedEvidence | None:
-        row = (
+        rows = (
             (
                 await self._session.execute(
                     text(
@@ -128,8 +138,7 @@ class RcaRepository:
                            WHERE rca_run_id=:rca_run_id
                              AND specialist_run_id=:specialist_run_id
                              AND id=:evidence_id
-                           ORDER BY partition_timestamp DESC
-                           LIMIT 1"""
+                           ORDER BY partition_timestamp"""
                     ),
                     {
                         "rca_run_id": rca_run_id,
@@ -139,9 +148,11 @@ class RcaRepository:
                 )
             )
             .mappings()
-            .one_or_none()
+            .all()
         )
-        return None if row is None else self._persisted_evidence(row)
+        if len(rows) > 1:
+            raise AmbiguousEvidenceError("partitioned evidence UUID is ambiguous")
+        return None if not rows else self._persisted_evidence(rows[0])
 
     @staticmethod
     def _persisted_evidence(row: Any) -> PersistedEvidence:

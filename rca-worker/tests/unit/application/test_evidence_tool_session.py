@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Self
@@ -88,10 +89,16 @@ def _draft(*, structured: dict[str, object] | None = None) -> EvidenceDraft:
 class _Collector:
     kind = SpecialistKind.METRICS
 
-    def __init__(self, drafts: tuple[EvidenceDraft, ...] = ()) -> None:
+    def __init__(
+        self,
+        drafts: tuple[EvidenceDraft, ...] = (),
+        *,
+        error: Exception | None = None,
+    ) -> None:
         self.calls = 0
         self.requests: list[SpecialistRequest] = []
         self._drafts = drafts
+        self._error = error
         self.entered: asyncio.Event | None = None
         self.release: asyncio.Event | None = None
 
@@ -104,6 +111,8 @@ class _Collector:
             self.entered.set()
         if self.release is not None:
             await self.release.wait()
+        if self._error is not None:
+            raise self._error
         findings = tuple(
             Finding(summary="collected", confidence=0.5, evidence=(draft,))
             for draft in self._drafts
@@ -121,6 +130,7 @@ class _Transaction:
     async def __aexit__(self, exc_type, exc, traceback) -> None:
         if exc_type is None:
             self._session.factory.rows.extend(self._session.pending)
+            self._session.factory.on_commit()
         self._session.pending.clear()
 
 
@@ -142,8 +152,15 @@ class _Session:
 class _Sessions:
     def __init__(self) -> None:
         self.rows: list[_StoredEvidence] = []
+        self.calls = 0
+        self.save_calls = 0
+        self.on_list: Callable[[], None] = lambda: None
+        self.on_get: Callable[[], None] = lambda: None
+        self.on_save: Callable[[], None] = lambda: None
+        self.on_commit: Callable[[], None] = lambda: None
 
     def __call__(self) -> _Session:
+        self.calls += 1
         return _Session(self)
 
 
@@ -169,6 +186,7 @@ class _FakePersistEvidence:
         specialist_run_id: UUID | None,
         draft: EvidenceDraft,
     ) -> EvidenceReference:
+        self._session.factory.save_calls += 1
         reference = EvidenceReference(id=uuid4(), partition_timestamp=draft.observed_at)
         self._session.pending.append(
             _StoredEvidence(
@@ -182,11 +200,13 @@ class _FakePersistEvidence:
                 metadata={"contentType": draft.content_type},
             )
         )
+        self._session.factory.on_save()
         return reference
 
     async def list_specialist_evidence(
         self, rca_run_id: UUID, specialist_run_id: UUID
     ) -> tuple[_StoredEvidence, ...]:
+        self._session.factory.on_list()
         return tuple(
             row
             for row in self._session.factory.rows
@@ -197,6 +217,7 @@ class _FakePersistEvidence:
     async def get_specialist_evidence(
         self, rca_run_id: UUID, specialist_run_id: UUID, evidence_id: UUID
     ) -> _StoredEvidence | None:
+        self._session.factory.on_get()
         return next(
             (
                 row
@@ -225,6 +246,7 @@ def _session(
     chunk_chars: int = 8_000,
     max_chunks: int = 4,
     max_total_chars: int = 32_000,
+    clock: Callable[[], datetime] | None = None,
 ) -> EvidenceToolSession:
     return EvidenceToolSession(
         request=request or _request(),
@@ -236,7 +258,36 @@ def _session(
         max_chunks=max_chunks,
         max_total_chars=max_total_chars,
         max_tool_calls=max_tool_calls,
-        clock=lambda: NOW,
+        clock=clock or (lambda: NOW),
+    )
+
+
+class _MutableClock:
+    def __init__(self, now: datetime = NOW) -> None:
+        self.now = now
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def expire(self) -> None:
+        self.now = NOW + timedelta(minutes=1)
+
+
+def _stored(
+    request: SpecialistRequest,
+    specialist_run_id: UUID,
+    *,
+    content: dict[str, object] | None = None,
+) -> _StoredEvidence:
+    return _StoredEvidence(
+        reference=EvidenceReference(id=uuid4(), partition_timestamp=NOW),
+        rca_run_id=request.rca_run_id,
+        specialist_run_id=specialist_run_id,
+        evidence_type="metrics.query",
+        source_endpoint="metrics",
+        tool_name="metrics_query_0",
+        structured_data=content or {"cpu": 85.23},
+        metadata={},
     )
 
 
@@ -273,6 +324,82 @@ async def test_unsafe_or_unavailable_scope_does_not_invoke_collector(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "specialist_request",
+    [
+        _request(scope=CloudScope(provider="AWS", scope_id="account-a", safe=True)),
+        _request(scope=CloudScope(provider="GCP", scope_id="project-a", safe=False)),
+        _request(tools=()),
+    ],
+)
+async def test_preflight_rejects_unsafe_or_empty_requests_before_db_reuse(
+    specialist_request: SpecialistRequest, fake_persistence: None
+) -> None:
+    collector = _Collector()
+    sessions = _Sessions()
+    specialist_run_id = uuid4()
+    sessions.rows.append(_stored(specialist_request, specialist_run_id))
+
+    receipt = await _session(
+        collector,
+        sessions,
+        request=specialist_request,
+        specialist_run_id=specialist_run_id,
+    ).collect_evidence()
+
+    assert receipt.references == ()
+    assert sessions.calls == 0
+    assert collector.calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tools",
+    [
+        (
+            AllowedTool(
+                name="metrics_query",
+                capability="metrics.query",
+                endpoint_identity="trace",
+                input_schema=_tool().input_schema,
+            ),
+        ),
+        (
+            AllowedTool(
+                name="metrics_query",
+                capability="metrics.query.extra",
+                endpoint_identity="metrics",
+                input_schema=_tool().input_schema,
+            ),
+        ),
+        (
+            AllowedTool(
+                name="metrics_query",
+                capability="metrics.query",
+                endpoint_identity="metrics",
+                input_schema={"type": "not-a-json-schema-type"},
+            ),
+        ),
+        (_tool(), _tool()),
+    ],
+)
+async def test_invalid_allowed_tools_fail_closed_before_db_or_mcp(
+    tools: tuple[AllowedTool, ...], fake_persistence: None
+) -> None:
+    collector = _Collector()
+    sessions = _Sessions()
+
+    with pytest.raises(EvidenceToolError) as raised:
+        await _session(
+            collector, sessions, request=_request(tools=tools)
+        ).collect_evidence()
+
+    assert raised.value.code == "ANALYSIS_FAILED"
+    assert sessions.calls == 0
+    assert collector.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_sixth_model_tool_call_fails_with_stable_code(
     fake_persistence: None,
 ) -> None:
@@ -285,6 +412,27 @@ async def test_sixth_model_tool_call_fails_with_stable_code(
 
     assert raised.value.code == "ANALYSIS_FAILED"
     assert str(raised.value) == "ANALYSIS_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_collector_failure_is_terminal_for_the_session(
+    fake_persistence: None,
+) -> None:
+    collector = _Collector(error=ConnectionError("sensitive transport detail"))
+    tools = _session(collector, _Sessions())
+
+    failures = []
+    for _ in range(2):
+        with pytest.raises(EvidenceToolError) as raised:
+            await tools.collect_evidence()
+        failures.append(raised.value)
+
+    assert [failure.code for failure in failures] == [
+        "MCP_TRANSPORT",
+        "MCP_TRANSPORT",
+    ]
+    assert all("sensitive" not in str(failure) for failure in failures)
+    assert collector.calls == 1
 
 
 @pytest.mark.asyncio
@@ -310,6 +458,68 @@ async def test_expired_deadline_rejects_collect_and_read_before_any_io(
     assert collect_error.value.code == "ANALYSIS_TIMEOUT"
     assert read_error.value.code == "ANALYSIS_TIMEOUT"
     assert collector.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_deadline_crossed_during_reuse_lookup_returns_no_content(
+    fake_persistence: None,
+) -> None:
+    clock = _MutableClock()
+    request = _request()
+    specialist_run_id = uuid4()
+    sessions = _Sessions()
+    sessions.rows.append(_stored(request, specialist_run_id))
+    sessions.on_list = clock.expire
+    collector = _Collector()
+
+    with pytest.raises(EvidenceToolError) as raised:
+        await _session(
+            collector,
+            sessions,
+            request=request,
+            specialist_run_id=specialist_run_id,
+            clock=clock,
+        ).collect_evidence()
+
+    assert raised.value.code == "ANALYSIS_TIMEOUT"
+    assert collector.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_deadline_crossed_after_insert_stops_later_inserts_and_rolls_back(
+    fake_persistence: None,
+) -> None:
+    clock = _MutableClock()
+    sessions = _Sessions()
+    sessions.on_save = clock.expire
+    tools = _session(
+        _Collector((_draft(), _draft(structured={"cpu": 90.0}))),
+        sessions,
+        clock=clock,
+    )
+
+    with pytest.raises(EvidenceToolError) as raised:
+        await tools.collect_evidence()
+
+    assert raised.value.code == "ANALYSIS_TIMEOUT"
+    assert sessions.save_calls == 1
+    assert sessions.rows == []
+
+
+@pytest.mark.asyncio
+async def test_deadline_crossed_during_commit_never_returns_receipt(
+    fake_persistence: None,
+) -> None:
+    clock = _MutableClock()
+    sessions = _Sessions()
+    sessions.on_commit = clock.expire
+    tools = _session(_Collector((_draft(),)), sessions, clock=clock)
+
+    with pytest.raises(EvidenceToolError) as raised:
+        await tools.collect_evidence()
+
+    assert raised.value.code == "ANALYSIS_TIMEOUT"
+    assert len(sessions.rows) == 1
 
 
 @pytest.mark.asyncio
@@ -406,6 +616,33 @@ async def test_chunk_reads_rebuild_persisted_json_without_invoking_collector(
     assert chunk.chunk_index == 1
     assert chunk.content == ':"abcdefgh'
     assert chunk.truncated is True
+    assert collector.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_deadline_crossed_during_chunk_lookup_returns_no_content(
+    fake_persistence: None,
+) -> None:
+    clock = _MutableClock()
+    sessions = _Sessions()
+    collector = _Collector()
+    specialist_run_id = uuid4()
+    request = _request()
+    record = _stored(request, specialist_run_id)
+    sessions.rows.append(record)
+    sessions.on_get = clock.expire
+    tools = _session(
+        collector,
+        sessions,
+        request=request,
+        specialist_run_id=specialist_run_id,
+        clock=clock,
+    )
+
+    with pytest.raises(EvidenceToolError) as raised:
+        await tools.read_evidence_chunk(record.reference.id, 0)
+
+    assert raised.value.code == "ANALYSIS_TIMEOUT"
     assert collector.calls == 0
 
 
