@@ -312,6 +312,34 @@ async def test_invalid_typed_failure_code_is_safely_downgraded() -> None:
 
 
 @pytest.mark.asyncio
+async def test_validation_error_cannot_claim_transport_retry_semantics() -> None:
+    calls = 0
+
+    async def invoke(
+        request: SpecialistRequest, kind: SpecialistKind, deadline: datetime
+    ) -> SpecialistAnalysisResult:
+        nonlocal calls
+        calls += 1
+        raise SpecialistAnalysisValidationError(
+            cast(SpecialistValidationCode, "MCP_TRANSPORT")
+        )
+
+    bundle = await SpecialistAnalysisWorkflow(
+        cast(BranchInvoker, invoke), clock=lambda: NOW
+    ).run(
+        _context(),
+        _capabilities(SpecialistKind.METRICS),
+        deadline=NOW + timedelta(minutes=1),
+    )
+
+    assert calls == 1
+    assert bundle.results == ()
+    assert [(item.specialist, item.code) for item in bundle.failures] == [
+        (SpecialistKind.METRICS, "ANALYSIS_FAILED")
+    ]
+
+
+@pytest.mark.asyncio
 async def test_all_permanent_failures_return_only_fixed_order_failures() -> None:
     failures: dict[SpecialistKind, Exception] = {
         SpecialistKind.METRICS: RuntimeError("secret generic detail"),
@@ -466,6 +494,32 @@ async def test_transport_failure_retries_with_a_fresh_branch_attempt() -> None:
     assert attempts[0] is not attempts[1]
     assert bundle.results == (_result(SpecialistKind.METRICS),)
     assert bundle.failures == ()
+
+
+@pytest.mark.asyncio
+async def test_evidence_transport_code_retries_once_before_stable_failure() -> None:
+    calls = 0
+
+    async def invoke(
+        request: SpecialistRequest, kind: SpecialistKind, deadline: datetime
+    ) -> SpecialistAnalysisResult:
+        nonlocal calls
+        calls += 1
+        raise EvidenceToolError("MCP_TRANSPORT")
+
+    bundle = await SpecialistAnalysisWorkflow(
+        cast(BranchInvoker, invoke), clock=lambda: NOW
+    ).run(
+        _context(),
+        _capabilities(SpecialistKind.METRICS),
+        deadline=NOW + timedelta(minutes=1),
+    )
+
+    assert calls == 2
+    assert bundle.results == ()
+    assert [(item.specialist, item.code) for item in bundle.failures] == [
+        (SpecialistKind.METRICS, "MCP_TRANSPORT")
+    ]
 
 
 @pytest.mark.asyncio

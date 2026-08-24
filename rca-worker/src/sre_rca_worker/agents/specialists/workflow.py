@@ -15,13 +15,15 @@ from sre_rca_worker.agents.rca.router import RuleRouter
 from sre_rca_worker.agents.specialists.base import SpecialistRequest
 from sre_rca_worker.agents.specialists.validator import (
     SpecialistAnalysisValidationError,
+    SpecialistValidationCode,
 )
 from sre_rca_worker.domain.evidence.analysis import StableSpecialistCode
 from sre_rca_worker.domain.evidence.chunking import McpPayloadTooLargeError
 from sre_rca_worker.integrations.mcp.models import CapabilitySet, SpecialistKind
 
 _ORDER = (SpecialistKind.METRICS, SpecialistKind.TRACE, SpecialistKind.LOG)
-_STABLE_SPECIALIST_CODES = frozenset(get_args(StableSpecialistCode))
+_STABLE_SPECIALIST_CODES: frozenset[str] = frozenset(get_args(StableSpecialistCode))
+_VALIDATION_CODES: frozenset[str] = frozenset(get_args(SpecialistValidationCode))
 
 
 class SpecialistBranchInvoker(Protocol):
@@ -99,10 +101,15 @@ class SpecialistAnalysisWorkflow:
                     failures[kind] = self._failure(kind, "MCP_PAYLOAD_TOO_LARGE")
                     return
                 except SpecialistAnalysisValidationError as error:
-                    failures[kind] = self._failure(kind, self._exception_code(error))
+                    failures[kind] = self._failure(
+                        kind,
+                        self._exception_code(error, allowed_codes=_VALIDATION_CODES),
+                    )
                     return
                 except Exception as error:  # noqa: BLE001 - safe failure boundary
-                    code = self._exception_code(error)
+                    code = self._exception_code(
+                        error, allowed_codes=_STABLE_SPECIALIST_CODES
+                    )
                     if code == "MCP_TRANSPORT" and attempt == 0:
                         continue
                     failures[kind] = self._failure(kind, code)
@@ -131,9 +138,15 @@ class SpecialistAnalysisWorkflow:
         return remaining if remaining > 0 else None
 
     @staticmethod
-    def _exception_code(error: Exception) -> StableSpecialistCode:
+    def _exception_code(
+        error: Exception, *, allowed_codes: frozenset[str]
+    ) -> StableSpecialistCode:
         code = getattr(error, "code", None)
-        if isinstance(code, str) and code in _STABLE_SPECIALIST_CODES:
+        if (
+            isinstance(code, str)
+            and code in allowed_codes
+            and code in _STABLE_SPECIALIST_CODES
+        ):
             return cast(StableSpecialistCode, code)
         return "ANALYSIS_FAILED"
 
