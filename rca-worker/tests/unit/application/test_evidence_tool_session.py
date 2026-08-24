@@ -436,6 +436,25 @@ async def test_collector_failure_is_terminal_for_the_session(
 
 
 @pytest.mark.asyncio
+async def test_cached_collector_failure_still_consumes_model_tool_budget(
+    fake_persistence: None,
+) -> None:
+    collector = _Collector(error=ConnectionError("sensitive transport detail"))
+    sessions = _Sessions()
+    tools = _session(collector, sessions, max_tool_calls=2)
+
+    codes = []
+    for _ in range(3):
+        with pytest.raises(EvidenceToolError) as raised:
+            await tools.collect_evidence()
+        codes.append(raised.value.code)
+
+    assert codes == ["MCP_TRANSPORT", "MCP_TRANSPORT", "ANALYSIS_FAILED"]
+    assert collector.calls == 1
+    assert sessions.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_expired_deadline_rejects_collect_and_read_before_any_io(
     fake_persistence: None,
 ) -> None:

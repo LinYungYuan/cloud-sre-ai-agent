@@ -107,9 +107,9 @@ class EvidenceToolSession:
 
     async def collect_evidence(self) -> EvidenceReceipt:
         async with self._lock:
+            self._admit_tool_call()
             if self._terminal_error_code is not None:
                 raise EvidenceToolError(self._terminal_error_code)
-            self._admit_tool_call()
             if self._receipt is not None:
                 return self._receipt
             try:
