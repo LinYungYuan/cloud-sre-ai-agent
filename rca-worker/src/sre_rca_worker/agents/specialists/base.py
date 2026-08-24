@@ -9,6 +9,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from sre_rca_worker.domain.evidence.chunking import McpPayloadTooLargeError
 from sre_rca_worker.domain.evidence.models import EvidenceDraft, Finding, _aware
 from sre_rca_worker.integrations.mcp.client import McpClient
 from sre_rca_worker.integrations.mcp.models import (
@@ -57,8 +58,16 @@ class Specialist(Protocol):
 class McpSpecialist:
     kind: SpecialistKind
 
-    def __init__(self, client_factory: Callable[[], McpClient]) -> None:
+    def __init__(
+        self,
+        client_factory: Callable[[], McpClient],
+        *,
+        max_response_bytes: int = 2 * 1024 * 1024,
+    ) -> None:
+        if max_response_bytes <= 0:
+            raise ValueError("max_response_bytes must be positive")
         self._client_factory = client_factory
+        self._max_response_bytes = max_response_bytes
 
     async def run(
         self, request: SpecialistRequest, deadline: datetime
@@ -86,6 +95,8 @@ class McpSpecialist:
                 continue
             tool.validate_arguments(arguments)
             raw = await client.call(tool.name, arguments, deadline)
+            if len(raw) > self._max_response_bytes:
+                raise McpPayloadTooLargeError("MCP response exceeds configured size limit")
             try:
                 structured = json.loads(raw)
             except (UnicodeDecodeError, json.JSONDecodeError):

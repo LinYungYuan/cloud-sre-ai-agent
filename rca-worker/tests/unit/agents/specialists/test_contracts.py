@@ -4,7 +4,11 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from sre_rca_worker.agents.specialists.base import SpecialistRequest
+from sre_rca_worker.agents.specialists import base as specialist_base
+from sre_rca_worker.agents.specialists.base import (
+    McpPayloadTooLargeError,
+    SpecialistRequest,
+)
 from sre_rca_worker.agents.specialists.metrics_agent import MetricsSpecialist
 from sre_rca_worker.agents.specialists.trace_agent import TraceSpecialist
 from sre_rca_worker.domain.evidence.models import EvidenceDraft, Finding
@@ -129,6 +133,73 @@ async def test_safe_specialist_calls_only_allowed_tool_and_returns_exact_evidenc
     result = await MetricsSpecialist(Client).run(request, NOW + timedelta(minutes=1))
     assert calls == [("metrics_query", {"project_id": "project-a"})]
     assert result.findings[0].evidence[0].raw_result == b'{ "cpu": 85.23 }\n'
+
+
+def _safe_metrics_request() -> SpecialistRequest:
+    tool = AllowedTool(
+        name="metrics_query",
+        capability="metrics.query",
+        endpoint_identity="metrics",
+        input_schema={
+            "type": "object",
+            "properties": {"project_id": {"type": "string"}},
+            "required": ["project_id"],
+            "additionalProperties": False,
+        },
+    )
+    return SpecialistRequest(
+        incident_id=uuid4(),
+        rca_run_id=uuid4(),
+        alert_issue="CPU high",
+        scope=CloudScope(provider="GCP", scope_id="project-a", safe=True),
+        window_start=NOW - timedelta(minutes=15),
+        window_end=NOW,
+        available_tools=(tool,),
+    )
+
+
+@pytest.mark.asyncio
+async def test_specialist_rejects_raw_response_larger_than_limit_before_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Client:
+        endpoint_identity = "metrics"
+
+        async def list_tools(self):
+            return ()
+
+        async def call(self, tool_name, arguments, deadline):
+            return b"{" + (b" " * (2 * 1024 * 1024))
+
+    def unexpected_parse(raw: object) -> None:
+        raise AssertionError("oversized payload must not be parsed")
+
+    monkeypatch.setattr(specialist_base.json, "loads", unexpected_parse)
+
+    with pytest.raises(McpPayloadTooLargeError):
+        await MetricsSpecialist(Client, max_response_bytes=2 * 1024 * 1024).run(
+            _safe_metrics_request(), NOW + timedelta(minutes=1)
+        )
+
+
+@pytest.mark.asyncio
+async def test_specialist_accepts_raw_response_exactly_at_byte_limit() -> None:
+    class Client:
+        endpoint_identity = "metrics"
+
+        async def list_tools(self):
+            return ()
+
+        async def call(self, tool_name, arguments, deadline):
+            return b'{"padding":"' + (b" " * (2 * 1024 * 1024 - 14)) + b'"}'
+
+    result = await MetricsSpecialist(
+        Client, max_response_bytes=2 * 1024 * 1024
+    ).run(_safe_metrics_request(), NOW + timedelta(minutes=1))
+
+    assert result.findings[0].evidence[0].structured_json == {
+        "padding": " " * (2 * 1024 * 1024 - 14)
+    }
 
 
 @pytest.mark.asyncio

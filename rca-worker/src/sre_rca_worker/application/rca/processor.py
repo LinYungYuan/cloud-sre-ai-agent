@@ -55,12 +55,17 @@ class ProductionRcaProcessor:
         )
         specialists = {
             SpecialistKind.METRICS: MetricsSpecialist(
-                lambda: clients[SpecialistKind.METRICS]
+                lambda: clients[SpecialistKind.METRICS],
+                max_response_bytes=self._settings.mcp_max_response_bytes,
             ),
             SpecialistKind.TRACE: TraceSpecialist(
-                lambda: clients[SpecialistKind.TRACE]
+                lambda: clients[SpecialistKind.TRACE],
+                max_response_bytes=self._settings.mcp_max_response_bytes,
             ),
-            SpecialistKind.LOG: LogSpecialist(lambda: clients[SpecialistKind.LOG]),
+            SpecialistKind.LOG: LogSpecialist(
+                lambda: clients[SpecialistKind.LOG],
+                max_response_bytes=self._settings.mcp_max_response_bytes,
+            ),
         }
         bundle = await RcaWorkflow(specialists).run(
             context, capabilities, deadline=claim.deadline_at
