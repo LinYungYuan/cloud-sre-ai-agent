@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
@@ -63,11 +64,11 @@ class AdkSpecialistAgent:
         )
         prompt = self._encode_prompt(approved_context)
         for attempt in range(2):
-            remaining = self._remaining_seconds(deadline)
+            self._remaining_seconds(deadline)
             final_text = await self._run_once(
                 prompt,
                 evidence_tools=evidence_tools,
-                remaining=remaining,
+                deadline=deadline,
             )
             try:
                 draft = SpecialistAnalysisDraft.model_validate_json(final_text)
@@ -100,12 +101,49 @@ class AdkSpecialistAgent:
         prompt: str,
         *,
         evidence_tools: EvidenceToolSession,
-        remaining: float,
+        deadline: datetime,
     ) -> str:
-        from google.adk.agents import LlmAgent
         from google.adk.runners import InMemoryRunner
         from google.genai.types import Content, Part
 
+        agent = self._build_agent(evidence_tools)
+        runner = InMemoryRunner(agent=agent, app_name=_APP_NAME)
+        user_id = "rca-worker"
+        session_id = uuid4().hex
+        final_text: str | None = None
+        try:
+            try:
+                async with asyncio.timeout(self._remaining_seconds(deadline)):
+                    await runner.session_service.create_session(
+                        app_name=_APP_NAME,
+                        user_id=user_id,
+                        session_id=session_id,
+                    )
+                    async for event in runner.run_async(
+                        user_id=user_id,
+                        session_id=session_id,
+                        new_message=Content(
+                            role="user",
+                            parts=[Part(text=prompt)],
+                        ),
+                    ):
+                        if event.is_final_response() and event.content:
+                            final_text = "".join(
+                                part.text
+                                for part in event.content.parts or []
+                                if part.text and not part.thought
+                            )
+            except TimeoutError:
+                raise TimeoutError("ANALYSIS_TIMEOUT") from None
+        finally:
+            await runner.close()
+        if not final_text:
+            raise SpecialistAnalysisValidationError("ANALYSIS_SCHEMA_INVALID")
+        return final_text
+
+    def _build_tools(
+        self, evidence_tools: EvidenceToolSession
+    ) -> tuple[Callable[..., Awaitable[dict[str, object]]], ...]:
         async def collect_evidence() -> dict[str, object]:
             """Collect persisted evidence for this approved specialist run."""
 
@@ -124,7 +162,12 @@ class AdkSpecialistAgent:
             chunk = await evidence_tools.read_evidence_chunk(parsed_id, chunk_index)
             return chunk.model_dump(mode="json")
 
-        agent = LlmAgent(
+        return collect_evidence, read_evidence_chunk
+
+    def _build_agent(self, evidence_tools: EvidenceToolSession) -> Any:
+        from google.adk.agents import LlmAgent
+
+        return LlmAgent(
             name=f"{self.kind.value}_specialist_agent",
             model=self._model_name,
             instruction=self._instruction,
@@ -132,36 +175,8 @@ class AdkSpecialistAgent:
             # ADK 2.7 exposes mode at runtime but omits it from Pyright's
             # generated Pydantic constructor signature.
             mode="chat",  # pyright: ignore[reportCallIssue]
-            tools=[collect_evidence, read_evidence_chunk],
+            tools=list(self._build_tools(evidence_tools)),
         )
-        runner = InMemoryRunner(agent=agent, app_name=_APP_NAME)
-        user_id = "rca-worker"
-        session_id = uuid4().hex
-        final_text: str | None = None
-        try:
-            await runner.session_service.create_session(
-                app_name=_APP_NAME,
-                user_id=user_id,
-                session_id=session_id,
-            )
-            async with asyncio.timeout(remaining):
-                async for event in runner.run_async(
-                    user_id=user_id,
-                    session_id=session_id,
-                    new_message=Content(
-                        role="user",
-                        parts=[Part(text=prompt)],
-                    ),
-                ):
-                    if event.is_final_response() and event.content:
-                        final_text = "".join(
-                            part.text or "" for part in event.content.parts or []
-                        )
-        finally:
-            await runner.close()
-        if not final_text:
-            raise SpecialistAnalysisValidationError("ANALYSIS_SCHEMA_INVALID")
-        return final_text
 
     def _remaining_seconds(self, deadline: datetime) -> float:
         remaining = (deadline - self._clock()).total_seconds()

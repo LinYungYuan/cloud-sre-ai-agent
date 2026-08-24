@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
 
 import pytest
+from google.adk.models import (
+    LlmCapabilities,  # pyright: ignore[reportAttributeAccessIssue]
+)
+from google.adk.models.base_llm import BaseLlm
+from google.adk.models.llm_request import LlmRequest
+from google.adk.models.llm_response import LlmResponse
 from google.genai.types import Content, Part
+from pydantic import Field
 
 from sre_rca_worker.agents.skills.loader import load_skill
 from sre_rca_worker.agents.specialists.adk_agent import AdkSpecialistAgent
@@ -47,6 +55,10 @@ DEFINITIONS = (
     Path(__file__).resolve().parents[4] / "src/sre_rca_worker/agents/skills/definitions"
 )
 METRICS_SKILL = load_skill(DEFINITIONS / "metrics-analysis" / "SKILL.md")
+SKILLS = {
+    kind: load_skill(DEFINITIONS / f"{kind.value}-analysis" / "SKILL.md")
+    for kind in SpecialistKind
+}
 
 
 def _request() -> SpecialistRequest:
@@ -122,22 +134,49 @@ def _as_session(tools: _EvidenceTools) -> EvidenceToolSession:
     return cast(EvidenceToolSession, tools)
 
 
+class _DeterministicLlm(BaseLlm):
+    response: Content
+    requests: list[LlmRequest] = Field(default_factory=list)
+
+    @property
+    def capabilities(self) -> LlmCapabilities:
+        return LlmCapabilities(output_schema_and_tools=True)
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[LlmResponse, None]:
+        self.requests.append(llm_request)
+        yield LlmResponse(content=self.response, partial=False)
+
+
+def _install_fake_model(
+    monkeypatch: pytest.MonkeyPatch, fake_model: _DeterministicLlm
+) -> None:
+    from google.adk.models.registry import LLMRegistry
+
+    monkeypatch.setattr(
+        LLMRegistry,
+        "new_llm",
+        staticmethod(lambda model_name: fake_model),
+    )
+
+
 class _ResponseAgent(AdkSpecialistAgent):
     def __init__(self, responses: tuple[str, ...], **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.responses = iter(responses)
         self.prompts: list[str] = []
-        self.remaining_values: list[float] = []
+        self.deadlines: list[datetime] = []
 
     async def _run_once(
         self,
         prompt: str,
         *,
         evidence_tools: Any,
-        remaining: float,
+        deadline: datetime,
     ) -> str:
         self.prompts.append(prompt)
-        self.remaining_values.append(remaining)
+        self.deadlines.append(deadline)
         return next(self.responses)
 
 
@@ -266,6 +305,101 @@ async def test_deadline_is_rechecked_before_corrective_retry() -> None:
     "ignore:BaseAgentConfig is deprecated and will be removed in future "
     "versions:DeprecationWarning"
 )
+@pytest.mark.filterwarnings(
+    "ignore:\\[EXPERIMENTAL\\] feature "
+    "FeatureName.JSON_SCHEMA_FOR_FUNC_DECL is enabled\\.:UserWarning"
+)
+async def test_real_adk_runner_excludes_thought_text_from_structured_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_model = _DeterministicLlm(
+        model="deterministic-fake",
+        response=Content(
+            role="model",
+            parts=[
+                Part(text="private chain of thought", thought=True),
+                Part(text=_draft().model_dump_json()),
+            ],
+        ),
+    )
+    _install_fake_model(monkeypatch, fake_model)
+    agent = AdkSpecialistAgent(
+        kind=SpecialistKind.METRICS,
+        model_name="deterministic-fake",
+        skill_instruction=METRICS_SKILL.body,
+    )
+
+    result = await agent.analyze(
+        request=_request(),
+        evidence_tools=_as_session(_EvidenceTools()),
+        deadline=datetime.now(UTC) + timedelta(seconds=30),
+    )
+
+    assert result == _draft()
+    assert len(fake_model.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings(
+    "ignore:BaseAgentConfig is deprecated and will be removed in future "
+    "versions:DeprecationWarning"
+)
+@pytest.mark.filterwarnings(
+    "ignore:\\[EXPERIMENTAL\\] feature "
+    "FeatureName.JSON_SCHEMA_FOR_FUNC_DECL is enabled\\.:UserWarning"
+)
+@pytest.mark.parametrize(
+    ("kind", "expected_name"),
+    [
+        (SpecialistKind.METRICS, "metrics_specialist_agent"),
+        (SpecialistKind.TRACE, "trace_specialist_agent"),
+        (SpecialistKind.LOG, "log_specialist_agent"),
+    ],
+)
+async def test_real_adk_agent_has_exact_specialist_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: SpecialistKind,
+    expected_name: str,
+) -> None:
+    from google.adk.agents import LlmAgent
+
+    fake_model = _DeterministicLlm(
+        model="deterministic-fake",
+        response=Content(role="model", parts=[Part(text="unused")]),
+    )
+    _install_fake_model(monkeypatch, fake_model)
+    adapter = AdkSpecialistAgent(
+        kind=kind,
+        model_name="deterministic-fake",
+        skill_instruction=SKILLS[kind].body,
+    )
+
+    built = adapter._build_agent(_as_session(_EvidenceTools()))
+    canonical_tools = await built.canonical_tools()
+    declarations = [tool._get_declaration() for tool in canonical_tools]
+
+    assert isinstance(built, LlmAgent)
+    assert built.name == expected_name
+    assert built.model == "deterministic-fake"
+    assert built.instruction == SKILLS[kind].body
+    assert built.output_schema is SpecialistAnalysisDraft
+    assert cast(Any, built).mode == "chat"
+    assert [declaration.name for declaration in declarations] == [
+        "collect_evidence",
+        "read_evidence_chunk",
+    ]
+    assert declarations[0].parameters_json_schema is None
+    assert set(declarations[1].parameters_json_schema["properties"]) == {
+        "evidence_id",
+        "chunk_index",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings(
+    "ignore:BaseAgentConfig is deprecated and will be removed in future "
+    "versions:DeprecationWarning"
+)
 async def test_run_once_builds_the_real_adk_agent_contract_and_closes_runner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -313,7 +447,9 @@ async def test_run_once_builds_the_real_adk_agent_contract_and_closes_runner(
     )
 
     response = await agent._run_once(
-        '{"safe":"prompt"}', evidence_tools=_as_session(tools), remaining=1
+        '{"safe":"prompt"}',
+        evidence_tools=_as_session(tools),
+        deadline=datetime.now(UTC) + timedelta(minutes=1),
     )
 
     assert response == _draft().model_dump_json()
@@ -343,6 +479,61 @@ async def test_run_once_builds_the_real_adk_agent_contract_and_closes_runner(
     with pytest.raises(EvidenceToolError) as raised:
         await read_evidence_chunk("not-a-uuid", 0)
     assert raised.value.code == "ANALYSIS_UNKNOWN_EVIDENCE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings(
+    "ignore:BaseAgentConfig is deprecated and will be removed in future "
+    "versions:DeprecationWarning"
+)
+async def test_session_setup_timeout_is_stable_and_never_starts_model_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import google.adk.agents
+    import google.adk.runners
+
+    session_started = False
+    run_started = False
+    closed = False
+
+    class SessionService:
+        async def create_session(self, **kwargs: Any) -> None:
+            nonlocal session_started
+            session_started = True
+            await asyncio.sleep(1)
+
+    class Runner:
+        def __init__(self, *, agent: object, app_name: str) -> None:
+            self.session_service = SessionService()
+
+        async def run_async(self, **kwargs: Any):
+            nonlocal run_started
+            run_started = True
+            yield None
+
+        async def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    monkeypatch.setattr(google.adk.agents, "LlmAgent", lambda **kwargs: object())
+    monkeypatch.setattr(google.adk.runners, "InMemoryRunner", Runner)
+    agent = AdkSpecialistAgent(
+        kind=SpecialistKind.METRICS,
+        model_name="gemini-test",
+        skill_instruction=METRICS_SKILL.body,
+    )
+
+    with pytest.raises(TimeoutError) as raised:
+        await agent._run_once(
+            '{"safe":"prompt"}',
+            evidence_tools=_as_session(_EvidenceTools()),
+            deadline=datetime.now(UTC) + timedelta(milliseconds=50),
+        )
+
+    assert str(raised.value) == "ANALYSIS_TIMEOUT"
+    assert session_started is True
+    assert run_started is False
+    assert closed is True
 
 
 @pytest.mark.asyncio
@@ -387,7 +578,7 @@ async def test_run_once_closes_runner_when_adk_execution_fails(
         await agent._run_once(
             '{"safe":"prompt"}',
             evidence_tools=_as_session(_EvidenceTools()),
-            remaining=1,
+            deadline=datetime.now(UTC) + timedelta(minutes=1),
         )
 
     assert closed is True
