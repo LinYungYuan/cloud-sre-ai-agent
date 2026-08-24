@@ -66,6 +66,8 @@ class McpSpecialist:
     ) -> None:
         if max_response_bytes <= 0:
             raise ValueError("max_response_bytes must be positive")
+        if max_response_bytes > 2 * 1024 * 1024:
+            raise ValueError("max_response_bytes must not exceed 2 MiB")
         self._client_factory = client_factory
         self._max_response_bytes = max_response_bytes
 

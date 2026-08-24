@@ -74,10 +74,10 @@ class WorkerSettings(BaseSettings):
     @model_validator(mode="after")
     def validate_evidence_budget(self) -> "WorkerSettings":
         if (
-            self.evidence_chunk_chars * self.evidence_max_chunks
-            > self.evidence_max_total_chars
+            self.evidence_max_total_chars
+            > self.evidence_chunk_chars * self.evidence_max_chunks
         ):
-            raise ValueError("evidence chunk budget exceeds total character limit")
+            raise ValueError("evidence total character limit exceeds chunk capacity")
         return self
 
     @field_validator("metrics_mcp_url", "trace_mcp_url", "log_mcp_url")

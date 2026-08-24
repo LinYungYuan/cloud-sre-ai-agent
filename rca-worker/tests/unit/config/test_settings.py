@@ -84,8 +84,8 @@ def test_specialist_analysis_defaults_to_disabled_with_bounded_budgets() -> None
     assert settings.rca_deadline_seconds == 300
     assert settings.agent_corrective_retries == 1
     assert (
-        settings.evidence_chunk_chars * settings.evidence_max_chunks
-        <= settings.evidence_max_total_chars
+        settings.evidence_max_total_chars
+        <= settings.evidence_chunk_chars * settings.evidence_max_chunks
     )
 
 
@@ -135,12 +135,26 @@ def test_production_rejects_specialist_budget_increases(
         )
 
 
-def test_evidence_budgets_reject_a_combined_total_above_the_limit() -> None:
+def test_evidence_budgets_reject_a_total_above_chunk_capacity() -> None:
     with pytest.raises(
         ValidationError,
-        match="evidence chunk budget exceeds total character limit",
+        match="evidence total character limit exceeds chunk capacity",
     ):
-        _settings(evidence_max_total_chars=31_999)
+        _settings(
+            evidence_chunk_chars=8_000,
+            evidence_max_chunks=3,
+            evidence_max_total_chars=32_000,
+        )
+
+
+def test_evidence_budgets_allow_total_below_chunk_capacity() -> None:
+    settings = _settings(
+        evidence_chunk_chars=8_000,
+        evidence_max_chunks=4,
+        evidence_max_total_chars=16_000,
+    )
+
+    assert settings.evidence_max_total_chars == 16_000
 
 
 def test_agent_corrective_retries_allows_zero() -> None:

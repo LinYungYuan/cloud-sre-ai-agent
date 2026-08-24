@@ -67,6 +67,15 @@ def test_finding_requires_evidence_and_bounded_confidence() -> None:
         Finding(summary="CPU high", confidence=0.5, evidence=())
 
 
+def test_specialist_constructor_accepts_the_two_mib_response_cap() -> None:
+    MetricsSpecialist(lambda: None, max_response_bytes=2 * 1024 * 1024)
+
+
+def test_specialist_constructor_rejects_a_response_limit_above_two_mib() -> None:
+    with pytest.raises(ValueError, match="must not exceed 2 MiB"):
+        MetricsSpecialist(lambda: None, max_response_bytes=2 * 1024 * 1024 + 1)
+
+
 @pytest.mark.asyncio
 async def test_no_tools_returns_missing_evidence_without_constructing_client() -> None:
     calls: list[str] = []

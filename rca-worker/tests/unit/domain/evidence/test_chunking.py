@@ -101,6 +101,29 @@ def test_evidence_chunks_never_mix_references() -> None:
     assert first[0].chunk_index == second[0].chunk_index == 0
 
 
+def test_chunks_reject_total_above_chunk_capacity() -> None:
+    with pytest.raises(ValueError):
+        build_evidence_chunks(
+            REFERENCE_A,
+            {"a": "value"},
+            chunk_chars=8_000,
+            max_chunks=3,
+            max_total_chars=32_000,
+        )
+
+
+def test_chunks_allow_total_below_chunk_capacity() -> None:
+    chunks = build_evidence_chunks(
+        REFERENCE_A,
+        {"a": "value"},
+        chunk_chars=8_000,
+        max_chunks=4,
+        max_total_chars=16_000,
+    )
+
+    assert chunks[0].content == '{"a":"value"}'
+
+
 @pytest.mark.parametrize(
     ("chunk_chars", "max_chunks", "max_total_chars"),
     [
