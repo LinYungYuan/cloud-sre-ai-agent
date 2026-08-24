@@ -6,6 +6,7 @@ from pydantic import ValidationError
 
 from sre_rca_worker.agents.specialists.base import SpecialistRequest
 from sre_rca_worker.agents.specialists.metrics_agent import MetricsSpecialist
+from sre_rca_worker.agents.specialists.trace_agent import TraceSpecialist
 from sre_rca_worker.domain.evidence.models import EvidenceDraft, Finding
 from sre_rca_worker.integrations.mcp.models import (
     AllowedTool,
@@ -128,3 +129,101 @@ async def test_safe_specialist_calls_only_allowed_tool_and_returns_exact_evidenc
     result = await MetricsSpecialist(Client).run(request, NOW + timedelta(minutes=1))
     assert calls == [("metrics_query", {"project_id": "project-a"})]
     assert result.findings[0].evidence[0].raw_result == b'{ "cpu": 85.23 }\n'
+
+
+@pytest.mark.asyncio
+async def test_trace_specialist_persists_normalized_waterfall_and_exact_raw_result() -> (
+    None
+):
+    raw = b'''{
+      "traceId": "trace-1",
+      "startedAt": "2026-08-23T04:21:00Z",
+      "spans": [{
+        "spanId": "root",
+        "parentSpanId": null,
+        "serviceName": "checkout-api",
+        "operationName": "POST /checkout",
+        "startOffsetMs": 0,
+        "durationMs": 1250,
+        "status": "ERROR",
+        "kind": "SERVER",
+        "criticalPath": true,
+        "attributes": {"authorization": "Bearer secret"}
+      }]
+    }'''
+
+    class Client:
+        endpoint_identity = "trace"
+
+        async def list_tools(self):
+            return ()
+
+        async def call(self, tool_name, arguments, deadline):
+            return raw
+
+    tool = AllowedTool(
+        name="trace_query",
+        capability="trace.query",
+        endpoint_identity="trace",
+        input_schema={
+            "type": "object",
+            "properties": {"project_id": {"type": "string"}},
+            "required": ["project_id"],
+            "additionalProperties": False,
+        },
+    )
+    request = SpecialistRequest(
+        incident_id=uuid4(),
+        rca_run_id=uuid4(),
+        alert_issue="checkout latency",
+        scope=CloudScope(provider="GCP", scope_id="project-a", safe=True),
+        window_start=NOW - timedelta(minutes=15),
+        window_end=NOW,
+        available_tools=(tool,),
+    )
+
+    result = await TraceSpecialist(Client).run(request, NOW + timedelta(minutes=1))
+
+    evidence = result.findings[0].evidence[0]
+    assert evidence.structured_json["schemaVersion"] == 1
+    assert evidence.structured_json["traceId"] == "trace-1"
+    assert evidence.structured_json["spans"][0]["attributes"] == {}
+    assert evidence.raw_result == raw
+
+
+@pytest.mark.asyncio
+async def test_trace_specialist_marks_malformed_trace_as_invalid_evidence() -> None:
+    class Client:
+        endpoint_identity = "trace"
+
+        async def list_tools(self):
+            return ()
+
+        async def call(self, tool_name, arguments, deadline):
+            return b'{"traceId":"broken","spans":[]}'
+
+    tool = AllowedTool(
+        name="trace_query",
+        capability="trace.query",
+        endpoint_identity="trace",
+        input_schema={
+            "type": "object",
+            "properties": {"project_id": {"type": "string"}},
+            "required": ["project_id"],
+            "additionalProperties": False,
+        },
+    )
+    request = SpecialistRequest(
+        incident_id=uuid4(),
+        rca_run_id=uuid4(),
+        alert_issue="checkout latency",
+        scope=CloudScope(provider="GCP", scope_id="project-a", safe=True),
+        window_start=NOW - timedelta(minutes=15),
+        window_end=NOW,
+        available_tools=(tool,),
+    )
+
+    result = await TraceSpecialist(Client).run(request, NOW + timedelta(minutes=1))
+
+    assert result.findings == ()
+    assert result.missing_evidence == ("INVALID_TRACE_EVIDENCE",)

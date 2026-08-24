@@ -273,6 +273,7 @@ def test_operator_contract_declares_every_approved_operation():
         ("/api/v1/incidents/{id}/rca-runs", "post"),
         ("/api/v1/rca-runs/{id}", "get"),
         ("/api/v1/rca-runs/{id}/report", "get"),
+        ("/api/v1/rca-runs/{id}/trace-waterfall", "get"),
         ("/api/v1/rca-runs/{id}/evidence", "get"),
         ("/api/v1/rca-runs/{id}/hypotheses", "get"),
     }
@@ -284,6 +285,48 @@ def test_operator_contract_declares_every_approved_operation():
     }
 
     assert actual_operations == expected_operations
+
+
+def test_trace_waterfall_contract_exposes_only_the_safe_trace_projection() -> None:
+    contract = _operator_contract()
+    schemas = contract["components"]["schemas"]
+    operation = contract["paths"]["/api/v1/rca-runs/{id}/trace-waterfall"]["get"]
+    response_schema = operation["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ]
+    example = json.loads(
+        (ROOT / "contracts" / "examples" / "trace-waterfall-response.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert response_schema == {"$ref": "#/components/schemas/TraceWaterfallResponse"}
+    assert schemas["TraceWaterfallResponse"]["additionalProperties"] is False
+    assert schemas["TraceWaterfall"]["additionalProperties"] is False
+    assert schemas["TraceWaterfallSpan"]["additionalProperties"] is False
+    assert schemas["TraceWaterfall"]["properties"]["spans"]["maxItems"] == 100
+    assert schemas["TraceWaterfallSpan"]["properties"]["attributes"] == {
+        "type": "object",
+        "additionalProperties": {
+            "oneOf": [
+                {"type": "string"},
+                {"type": "integer"},
+                {"type": "number", "not": {"type": "integer"}},
+                {"type": "boolean"},
+            ]
+        },
+    }
+    assert example["trace"]["rootServiceName"] == "checkout-api"
+    assert len(example["trace"]["spans"]) == 5
+    assert example["trace"]["spans"][3]["criticalPath"] is True
+    assert "rawResult" not in json.dumps(example)
+    assert "authorization" not in json.dumps(example).lower()
+    validate_example(
+        example,
+        "TraceWaterfallResponse",
+        contract,
+        OPERATOR_CONTRACT_PATH,
+    )
 
 
 def test_operator_mutations_declare_a_concurrency_or_idempotency_header():

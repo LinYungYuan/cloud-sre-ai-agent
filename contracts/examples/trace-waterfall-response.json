@@ -1,0 +1,85 @@
+{
+  "trace": {
+    "schemaVersion": 1,
+    "traceId": "trace-inc-227",
+    "rootServiceName": "checkout-api",
+    "rootOperationName": "POST /checkout",
+    "startedAt": "2026-08-13T06:30:00Z",
+    "durationMs": 1925.0,
+    "spanCount": 5,
+    "representativeScore": 0.96,
+    "truncated": false,
+    "spans": [
+      {
+        "spanId": "root",
+        "parentSpanId": null,
+        "serviceName": "checkout-api",
+        "operationName": "POST /checkout",
+        "startOffsetMs": 0.0,
+        "durationMs": 1925.0,
+        "status": "ERROR",
+        "kind": "SERVER",
+        "criticalPath": true,
+        "attributes": {
+          "http.response.status_code": 500
+        }
+      },
+      {
+        "spanId": "inventory-client",
+        "parentSpanId": "root",
+        "serviceName": "checkout-api",
+        "operationName": "inventory.reserve",
+        "startOffsetMs": 20.0,
+        "durationMs": 1810.0,
+        "status": "ERROR",
+        "kind": "CLIENT",
+        "criticalPath": true,
+        "attributes": {
+          "rpc.system": "grpc"
+        }
+      },
+      {
+        "spanId": "inventory-server",
+        "parentSpanId": "inventory-client",
+        "serviceName": "inventory-service",
+        "operationName": "inventory.reserve",
+        "startOffsetMs": 35.0,
+        "durationMs": 1760.0,
+        "status": "ERROR",
+        "kind": "SERVER",
+        "criticalPath": true,
+        "attributes": {
+          "rpc.service": "inventory"
+        }
+      },
+      {
+        "spanId": "db",
+        "parentSpanId": "inventory-server",
+        "serviceName": "inventory-service",
+        "operationName": "db.connection.acquire",
+        "startOffsetMs": 320.0,
+        "durationMs": 1480.0,
+        "status": "ERROR",
+        "kind": "INTERNAL",
+        "criticalPath": true,
+        "attributes": {
+          "db.system": "postgresql"
+        }
+      },
+      {
+        "spanId": "cache",
+        "parentSpanId": "inventory-server",
+        "serviceName": "inventory-service",
+        "operationName": "cache.lookup",
+        "startOffsetMs": 75.0,
+        "durationMs": 120.0,
+        "status": "OK",
+        "kind": "CLIENT",
+        "criticalPath": false,
+        "attributes": {
+          "server.port": 6379
+        }
+      }
+    ]
+  }
+}

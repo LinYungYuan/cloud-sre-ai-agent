@@ -13,6 +13,7 @@ from sre_agent.api.schemas.operator import (
     CursorPageRcaRuns,
     IncidentDetail,
     RcaReport,
+    TraceWaterfallResponse,
 )
 from sre_agent.application.operator.read_models import (
     OperatorIdentity,
@@ -90,3 +91,15 @@ async def get_rca_report(
     identity: Annotated[OperatorIdentity, Depends(_identity)],
 ) -> dict[str, object]:
     return await service.get_rca_report(identity, id)
+
+
+@router.get(
+    "/rca-runs/{id}/trace-waterfall",
+    response_model=TraceWaterfallResponse,
+)
+async def get_trace_waterfall(
+    id: UUID,
+    service: Annotated[OperatorReadService, Depends(get_operator_read_service)],
+    identity: Annotated[OperatorIdentity, Depends(_identity)],
+) -> dict[str, object]:
+    return await service.get_trace_waterfall(identity, id)

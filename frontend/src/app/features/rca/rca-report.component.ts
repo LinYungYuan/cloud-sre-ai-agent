@@ -1,9 +1,15 @@
-import { ChangeDetectionStrategy, Component, input } from '@angular/core';
-import type { RcaReport, RcaRun } from '../../core/api/operator-api.models';
+import { ChangeDetectionStrategy, Component, input, output } from '@angular/core';
+import type {
+  RcaReport,
+  RcaRun,
+  TraceWaterfallLoadState,
+} from '../../core/api/operator-api.models';
 import { rcaStatusLabel } from '../../shared/presentation/incident-labels';
+import { TraceWaterfallComponent } from './trace-waterfall.component';
 
 @Component({
   selector: 'app-rca-report',
+  imports: [TraceWaterfallComponent],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `<section aria-labelledby="rca-heading">
     <h2 id="rca-heading">根因分析（RCA）</h2>
@@ -19,6 +25,7 @@ import { rcaStatusLabel } from '../../shared/presentation/incident-labels';
       }
       <h3>影響</h3>
       <p>{{ item.impact }}</p>
+      <app-trace-waterfall [state]="traceState()" (retry)="retryTrace.emit()" />
       <h3>修復建議（需人工審查）</h3>
       <ul>
         @for (recommendation of item.recommendations; track recommendation) {
@@ -33,6 +40,8 @@ import { rcaStatusLabel } from '../../shared/presentation/incident-labels';
 export class RcaReportComponent {
   readonly run = input<RcaRun | null>(null);
   readonly report = input<RcaReport | null>(null);
+  readonly traceState = input<TraceWaterfallLoadState>({ status: 'loading' });
+  readonly retryTrace = output<void>();
   readonly status = rcaStatusLabel;
   readonly confidencePercent = (value: number): number => Math.round(value * 100);
 }

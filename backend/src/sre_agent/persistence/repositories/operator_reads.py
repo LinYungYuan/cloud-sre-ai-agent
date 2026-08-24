@@ -15,6 +15,7 @@ from sre_agent.application.operator.read_models import (
     OperatorIdentity,
     OperatorResourceNotFound,
 )
+from sre_agent.application.operator.trace_waterfall import parse_trace_waterfall
 
 _AUTHORIZED_INCIDENT = """
 (
@@ -457,3 +458,51 @@ class SqlAlchemyOperatorReadRepository:
             "claims": body.get("claims", []),
             "created_at": row["created_at"],
         }
+
+    async def get_trace_waterfall(
+        self, identity: OperatorIdentity, rca_run_id: UUID
+    ) -> dict[str, Any]:
+        async with self._session_factory() as session:
+            authorized_run = (
+                (
+                    await session.execute(
+                        text(
+                            f"""
+                            SELECT run.id
+                            FROM rca_runs run
+                            JOIN incidents incident ON incident.id = run.incident_id
+                            WHERE run.id = :rca_run_id
+                              AND {_AUTHORIZED_INCIDENT}
+                            """
+                        ),
+                        _identity_parameters(identity) | {"rca_run_id": rca_run_id},
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if authorized_run is None:
+                raise OperatorResourceNotFound
+
+            evidence = (
+                (
+                    await session.execute(
+                        text(
+                            """
+                            SELECT evidence.structured_data
+                            FROM evidence_records evidence
+                            WHERE evidence.rca_run_id = :rca_run_id
+                              AND evidence.source_agent = 'TRACE'
+                            ORDER BY evidence.observed_at DESC, evidence.id DESC
+                            LIMIT 1
+                            """
+                        ),
+                        {"rca_run_id": rca_run_id},
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if evidence is None:
+            return {"trace": None}
+        return {"trace": parse_trace_waterfall(evidence["structured_data"])}

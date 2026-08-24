@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
@@ -67,6 +67,7 @@ def _incident() -> dict[str, Any]:
 class FakeReads:
     def __init__(self) -> None:
         self.list_limits: list[int] = []
+        self.trace_waterfall_run_ids: list[UUID] = []
 
     async def list_incidents(self, identity, *, cursor, limit):
         assert identity.global_access
@@ -157,6 +158,87 @@ class FakeReads:
             "created_at": NOW,
         }
 
+    async def get_trace_waterfall(self, identity, rca_run_id):
+        assert identity.global_access
+        self.trace_waterfall_run_ids.append(rca_run_id)
+        return {
+            "trace": {
+                "schema_version": 1,
+                "trace_id": "trace-inc-227",
+                "root_service_name": "checkout-api",
+                "root_operation_name": "POST /checkout",
+                "started_at": datetime(
+                    2026, 8, 13, 14, 30, tzinfo=timezone(timedelta(hours=8))
+                ),
+                "duration_ms": 1925.0,
+                "span_count": 5,
+                "representative_score": 0.96,
+                "truncated": False,
+                "spans": [
+                    {
+                        "span_id": "root",
+                        "parent_span_id": None,
+                        "service_name": "checkout-api",
+                        "operation_name": "POST /checkout",
+                        "start_offset_ms": 0.0,
+                        "duration_ms": 1925.0,
+                        "status": "ERROR",
+                        "kind": "SERVER",
+                        "critical_path": True,
+                        "attributes": {"http.response.status_code": 500},
+                    },
+                    {
+                        "span_id": "inventory-client",
+                        "parent_span_id": "root",
+                        "service_name": "checkout-api",
+                        "operation_name": "inventory.reserve",
+                        "start_offset_ms": 20.0,
+                        "duration_ms": 1810.0,
+                        "status": "ERROR",
+                        "kind": "CLIENT",
+                        "critical_path": True,
+                        "attributes": {"rpc.system": "grpc"},
+                    },
+                    {
+                        "span_id": "inventory-server",
+                        "parent_span_id": "inventory-client",
+                        "service_name": "inventory-service",
+                        "operation_name": "inventory.reserve",
+                        "start_offset_ms": 35.0,
+                        "duration_ms": 1760.0,
+                        "status": "ERROR",
+                        "kind": "SERVER",
+                        "critical_path": True,
+                        "attributes": {"rpc.service": "inventory"},
+                    },
+                    {
+                        "span_id": "db",
+                        "parent_span_id": "inventory-server",
+                        "service_name": "inventory-service",
+                        "operation_name": "db.connection.acquire",
+                        "start_offset_ms": 320.0,
+                        "duration_ms": 1480.0,
+                        "status": "ERROR",
+                        "kind": "INTERNAL",
+                        "critical_path": True,
+                        "attributes": {"db.system": "postgresql"},
+                    },
+                    {
+                        "span_id": "cache",
+                        "parent_span_id": "inventory-server",
+                        "service_name": "inventory-service",
+                        "operation_name": "cache.lookup",
+                        "start_offset_ms": 75.0,
+                        "duration_ms": 120.0,
+                        "status": "OK",
+                        "kind": "CLIENT",
+                        "critical_path": False,
+                        "attributes": {"server.port": 6379},
+                    },
+                ],
+            }
+        }
+
 
 @asynccontextmanager
 async def _client(reads: Any, identity_provider: Any = None):
@@ -186,6 +268,7 @@ def test_operator_read_routes_are_registered() -> None:
         "/api/v1/alerts/{id}",
         "/api/v1/incidents/{id}/rca-runs",
         "/api/v1/rca-runs/{id}/report",
+        "/api/v1/rca-runs/{id}/trace-waterfall",
     } <= paths
 
 
@@ -257,6 +340,50 @@ async def test_operator_reads_use_camel_case_utc_z_etag_and_bounded_pages() -> N
     assert report.json()["hypotheses"] == []
     for response in (incidents, incident, alert, runs, report):
         assert response.headers["x-correlation-id"] == "operator-request-1"
+
+
+@pytest.mark.asyncio
+async def test_trace_waterfall_route_serializes_the_safe_camel_case_projection() -> None:
+    reads = FakeReads()
+    async with _client(reads) as client:
+        response = await client.get(f"/api/v1/rca-runs/{RUN_ID}/trace-waterfall")
+
+    assert response.status_code == 200
+    assert reads.trace_waterfall_run_ids == [RUN_ID]
+    body = response.json()
+    assert body["trace"]["rootServiceName"] == "checkout-api"
+    assert body["trace"]["startedAt"] == "2026-08-13T06:30:00Z"
+    assert body["trace"]["spans"][3]["criticalPath"] is True
+    assert body["trace"]["spans"][4]["attributes"] == {"server.port": 6379}
+    assert set(body["trace"]["spans"][0]) == {
+        "spanId",
+        "parentSpanId",
+        "serviceName",
+        "operationName",
+        "startOffsetMs",
+        "durationMs",
+        "status",
+        "kind",
+        "criticalPath",
+        "attributes",
+    }
+
+
+@pytest.mark.asyncio
+async def test_trace_waterfall_route_serializes_an_absent_trace_as_null() -> None:
+    class NoTraceReads(FakeReads):
+        async def get_trace_waterfall(self, identity, rca_run_id):
+            assert identity.global_access
+            self.trace_waterfall_run_ids.append(rca_run_id)
+            return {"trace": None}
+
+    reads = NoTraceReads()
+    async with _client(reads) as client:
+        response = await client.get(f"/api/v1/rca-runs/{RUN_ID}/trace-waterfall")
+
+    assert response.status_code == 200
+    assert reads.trace_waterfall_run_ids == [RUN_ID]
+    assert response.json() == {"trace": None}
 
 
 @pytest.mark.asyncio
