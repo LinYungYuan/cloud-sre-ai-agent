@@ -78,6 +78,29 @@ def test_registry_rejects_duplicate_agent_or_name() -> None:
         SkillRegistry([*skills, skills[0]])
 
 
+@pytest.mark.parametrize(
+    ("agent", "non_canonical_capability"),
+    [
+        ("metrics", "metrics.other"),
+        ("trace", "trace.query.extra"),
+        ("log", "log.search"),
+    ],
+)
+def test_registry_rejects_same_endpoint_non_canonical_capability(
+    agent: str, non_canonical_capability: str
+) -> None:
+    skills = list(load_skills(DEFINITIONS))
+    skill_index = next(
+        index for index, skill in enumerate(skills) if skill.agent == agent
+    )
+    skills[skill_index] = skills[skill_index].model_copy(
+        update={"required_capabilities": (non_canonical_capability,)}
+    )
+
+    with pytest.raises(ValueError, match="canonical specialist capability"):
+        SkillRegistry(skills)
+
+
 def test_loader_rejects_path_outside_definition_root() -> None:
     with pytest.raises(ValueError, match="SKILL.md path"):
         load_skills(DEFINITIONS.parent)

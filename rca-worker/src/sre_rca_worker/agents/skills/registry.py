@@ -8,6 +8,11 @@ _SPECIALIST_BY_AGENT = {
     "trace": SpecialistKind.TRACE,
     "log": SpecialistKind.LOG,
 }
+_CANONICAL_CAPABILITY_BY_KIND = {
+    SpecialistKind.METRICS: ("metrics.query",),
+    SpecialistKind.TRACE: ("trace.query",),
+    SpecialistKind.LOG: ("log.query",),
+}
 
 
 class SkillRegistry:
@@ -23,11 +28,8 @@ class SkillRegistry:
             skill = by_agent.get(agent)
             if skill is None:
                 continue
-            if any(
-                not capability.startswith(f"{kind.value}.")
-                for capability in skill.required_capabilities
-            ):
-                raise ValueError("specialist capabilities must match their endpoint")
+            if skill.required_capabilities != _CANONICAL_CAPABILITY_BY_KIND[kind]:
+                raise ValueError("specialist requires its canonical specialist capability")
         if (root_skill := by_agent.get("rca")) and root_skill.required_capabilities:
             raise ValueError("root RCA skill may not require capabilities")
         self._by_agent = by_agent
