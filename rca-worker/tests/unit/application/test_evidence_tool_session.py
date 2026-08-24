@@ -597,6 +597,7 @@ async def test_receipt_has_one_first_chunk_per_evidence_and_truncation_signal(
     assert len(receipt.first_chunks) == 2
     assert receipt.total_chunks == 4
     assert receipt.truncated is True
+    assert tools.input_truncated is True
 
 
 @pytest.mark.asyncio

@@ -205,6 +205,10 @@ class EvidenceToolSession:
     def known_evidence(self) -> tuple[EvidenceReference, ...]:
         return () if self._receipt is None else self._receipt.references
 
+    @property
+    def input_truncated(self) -> bool:
+        return False if self._receipt is None else self._receipt.truncated
+
     def _admit_tool_call(self) -> None:
         self._ensure_before_deadline()
         if self._tool_calls >= self._max_tool_calls:
