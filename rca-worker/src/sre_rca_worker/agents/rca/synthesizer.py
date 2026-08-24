@@ -1,3 +1,4 @@
+from sre_rca_worker.domain.evidence.analysis import SpecialistAnalysisDraft
 from sre_rca_worker.domain.evidence.models import EvidenceReference
 from sre_rca_worker.domain.rca.models import RcaReportDraft
 
@@ -31,6 +32,16 @@ class RcaSynthesizer:
                 "missing_evidence": (*draft.missing_evidence, "SPECIALIST_FAILURE"),
             }
         )
+
+    def with_incomplete_specialist_analyses(
+        self,
+        draft: RcaReportDraft,
+        *,
+        specialist_analyses: tuple[SpecialistAnalysisDraft, ...],
+    ) -> RcaReportDraft:
+        if all(analysis.status == "COMPLETE" for analysis in specialist_analyses):
+            return draft
+        return self.with_specialist_failures(draft)
 
     def insufficient_evidence(self, *, provider: str | None) -> RcaReportDraft:
         provider_note = (

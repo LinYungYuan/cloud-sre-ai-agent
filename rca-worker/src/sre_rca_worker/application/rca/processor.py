@@ -85,7 +85,7 @@ class ProductionRcaProcessor:
             report = await AdkRcaAgent(
                 model_name=self._settings.model_name,
                 skill_instruction=self._skills.get_for_agent("rca").body,
-            ).synthesize(
+            ).synthesize_legacy(
                 alert_issue=context.alert_issue,
                 evidence_summaries=summaries,
                 known_evidence=references,
