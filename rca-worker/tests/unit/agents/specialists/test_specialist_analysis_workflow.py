@@ -20,6 +20,7 @@ from sre_rca_worker.agents.rca.models import (
 from sre_rca_worker.agents.specialists.base import SpecialistRequest
 from sre_rca_worker.agents.specialists.validator import (
     SpecialistAnalysisValidationError,
+    SpecialistValidationCode,
 )
 from sre_rca_worker.agents.specialists.workflow import SpecialistAnalysisWorkflow
 from sre_rca_worker.application.rca.evidence_tools import EvidenceToolError
@@ -278,6 +279,39 @@ async def test_one_permanent_failure_preserves_other_results_without_secret_text
 
 
 @pytest.mark.asyncio
+async def test_invalid_typed_failure_code_is_safely_downgraded() -> None:
+    secret = "SECRET_exception_text"
+    calls: list[SpecialistKind] = []
+
+    async def invoke(
+        request: SpecialistRequest, kind: SpecialistKind, deadline: datetime
+    ) -> SpecialistAnalysisResult:
+        calls.append(kind)
+        if kind is SpecialistKind.TRACE:
+            raise SpecialistAnalysisValidationError(
+                cast(SpecialistValidationCode, secret)
+            )
+        return _result(kind)
+
+    bundle = await SpecialistAnalysisWorkflow(
+        cast(BranchInvoker, invoke), clock=lambda: NOW
+    ).run(
+        _context(),
+        _capabilities(SpecialistKind.METRICS, SpecialistKind.TRACE),
+        deadline=NOW + timedelta(minutes=1),
+    )
+
+    assert bundle.results == (_result(SpecialistKind.METRICS),)
+    assert [(item.specialist, item.code) for item in bundle.failures] == [
+        (SpecialistKind.TRACE, "ANALYSIS_FAILED")
+    ]
+    assert calls.count(SpecialistKind.TRACE) == 1
+    assert secret not in repr(bundle)
+    assert secret not in str(bundle.model_dump(mode="json"))
+    assert secret not in bundle.model_dump_json()
+
+
+@pytest.mark.asyncio
 async def test_all_permanent_failures_return_only_fixed_order_failures() -> None:
     failures: dict[SpecialistKind, Exception] = {
         SpecialistKind.METRICS: RuntimeError("secret generic detail"),
@@ -350,6 +384,37 @@ async def test_global_deadline_cancels_pending_branches_and_waits_for_cleanup() 
         (SpecialistKind.LOG, "ANALYSIS_TIMEOUT"),
     ]
     assert set(cleaned_up) == {SpecialistKind.TRACE, SpecialistKind.LOG}
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_propagates_after_branch_cleanup() -> None:
+    started = asyncio.Event()
+    cleaned_up = asyncio.Event()
+    never_release = asyncio.Event()
+
+    async def invoke(
+        request: SpecialistRequest, kind: SpecialistKind, deadline: datetime
+    ) -> SpecialistAnalysisResult:
+        started.set()
+        try:
+            await never_release.wait()
+        finally:
+            cleaned_up.set()
+        raise AssertionError("unreachable")
+
+    task = asyncio.create_task(
+        SpecialistAnalysisWorkflow(cast(BranchInvoker, invoke)).run(
+            _context(),
+            _capabilities(SpecialistKind.METRICS),
+            deadline=datetime.now(UTC) + timedelta(minutes=1),
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cleaned_up.is_set()
 
 
 @pytest.mark.asyncio
@@ -463,6 +528,32 @@ async def test_non_transport_stable_failures_are_not_retried(
     assert calls == 1
     assert [(item.specialist, item.code) for item in bundle.failures] == [
         (SpecialistKind.METRICS, code)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_wrong_kind_result_is_a_stable_schema_failure() -> None:
+    calls = 0
+
+    async def invoke(
+        request: SpecialistRequest, kind: SpecialistKind, deadline: datetime
+    ) -> SpecialistAnalysisResult:
+        nonlocal calls
+        calls += 1
+        return _result(SpecialistKind.TRACE)
+
+    bundle = await SpecialistAnalysisWorkflow(
+        cast(BranchInvoker, invoke), clock=lambda: NOW
+    ).run(
+        _context(),
+        _capabilities(SpecialistKind.METRICS),
+        deadline=NOW + timedelta(minutes=1),
+    )
+
+    assert calls == 1
+    assert bundle.results == ()
+    assert [(item.specialist, item.code) for item in bundle.failures] == [
+        (SpecialistKind.METRICS, "ANALYSIS_SCHEMA_INVALID")
     ]
 
 

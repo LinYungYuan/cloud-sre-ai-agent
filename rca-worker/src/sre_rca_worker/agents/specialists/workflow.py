@@ -99,13 +99,13 @@ class SpecialistAnalysisWorkflow:
                     failures[kind] = self._failure(kind, "MCP_PAYLOAD_TOO_LARGE")
                     return
                 except SpecialistAnalysisValidationError as error:
-                    failures[kind] = self._failure(kind, error.code)
+                    failures[kind] = self._failure(kind, self._exception_code(error))
                     return
                 except Exception as error:  # noqa: BLE001 - safe failure boundary
-                    code = self._stable_code(error)
+                    code = self._exception_code(error)
                     if code == "MCP_TRANSPORT" and attempt == 0:
                         continue
-                    failures[kind] = self._failure(kind, code or "ANALYSIS_FAILED")
+                    failures[kind] = self._failure(kind, code)
                     return
 
                 if result.analysis.specialist is not kind:
@@ -131,11 +131,11 @@ class SpecialistAnalysisWorkflow:
         return remaining if remaining > 0 else None
 
     @staticmethod
-    def _stable_code(error: Exception) -> StableSpecialistCode | None:
+    def _exception_code(error: Exception) -> StableSpecialistCode:
         code = getattr(error, "code", None)
         if isinstance(code, str) and code in _STABLE_SPECIALIST_CODES:
             return cast(StableSpecialistCode, code)
-        return None
+        return "ANALYSIS_FAILED"
 
     @staticmethod
     def _failure(kind: SpecialistKind, code: StableSpecialistCode) -> SpecialistFailure:
