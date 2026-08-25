@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from sre_rca_worker.agents.specialists.base import (
     SpecialistRequest,
-    SpecialistResult,
 )
 from sre_rca_worker.application.rca.persist_evidence import PersistEvidence
 from sre_rca_worker.domain.evidence.analysis import StableSpecialistCode
@@ -37,9 +36,9 @@ _MAX_TOTAL_CHARS = 32_000
 class EvidenceCollector(Protocol):
     kind: SpecialistKind
 
-    async def run(
+    async def collect_evidence_drafts(
         self, request: SpecialistRequest, deadline: datetime
-    ) -> SpecialistResult: ...
+    ) -> tuple[EvidenceDraft, ...]: ...
 
 
 class EvidenceReceipt(BaseModel):
@@ -128,11 +127,11 @@ class EvidenceToolSession:
                 )
                 remaining = self._remaining_seconds()
                 async with asyncio.timeout(remaining):
-                    result = await self._collector.run(
+                    drafts = await self._collector.collect_evidence_drafts(
                         bounded_request, self._deadline
                     )
                 self._ensure_before_deadline()
-                drafts = self._validated_drafts(result, approved_tools)
+                drafts = self._validated_drafts(drafts, approved_tools)
                 if not drafts:
                     self._receipt = self._empty_receipt()
                     return self._receipt
@@ -231,9 +230,7 @@ class EvidenceToolSession:
     async def _list_persisted(self) -> tuple[PersistedEvidence, ...]:
         async with asyncio.timeout(self._remaining_seconds()):
             async with self._sessions() as session:
-                persisted = await PersistEvidence(
-                    session
-                ).list_specialist_evidence(
+                persisted = await PersistEvidence(session).list_specialist_evidence(
                     self._request.rca_run_id, self._specialist_run_id
                 )
         self._ensure_before_deadline()
@@ -260,15 +257,10 @@ class EvidenceToolSession:
 
     def _validated_drafts(
         self,
-        result: SpecialistResult,
+        drafts: tuple[EvidenceDraft, ...],
         approved_tools: tuple[AllowedTool, ...],
     ) -> tuple[EvidenceDraft, ...]:
-        if result.specialist is not self._collector.kind:
-            raise EvidenceToolError("ANALYSIS_FAILED")
         allowed = {(tool.name, tool.capability) for tool in approved_tools}
-        drafts = tuple(
-            draft for finding in result.findings for draft in finding.evidence
-        )
         scope = self._request.scope
         for draft in drafts:
             if (
@@ -315,9 +307,7 @@ class EvidenceToolSession:
             references=tuple(record.reference for record in persisted),
             first_chunks=tuple(chunks[0] for chunks in all_chunks if chunks),
             total_chunks=sum(len(chunks) for chunks in all_chunks),
-            truncated=any(
-                chunk.truncated for chunks in all_chunks for chunk in chunks
-            ),
+            truncated=any(chunk.truncated for chunks in all_chunks for chunk in chunks),
         )
         self._ensure_before_deadline()
         return receipt
@@ -338,15 +328,11 @@ class EvidenceToolSession:
             record.rca_run_id != self._request.rca_run_id
             or record.specialist_run_id != self._specialist_run_id
             or record.source_endpoint != self._collector.kind.value
-            or not record.evidence_type.startswith(
-                f"{self._collector.kind.value}."
-            )
+            or not record.evidence_type.startswith(f"{self._collector.kind.value}.")
         ):
             raise EvidenceToolError("ANALYSIS_UNKNOWN_EVIDENCE")
 
-    def _chunks(
-        self, persisted: PersistedEvidence
-    ) -> tuple[EvidenceChunk, ...]:
+    def _chunks(self, persisted: PersistedEvidence) -> tuple[EvidenceChunk, ...]:
         return build_evidence_chunks(
             persisted.reference,
             persisted.structured_data,

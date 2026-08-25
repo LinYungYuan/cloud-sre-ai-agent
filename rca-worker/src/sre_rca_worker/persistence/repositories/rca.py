@@ -102,11 +102,15 @@ class RcaRepository:
             if owned is not True:
                 raise SpecialistAnalysisOwnershipError
 
-        status = {
-            "COMPLETE": "SUCCEEDED",
-            "PARTIAL": "PARTIAL",
-            "FAILED": "FAILED",
-        }[analysis.status]
+        status = (
+            "FAILED"
+            if not analysis.observations
+            else {
+                "COMPLETE": "SUCCEEDED",
+                "PARTIAL": "PARTIAL",
+                "FAILED": "FAILED",
+            }[analysis.status]
+        )
         failure_code = (
             analysis.missing_evidence[0]
             if analysis.missing_evidence

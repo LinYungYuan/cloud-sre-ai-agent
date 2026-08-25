@@ -1,4 +1,5 @@
 import inspect
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
@@ -727,7 +728,12 @@ async def test_each_transport_attempt_builds_fresh_session_and_reuses_committed_
         row_requests.append((actual_run, kind))
         return specialist_run_id
 
+    @asynccontextmanager
+    async def no_op_reservation(*args: object):
+        yield
+
     cast(Any, processor)._get_or_create_specialist_run = get_or_create
+    cast(Any, processor)._specialist_collection_reservation = no_op_reservation
     monkeypatch.setattr(processor_module, "EvidenceToolSession", FakeEvidenceSession)
 
     first = await processor._invoke_specialist_branch(

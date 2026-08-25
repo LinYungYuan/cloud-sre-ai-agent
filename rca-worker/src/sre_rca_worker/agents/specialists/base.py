@@ -74,18 +74,40 @@ class McpSpecialist:
     async def run(
         self, request: SpecialistRequest, deadline: datetime
     ) -> SpecialistResult:
+        drafts, missing = await self._collect_evidence(request, deadline)
+        findings = tuple(
+            Finding(
+                summary=f"{self.kind.value} MCP 回傳可用觀測資料",
+                confidence=0.5,
+                evidence=(draft,),
+            )
+            for draft in drafts
+        )
+        return SpecialistResult(
+            specialist=self.kind,
+            findings=findings,
+            missing_evidence=missing,
+        )
+
+    async def collect_evidence_drafts(
+        self, request: SpecialistRequest, deadline: datetime
+    ) -> tuple[EvidenceDraft, ...]:
+        """Collect validated evidence without constructing legacy findings."""
+        drafts, _ = await self._collect_evidence(request, deadline)
+        return drafts
+
+    async def _collect_evidence(
+        self, request: SpecialistRequest, deadline: datetime
+    ) -> tuple[tuple[EvidenceDraft, ...], tuple[str, ...]]:
         if (
             not request.available_tools
             or request.scope is None
             or request.scope.provider != "GCP"
             or not request.scope.safe
         ):
-            return SpecialistResult(
-                specialist=self.kind,
-                missing_evidence=("NO_SAFE_MCP_CAPABILITY",),
-            )
+            return (), ("NO_SAFE_MCP_CAPABILITY",)
         client = self._client_factory()
-        findings: list[Finding] = []
+        drafts: list[EvidenceDraft] = []
         missing: list[str] = []
         for tool in request.available_tools:
             if tool.endpoint_identity != self.kind.value:
@@ -98,7 +120,9 @@ class McpSpecialist:
             tool.validate_arguments(arguments)
             raw = await client.call(tool.name, arguments, deadline)
             if len(raw) > self._max_response_bytes:
-                raise McpPayloadTooLargeError("MCP response exceeds configured size limit")
+                raise McpPayloadTooLargeError(
+                    "MCP response exceeds configured size limit"
+                )
             try:
                 structured = json.loads(raw)
             except (UnicodeDecodeError, json.JSONDecodeError):
@@ -129,18 +153,8 @@ class McpSpecialist:
                 content_type="application/json",
                 input_sha256=hashlib.sha256(encoded_input).hexdigest(),
             )
-            findings.append(
-                Finding(
-                    summary=f"{self.kind.value} MCP 回傳可用觀測資料",
-                    confidence=0.5,
-                    evidence=(evidence,),
-                )
-            )
-        return SpecialistResult(
-            specialist=self.kind,
-            findings=tuple(findings),
-            missing_evidence=tuple(missing),
-        )
+            drafts.append(evidence)
+        return tuple(drafts), tuple(missing)
 
     def _normalize_structured(
         self,

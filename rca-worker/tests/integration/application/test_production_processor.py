@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import sre_rca_worker.application.rca.processor as processor_module
+from sre_rca_worker.agents.specialists.base import SpecialistRequest
 from sre_rca_worker.application.rca.job_lifecycle import RcaJobClaim
 from sre_rca_worker.application.rca.processor import ProductionRcaProcessor
 from sre_rca_worker.config.settings import (
@@ -30,6 +32,7 @@ from sre_rca_worker.domain.rca.models import (
 from sre_rca_worker.integrations.mcp.models import (
     AllowedTool,
     CapabilitySet,
+    CloudScope,
     SpecialistKind,
 )
 
@@ -466,3 +469,148 @@ async def test_gcp_rollout_modes_persist_exact_evidence_analysis_and_root_inputs
             assert row["analyzed_at"] is not None
             assert "raw-fixture-secret" not in json.dumps(row["analysis_result"])
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_overlapping_specialist_branches_reserve_one_collection_until_analysis_finishes() -> (
+    None
+):
+    engine = create_async_engine(DATABASE_URL)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    incident_id, run_id, now = await _seed_gcp_processor_run(sessions)
+    first_mcp_entered = asyncio.Event()
+    allow_mcp_return = asyncio.Event()
+    first_analysis_entered = asyncio.Event()
+    allow_first_analysis_return = asyncio.Event()
+    constructed_agents: list[int] = []
+    completed_agents: set[int] = set()
+
+    class BlockingClient:
+        endpoint_identity = "metrics"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def call(
+            self, tool_name: str, arguments: object, deadline: datetime
+        ) -> bytes:
+            self.calls += 1
+            if self.calls == 1:
+                first_mcp_entered.set()
+            await allow_mcp_return.wait()
+            return b'{"value":1}'
+
+    class FakeSpecialistAgent:
+        def __init__(self, invocation: int) -> None:
+            self._invocation = invocation
+
+        async def analyze(self, **kwargs: object) -> SpecialistAnalysisDraft:
+            try:
+                receipt = await cast(Any, kwargs["evidence_tools"]).collect_evidence()
+                if self._invocation == 1:
+                    first_analysis_entered.set()
+                    await allow_first_analysis_return.wait()
+                return SpecialistAnalysisDraft(
+                    specialist=SpecialistKind.METRICS,
+                    status="COMPLETE",
+                    observations=(
+                        SpecialistObservation(
+                            statement="CPU is elevated",
+                            confidence=0.9,
+                            relation="SUPPORTS",
+                            evidence=(receipt.references[0],),
+                        ),
+                    ),
+                )
+            finally:
+                completed_agents.add(self._invocation)
+
+    def fake_specialist_factory(**kwargs: object) -> FakeSpecialistAgent:
+        assert kwargs["kind"] is SpecialistKind.METRICS
+        invocation = len(constructed_agents) + 1
+        constructed_agents.append(invocation)
+        return FakeSpecialistAgent(invocation)
+
+    client = BlockingClient()
+    settings = WorkerSettings(
+        database_url=SecretStr(DATABASE_URL),
+        pubsub_project_id="local",
+        rca_topic_id="rca",
+        pubsub_subscription_id="worker",
+        app_environment="test",
+        model_name="specialist-model-v1",
+        specialist_analysis_mode=SpecialistAnalysisMode.ACTIVE,
+    )
+    processor = ProductionRcaProcessor(
+        sessions,
+        settings,
+        specialist_agent_factory=fake_specialist_factory,
+    )
+    request = SpecialistRequest(
+        incident_id=incident_id,
+        rca_run_id=run_id,
+        alert_issue="CPU high",
+        scope=CloudScope(provider="GCP", scope_id="project-a", safe=True),
+        window_start=now - timedelta(minutes=15),
+        window_end=now,
+        available_tools=(_integration_tool(SpecialistKind.METRICS),),
+    )
+    deadline = now + timedelta(minutes=5)
+    first = asyncio.create_task(
+        processor._invoke_specialist_branch(
+            request,
+            SpecialistKind.METRICS,
+            deadline,
+            clients=cast(Any, {SpecialistKind.METRICS: client}),
+        )
+    )
+    second: asyncio.Task[object] | None = None
+    try:
+        await first_mcp_entered.wait()
+        second = asyncio.create_task(
+            processor._invoke_specialist_branch(
+                request,
+                SpecialistKind.METRICS,
+                deadline,
+                clients=cast(Any, {SpecialistKind.METRICS: client}),
+            )
+        )
+        await asyncio.sleep(0.05)
+
+        assert constructed_agents == [1]
+        assert client.calls == 1
+
+        allow_mcp_return.set()
+        await first_analysis_entered.wait()
+        assert constructed_agents == [1]
+        assert client.calls == 1
+
+        allow_first_analysis_return.set()
+        first_result, second_result = await asyncio.gather(first, second)
+
+        assert first_result.known_evidence == second_result.known_evidence
+        assert client.calls == 1
+        assert completed_agents == {1, 2}
+        async with sessions() as session:
+            evidence_count = await session.scalar(
+                text(
+                    """SELECT count(*) FROM evidence_records
+                       WHERE rca_run_id=:run"""
+                ),
+                {"run": run_id},
+            )
+            specialist_count = await session.scalar(
+                text(
+                    """SELECT count(*) FROM specialist_runs
+                       WHERE rca_run_id=:run AND specialist_type='METRICS'"""
+                ),
+                {"run": run_id},
+            )
+        assert evidence_count == 1
+        assert specialist_count == 1
+    finally:
+        allow_mcp_return.set()
+        allow_first_analysis_return.set()
+        tasks = (first,) if second is None else (first, second)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await engine.dispose()

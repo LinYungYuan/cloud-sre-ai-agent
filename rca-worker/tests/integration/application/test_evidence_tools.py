@@ -14,7 +14,6 @@ from sqlalchemy.orm import Session
 
 from sre_rca_worker.agents.specialists.base import (
     SpecialistRequest,
-    SpecialistResult,
 )
 from sre_rca_worker.agents.specialists.metrics_agent import MetricsSpecialist
 from sre_rca_worker.agents.specialists.trace_agent import TraceSpecialist
@@ -22,7 +21,7 @@ from sre_rca_worker.application.rca.evidence_tools import (
     EvidenceToolError,
     EvidenceToolSession,
 )
-from sre_rca_worker.domain.evidence.models import EvidenceDraft, Finding
+from sre_rca_worker.domain.evidence.models import EvidenceDraft
 from sre_rca_worker.integrations.mcp.models import AllowedTool, CloudScope
 from sre_rca_worker.persistence.repositories.rca import (
     AmbiguousEvidenceError,
@@ -56,15 +55,9 @@ class DraftCollector:
         self.calls = 0
         self._drafts = drafts
 
-    async def run(self, request, deadline):
+    async def collect_evidence_drafts(self, request, deadline):
         self.calls += 1
-        return SpecialistResult(
-            specialist=self.kind,
-            findings=tuple(
-                Finding(summary="collected", confidence=0.5, evidence=(draft,))
-                for draft in self._drafts
-            ),
-        )
+        return self._drafts
 
 
 def _tool(index: int = 0) -> AllowedTool:

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Callable, Mapping
-from datetime import datetime
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, get_args
 from uuid import UUID
@@ -316,38 +318,71 @@ class ProductionRcaProcessor:
             request.rca_run_id,
             kind,
         )
-        collector = self._legacy_specialists(clients)[kind]
-        evidence_tools = EvidenceToolSession(
-            request=request,
-            specialist_run_id=specialist_run_id,
-            collector=collector,
-            sessions=self._sessions,
-            deadline=deadline,
-            chunk_chars=self._settings.evidence_chunk_chars,
-            max_chunks=self._settings.evidence_max_chunks,
-            max_total_chars=self._settings.evidence_max_total_chars,
-            max_tool_calls=self._settings.specialist_max_tool_calls,
-        )
-        skill = self._skills.get_for_agent(kind.value)
-        agent_factory = getattr(
-            self,
-            "_specialist_agent_factory",
-            AdkSpecialistAgent,
-        )
-        agent = agent_factory(
-            kind=kind,
-            model_name=self._settings.model_name,
-            skill_instruction=skill.body,
-        )
-        analysis = await agent.analyze(
-            request=request,
-            evidence_tools=evidence_tools,
-            deadline=deadline,
-        )
-        return SpecialistAnalysisResult(
-            analysis=analysis,
-            known_evidence=evidence_tools.known_evidence,
-        )
+        async with self._specialist_collection_reservation(
+            request.rca_run_id,
+            kind,
+            deadline,
+        ):
+            collector = self._legacy_specialists(clients)[kind]
+            evidence_tools = EvidenceToolSession(
+                request=request,
+                specialist_run_id=specialist_run_id,
+                collector=collector,
+                sessions=self._sessions,
+                deadline=deadline,
+                chunk_chars=self._settings.evidence_chunk_chars,
+                max_chunks=self._settings.evidence_max_chunks,
+                max_total_chars=self._settings.evidence_max_total_chars,
+                max_tool_calls=self._settings.specialist_max_tool_calls,
+            )
+            skill = self._skills.get_for_agent(kind.value)
+            agent_factory = getattr(
+                self,
+                "_specialist_agent_factory",
+                AdkSpecialistAgent,
+            )
+            agent = agent_factory(
+                kind=kind,
+                model_name=self._settings.model_name,
+                skill_instruction=skill.body,
+            )
+            analysis = await agent.analyze(
+                request=request,
+                evidence_tools=evidence_tools,
+                deadline=deadline,
+            )
+            return SpecialistAnalysisResult(
+                analysis=analysis,
+                known_evidence=evidence_tools.known_evidence,
+            )
+
+    @asynccontextmanager
+    async def _specialist_collection_reservation(
+        self,
+        rca_run_id: UUID,
+        kind: SpecialistKind,
+        deadline: datetime,
+    ):
+        """Serialize one run/kind from evidence reuse through agent analysis."""
+        if deadline.tzinfo is None or deadline.utcoffset() is None:
+            raise ValueError("deadline must be timezone-aware")
+        remaining = (deadline - datetime.now(UTC)).total_seconds()
+        if remaining <= 0:
+            raise TimeoutError
+        lock_key = self._collection_reservation_key(rca_run_id, kind)
+        async with self._sessions() as session:
+            async with asyncio.timeout(remaining):
+                async with session.begin():
+                    await session.execute(
+                        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                        {"lock_key": lock_key},
+                    )
+                    yield
+
+    @staticmethod
+    def _collection_reservation_key(rca_run_id: UUID, kind: SpecialistKind) -> int:
+        digest = hashlib.sha256(f"{rca_run_id}:{kind.value}".encode("ascii")).digest()
+        return int.from_bytes(digest[:8], byteorder="big", signed=True)
 
     async def _get_or_create_specialist_run(
         self,

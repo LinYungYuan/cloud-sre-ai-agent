@@ -10,23 +10,26 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from sre_rca_worker.agents.specialists import base as specialist_base
 from sre_rca_worker.agents.specialists.base import (
+    McpSpecialist,
     SpecialistRequest,
-    SpecialistResult,
 )
+from sre_rca_worker.agents.specialists.metrics_agent import MetricsSpecialist
 from sre_rca_worker.application.rca import evidence_tools
 from sre_rca_worker.application.rca.evidence_tools import (
+    EvidenceCollector,
     EvidenceToolError,
     EvidenceToolSession,
 )
 from sre_rca_worker.domain.evidence.models import (
     EvidenceDraft,
     EvidenceReference,
-    Finding,
 )
 from sre_rca_worker.integrations.mcp.models import (
     AllowedTool,
     CloudScope,
+    DiscoveredTool,
     SpecialistKind,
 )
 
@@ -102,9 +105,9 @@ class _Collector:
         self.entered: asyncio.Event | None = None
         self.release: asyncio.Event | None = None
 
-    async def run(
+    async def collect_evidence_drafts(
         self, request: SpecialistRequest, deadline: datetime
-    ) -> SpecialistResult:
+    ) -> tuple[EvidenceDraft, ...]:
         self.calls += 1
         self.requests.append(request)
         if self.entered is not None:
@@ -113,11 +116,7 @@ class _Collector:
             await self.release.wait()
         if self._error is not None:
             raise self._error
-        findings = tuple(
-            Finding(summary="collected", confidence=0.5, evidence=(draft,))
-            for draft in self._drafts
-        )
-        return SpecialistResult(specialist=self.kind, findings=findings)
+        return self._drafts
 
 
 class _Transaction:
@@ -236,7 +235,7 @@ def fake_persistence(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _session(
-    collector: _Collector,
+    collector: EvidenceCollector,
     sessions: _Sessions,
     *,
     request: SpecialistRequest | None = None,
@@ -292,9 +291,9 @@ def _stored(
 
 
 def test_public_tool_signatures_do_not_accept_model_controlled_routing() -> None:
-    assert tuple(inspect.signature(EvidenceToolSession.collect_evidence).parameters) == (
-        "self",
-    )
+    assert tuple(
+        inspect.signature(EvidenceToolSession.collect_evidence).parameters
+    ) == ("self",)
     assert tuple(
         inspect.signature(EvidenceToolSession.read_evidence_chunk).parameters
     ) == ("self", "evidence_id", "chunk_index")
@@ -571,6 +570,47 @@ async def test_parallel_collects_share_one_committed_receipt(
     assert first_receipt == second_receipt
     assert collector.calls == 1
     assert tools.known_evidence == first_receipt.references
+
+
+@pytest.mark.asyncio
+async def test_direct_collection_never_calls_legacy_run_or_constructs_finding(
+    fake_persistence: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    class Client:
+        endpoint_identity = "metrics"
+
+        async def list_tools(self) -> tuple[DiscoveredTool, ...]:
+            return ()
+
+        async def call(
+            self,
+            tool_name: str,
+            arguments: dict[str, object],
+            deadline: datetime,
+        ) -> bytes:
+            nonlocal calls
+            calls += 1
+            return b'{"cpu":85.23}'
+
+    async def legacy_run_forbidden(*args: object, **kwargs: object) -> object:
+        raise AssertionError("ACTIVE/SHADOW collection must not call legacy run()")
+
+    def finding_forbidden(*args: object, **kwargs: object) -> object:
+        raise AssertionError("ACTIVE/SHADOW collection must not construct Finding")
+
+    monkeypatch.setattr(McpSpecialist, "run", legacy_run_forbidden)
+    monkeypatch.setattr(specialist_base, "Finding", finding_forbidden)
+
+    receipt = await _session(
+        MetricsSpecialist(lambda: Client()),
+        _Sessions(),
+    ).collect_evidence()
+
+    assert len(receipt.references) == 1
+    assert calls == 1
 
 
 @pytest.mark.asyncio

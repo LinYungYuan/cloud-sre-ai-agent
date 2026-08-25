@@ -298,6 +298,46 @@ async def test_analysis_audit_maps_partial_and_failed_statuses_exactly(
 
 
 @pytest.mark.asyncio
+async def test_analysis_audit_empty_partial_is_persisted_as_failed() -> None:
+    engine = create_async_engine(DATABASE_URL)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    run_id, _, _ = await _seed_analysis_owner(sessions)
+    analysis = SpecialistAnalysisDraft(
+        specialist=SpecialistKind.METRICS,
+        status="PARTIAL",
+        observations=(),
+        missing_evidence=("ANALYSIS_INPUT_TRUNCATED",),
+    )
+
+    async with sessions() as session, session.begin():
+        await RcaRepository(session).upsert_specialist_analysis(
+            rca_run_id=run_id,
+            specialist=SpecialistKind.METRICS,
+            analysis=analysis,
+            model_name="specialist-model-v1",
+            skill_name="metrics-analysis",
+            skill_sha256="d" * 64,
+        )
+
+    async with sessions() as session:
+        row = (
+            await session.execute(
+                text(
+                    """SELECT status,failure_code,analysis_result
+                       FROM specialist_runs
+                       WHERE rca_run_id=:run AND specialist_type='METRICS'"""
+                ),
+                {"run": run_id},
+            )
+        ).one()
+
+    assert row.status == "FAILED"
+    assert row.failure_code == "ANALYSIS_INPUT_TRUNCATED"
+    assert row.analysis_result == analysis.model_dump(mode="json")
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_analysis_audit_ownership_mismatch_never_partially_updates() -> None:
     engine = create_async_engine(DATABASE_URL)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
