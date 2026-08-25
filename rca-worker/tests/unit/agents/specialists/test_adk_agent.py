@@ -149,9 +149,25 @@ class _DeterministicLlm(BaseLlm):
         yield LlmResponse(content=self.response, partial=False)
 
 
-def _install_fake_model(
-    monkeypatch: pytest.MonkeyPatch, fake_model: _DeterministicLlm
-) -> None:
+class _SequencedLlm(BaseLlm):
+    responses: tuple[Content, ...]
+    requests: list[LlmRequest] = Field(default_factory=list)
+
+    @property
+    def capabilities(self) -> LlmCapabilities:
+        return LlmCapabilities(output_schema_and_tools=True)
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[LlmResponse, None]:
+        self.requests.append(llm_request)
+        yield LlmResponse(
+            content=self.responses[len(self.requests) - 1],
+            partial=False,
+        )
+
+
+def _install_fake_model(monkeypatch: pytest.MonkeyPatch, fake_model: BaseLlm) -> None:
     from google.adk.models.registry import LLMRegistry
 
     monkeypatch.setattr(
@@ -162,7 +178,7 @@ def _install_fake_model(
 
 
 class _ResponseAgent(AdkSpecialistAgent):
-    def __init__(self, responses: tuple[str, ...], **kwargs: Any) -> None:
+    def __init__(self, responses: tuple[str | Exception, ...], **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.responses = iter(responses)
         self.prompts: list[str] = []
@@ -177,11 +193,14 @@ class _ResponseAgent(AdkSpecialistAgent):
     ) -> str:
         self.prompts.append(prompt)
         self.deadlines.append(deadline)
-        return next(self.responses)
+        response = next(self.responses)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 def _agent(
-    responses: tuple[str, ...],
+    responses: tuple[str | Exception, ...],
     *,
     clock: Callable[[], datetime] | None = None,
 ) -> _ResponseAgent:
@@ -301,6 +320,46 @@ async def test_deadline_is_rechecked_before_corrective_retry() -> None:
 
 
 @pytest.mark.asyncio
+async def test_empty_final_text_rechecks_the_same_deadline_before_correction() -> None:
+    times = iter((NOW, NOW + timedelta(minutes=1)))
+    agent = _agent(("",), clock=lambda: next(times))
+
+    with pytest.raises(TimeoutError, match="ANALYSIS_TIMEOUT"):
+        await agent.analyze(
+            request=_request(),
+            evidence_tools=_as_session(_EvidenceTools()),
+            deadline=NOW + timedelta(minutes=1),
+        )
+
+    assert len(agent.prompts) == 1
+    assert agent.deadlines == [NOW + timedelta(minutes=1)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError("ANALYSIS_TIMEOUT"),
+        ConnectionError("MCP_TRANSPORT"),
+    ],
+    ids=("timeout", "transport"),
+)
+async def test_timeout_or_transport_response_is_not_corrected(
+    error: Exception,
+) -> None:
+    agent = _agent((error, _draft().model_dump_json()))
+
+    with pytest.raises(type(error), match=str(error)):
+        await agent.analyze(
+            request=_request(),
+            evidence_tools=_as_session(_EvidenceTools()),
+            deadline=NOW + timedelta(minutes=1),
+        )
+
+    assert len(agent.prompts) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.filterwarnings(
     "ignore:BaseAgentConfig is deprecated and will be removed in future "
     "versions:DeprecationWarning"
@@ -337,6 +396,106 @@ async def test_real_adk_runner_excludes_thought_text_from_structured_output(
 
     assert result == _draft()
     assert len(fake_model.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings(
+    "ignore:BaseAgentConfig is deprecated and will be removed in future "
+    "versions:DeprecationWarning"
+)
+@pytest.mark.filterwarnings(
+    "ignore:\\[EXPERIMENTAL\\] feature "
+    "FeatureName.JSON_SCHEMA_FOR_FUNC_DECL is enabled\\.:UserWarning"
+)
+async def test_real_adk_runner_corrects_a_thought_only_final_response_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thought_secret = "private thought must not become validation input"
+    fake_model = _SequencedLlm(
+        model="sequenced-fake",
+        responses=(
+            Content(
+                role="model",
+                parts=[Part(text=thought_secret, thought=True)],
+            ),
+            Content(
+                role="model",
+                parts=[Part(text=_draft().model_dump_json())],
+            ),
+        ),
+    )
+    _install_fake_model(monkeypatch, fake_model)
+    agent = AdkSpecialistAgent(
+        kind=SpecialistKind.METRICS,
+        model_name="sequenced-fake",
+        skill_instruction=METRICS_SKILL.body,
+    )
+
+    result = await agent.analyze(
+        request=_request(),
+        evidence_tools=_as_session(_EvidenceTools()),
+        deadline=datetime.now(UTC) + timedelta(seconds=30),
+    )
+
+    assert result == _draft()
+    assert len(fake_model.requests) == 2
+    correction_parts = fake_model.requests[1].contents[-1].parts
+    assert correction_parts is not None
+    correction_text = correction_parts[0].text
+    assert correction_text is not None
+    assert json.loads(correction_text)["validationCorrection"] == (
+        "ANALYSIS_SCHEMA_INVALID"
+    )
+    assert thought_secret not in correction_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings(
+    "ignore:BaseAgentConfig is deprecated and will be removed in future "
+    "versions:DeprecationWarning"
+)
+@pytest.mark.filterwarnings(
+    "ignore:\\[EXPERIMENTAL\\] feature "
+    "FeatureName.JSON_SCHEMA_FOR_FUNC_DECL is enabled\\.:UserWarning"
+)
+async def test_real_adk_runner_fails_stably_after_two_thought_only_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_thought = "first private thought must not become validation input"
+    second_thought = "second private thought must not become validation input"
+    fake_model = _SequencedLlm(
+        model="sequenced-fake",
+        responses=(
+            Content(role="model", parts=[Part(text=first_thought, thought=True)]),
+            Content(role="model", parts=[Part(text=second_thought, thought=True)]),
+        ),
+    )
+    _install_fake_model(monkeypatch, fake_model)
+    agent = AdkSpecialistAgent(
+        kind=SpecialistKind.METRICS,
+        model_name="sequenced-fake",
+        skill_instruction=METRICS_SKILL.body,
+    )
+
+    with pytest.raises(SpecialistAnalysisValidationError) as raised:
+        await agent.analyze(
+            request=_request(),
+            evidence_tools=_as_session(_EvidenceTools()),
+            deadline=datetime.now(UTC) + timedelta(seconds=30),
+        )
+
+    assert raised.value.code == "ANALYSIS_SCHEMA_INVALID"
+    assert str(raised.value) == "ANALYSIS_SCHEMA_INVALID"
+    assert len(fake_model.requests) == 2
+    correction_parts = fake_model.requests[1].contents[-1].parts
+    assert correction_parts is not None
+    correction_text = correction_parts[0].text
+    assert correction_text is not None
+    assert json.loads(correction_text)["validationCorrection"] == (
+        "ANALYSIS_SCHEMA_INVALID"
+    )
+    assert first_thought not in correction_text
+    assert second_thought not in correction_text
 
 
 @pytest.mark.asyncio

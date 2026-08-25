@@ -1,0 +1,77 @@
+{
+  "case": "trace-critical-path",
+  "kind": "trace",
+  "provider": "GCP",
+  "scopeId": "project-trace",
+  "safe": true,
+  "alertIssue": "Checkout critical path latency and 500 errors increased.",
+  "windowStart": "2026-08-25T07:45:00Z",
+  "windowEnd": "2026-08-25T08:00:00Z",
+  "available": ["trace"],
+  "expectedRoute": ["trace"],
+  "referenceId": "00000000-0000-0000-0000-000000000102",
+  "expectedStatus": "COMPLETE",
+  "statement": "The normalized checkout trace marks gateway, orders, and database spans as the critical path.",
+  "relation": "SUPPORTS",
+  "confidence": 0.91,
+  "traceEvidence": {
+    "traces": [
+      {
+        "traceId": "trace-checkout-001",
+        "startedAt": "2026-08-25T07:59:00Z",
+        "latencyAnomalyScore": 0.95,
+        "durationMs": 450,
+        "spans": [
+          {
+            "spanId": "span-gateway",
+            "parentSpanId": null,
+            "serviceName": "gateway",
+            "operationName": "GET /checkout",
+            "startOffsetMs": 0,
+            "durationMs": 450,
+            "status": "ERROR",
+            "kind": "SERVER",
+            "criticalPath": true,
+            "attributes": {
+              "http.request.method": "GET",
+              "http.response.status_code": 500,
+              "authorization": "redacted-fixture-value",
+              "server.address": "10.0.0.1"
+            }
+          },
+          {
+            "spanId": "span-orders",
+            "parentSpanId": "span-gateway",
+            "serviceName": "orders",
+            "operationName": "POST /orders",
+            "startOffsetMs": 20,
+            "durationMs": 280,
+            "status": "ERROR",
+            "kind": "SERVER",
+            "criticalPath": true,
+            "attributes": {
+              "http.request.method": "POST",
+              "http.response.status_code": 500
+            }
+          },
+          {
+            "spanId": "span-db",
+            "parentSpanId": "span-orders",
+            "serviceName": "database",
+            "operationName": "SELECT/orders",
+            "startOffsetMs": 40,
+            "durationMs": 200,
+            "status": "OK",
+            "kind": "CLIENT",
+            "criticalPath": true,
+            "attributes": {
+              "db.system": "postgresql",
+              "db.operation.name": "SELECT/orders"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "forbidden": ["authorization", "redacted-fixture-value", "private_mcp_url"]
+}

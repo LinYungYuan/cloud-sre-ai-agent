@@ -1,0 +1,29 @@
+{
+  "case": "metrics-anomaly",
+  "kind": "metrics",
+  "provider": "GCP",
+  "scopeId": "project-metrics",
+  "safe": true,
+  "alertIssue": "Checkout CPU saturation crossed the alert threshold.",
+  "windowStart": "2026-08-25T07:45:00Z",
+  "windowEnd": "2026-08-25T08:00:00Z",
+  "available": ["metrics"],
+  "expectedRoute": ["metrics"],
+  "referenceId": "00000000-0000-0000-0000-000000000101",
+  "expectedStatus": "COMPLETE",
+  "statement": "CPU usage rose from 62% to 95% during the approved window.",
+  "relation": "SUPPORTS",
+  "confidence": 0.94,
+  "structuredEvidence": {
+    "series": [
+      {"timestamp": "2026-08-25T07:50:00Z", "value": 62.0},
+      {"timestamp": "2026-08-25T07:59:00Z", "value": 95.2}
+    ]
+  },
+  "expectedArguments": {
+    "project_id": "project-metrics",
+    "start_time": "2026-08-25T07:45:00+00:00",
+    "end_time": "2026-08-25T08:00:00+00:00"
+  },
+  "forbidden": ["raw-fixture-secret", "private_mcp_url"]
+}

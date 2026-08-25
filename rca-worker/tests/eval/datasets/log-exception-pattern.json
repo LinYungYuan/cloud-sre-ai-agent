@@ -1,0 +1,23 @@
+{
+  "case": "log-exception-pattern",
+  "kind": "log",
+  "provider": "GCP",
+  "scopeId": "project-logs",
+  "safe": true,
+  "alertIssue": "Checkout worker reports ordered connection exceptions.",
+  "windowStart": "2026-08-25T07:45:00Z",
+  "windowEnd": "2026-08-25T08:00:00Z",
+  "available": ["log"],
+  "expectedRoute": ["log"],
+  "referenceId": "00000000-0000-0000-0000-000000000103",
+  "expectedStatus": "COMPLETE",
+  "statement": "ConnectionPoolTimeout occurred at 07:56:02Z before ConnectionReset at 07:57:11Z in source order.",
+  "relation": "SUPPORTS",
+  "confidence": 0.89,
+  "structuredEvidence": [
+    {"timestamp": "2026-08-25T07:56:02Z", "severity": "ERROR", "message": "ConnectionPoolTimeout"},
+    {"timestamp": "2026-08-25T07:57:11Z", "severity": "ERROR", "message": "ConnectionReset"}
+  ],
+  "expectedOrder": ["2026-08-25T07:56:02Z", "2026-08-25T07:57:11Z"],
+  "forbidden": ["raw-fixture-secret", "private_mcp_url"]
+}

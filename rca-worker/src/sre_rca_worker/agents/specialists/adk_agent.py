@@ -137,9 +137,7 @@ class AdkSpecialistAgent:
                 raise TimeoutError("ANALYSIS_TIMEOUT") from None
         finally:
             await runner.close()
-        if not final_text:
-            raise SpecialistAnalysisValidationError("ANALYSIS_SCHEMA_INVALID")
-        return final_text
+        return final_text or ""
 
     def _build_tools(
         self, evidence_tools: EvidenceToolSession

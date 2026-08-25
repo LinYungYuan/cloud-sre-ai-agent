@@ -1,0 +1,32 @@
+{
+  "case": "conflicting-observations",
+  "provider": "GCP",
+  "scopeId": "project-conflict",
+  "safe": true,
+  "alertIssue": "Checkout latency has conflicting metric and trace signals.",
+  "available": ["metrics", "trace"],
+  "windowStart": "2026-08-25T07:45:00Z",
+  "windowEnd": "2026-08-25T08:00:00Z",
+  "referenceId": "00000000-0000-0000-0000-000000000104",
+  "referenceIds": [
+    "00000000-0000-0000-0000-000000000104",
+    "00000000-0000-0000-0000-000000000105"
+  ],
+  "analyses": [
+    {
+      "kind": "metrics",
+      "statement": "Metrics support connection-pool saturation.",
+      "relation": "SUPPORTS",
+      "confidence": 0.84,
+      "referenceIndex": 0
+    },
+    {
+      "kind": "trace",
+      "statement": "Trace timing contradicts a database-only explanation.",
+      "relation": "CONTRADICTS",
+      "confidence": 0.78,
+      "referenceIndex": 1
+    }
+  ],
+  "rootStatus": "COMPLETE"
+}
