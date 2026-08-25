@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
+from jsonschema import Draft202012Validator, SchemaError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from sre_rca_worker.domain.evidence.chunking import McpPayloadTooLargeError
@@ -17,6 +18,12 @@ from sre_rca_worker.integrations.mcp.models import (
     CloudScope,
     SpecialistKind,
 )
+
+_SPECIALIST_QUERY_POLICY = {
+    SpecialistKind.METRICS: "metrics.anomaly",
+    SpecialistKind.TRACE: "trace.critical_path",
+    SpecialistKind.LOG: "log.exception_pattern",
+}
 
 
 class SpecialistRequest(BaseModel):
@@ -163,9 +170,8 @@ class McpSpecialist:
     ) -> dict[str, Any] | list[Any] | None:
         return structured
 
-    @staticmethod
     def _arguments(
-        tool: AllowedTool, request: SpecialistRequest
+        self, tool: AllowedTool, request: SpecialistRequest
     ) -> dict[str, object] | None:
         properties = tool.input_schema.get("properties", {})
         required_value = tool.input_schema.get("required", [])
@@ -181,8 +187,23 @@ class McpSpecialist:
             "startTime": request.window_start.isoformat(),
             "end_time": request.window_end.isoformat(),
             "endTime": request.window_end.isoformat(),
-            "query": request.alert_issue,
         }
+
+        if "query" in properties:
+            policy_query = _SPECIALIST_QUERY_POLICY[self.kind]
+            query_schema = properties["query"]
+            try:
+                query_is_safe = Draft202012Validator(query_schema).is_valid(
+                    policy_query
+                )
+            except (SchemaError, TypeError):
+                query_is_safe = False
+            if query_is_safe:
+                candidates["query"] = policy_query
+            elif "query" in required:
+                # A required query is only satisfiable with the fixed policy
+                # value.  Never substitute alert text or another model value.
+                return None
         if not required <= candidates.keys():
             return None
         return {name: candidates[name] for name in properties if name in candidates}

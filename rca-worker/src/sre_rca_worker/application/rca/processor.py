@@ -77,11 +77,12 @@ class ProductionRcaProcessor:
         *,
         root_agent_factory: Callable[..., Any] | None = None,
         specialist_agent_factory: Callable[..., Any] | None = None,
+        skill_registry: SkillRegistry | None = None,
     ) -> None:
         self._sessions = sessions
         self._settings = settings
         definitions = Path(__file__).parents[2] / "agents/skills/definitions"
-        self._skills = SkillRegistry(load_skills(definitions))
+        self._skills = skill_registry or SkillRegistry(load_skills(definitions))
         self._root_agent_factory = root_agent_factory or AdkRcaAgent
         self._specialist_agent_factory = specialist_agent_factory or AdkSpecialistAgent
         self._analysis_workflow_factory = SpecialistAnalysisWorkflow

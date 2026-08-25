@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -12,6 +13,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import sre_rca_worker.application.rca.processor as processor_module
+from sre_rca_worker.agents.skills.loader import load_skills
+from sre_rca_worker.agents.skills.registry import SkillRegistry
 from sre_rca_worker.agents.specialists.base import SpecialistRequest
 from sre_rca_worker.application.rca.job_lifecycle import RcaJobClaim
 from sre_rca_worker.application.rca.processor import ProductionRcaProcessor
@@ -39,6 +42,9 @@ from sre_rca_worker.integrations.mcp.models import (
 DATABASE_URL = os.getenv(
     "MIGRATION_TEST_DATABASE_URL",
     "postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent",
+)
+DEFINITIONS = (
+    Path(__file__).resolve().parents[3] / "src/sre_rca_worker/agents/skills/definitions"
 )
 
 
@@ -282,6 +288,15 @@ async def test_gcp_rollout_modes_persist_exact_evidence_analysis_and_root_inputs
     root_calls = {"legacy": 0, "active": 0}
     root_inputs: list[dict[str, object]] = []
     specialist_agent_calls = {kind: 0 for kind in kinds}
+    specialist_skill_bodies: dict[SpecialistKind, list[str]] = {
+        kind: [] for kind in kinds
+    }
+    expected_registry = SkillRegistry(
+        tuple(
+            skill.model_copy(update={"body": f"{skill.body}\ntrusted-{skill.agent}"})
+            for skill in load_skills(DEFINITIONS)
+        )
+    )
 
     class FakeClient:
         def __init__(self, kind: SpecialistKind) -> None:
@@ -340,7 +355,11 @@ async def test_gcp_rollout_modes_persist_exact_evidence_analysis_and_root_inputs
             )
 
     def fake_specialist_factory(**kwargs: object) -> FakeSpecialistAgent:
-        return FakeSpecialistAgent(cast(SpecialistKind, kwargs["kind"]))
+        kind = cast(SpecialistKind, kwargs["kind"])
+        skill_instruction = cast(str, kwargs["skill_instruction"])
+        specialist_skill_bodies[kind].append(skill_instruction)
+        assert skill_instruction == expected_registry.get_for_agent(kind.value).body
+        return FakeSpecialistAgent(kind)
 
     class FakeRootAgent:
         async def synthesize_legacy(self, **kwargs: object) -> RcaReportDraft:
@@ -400,6 +419,7 @@ async def test_gcp_rollout_modes_persist_exact_evidence_analysis_and_root_inputs
         settings,
         root_agent_factory=lambda **kwargs: FakeRootAgent(),
         specialist_agent_factory=fake_specialist_factory,
+        skill_registry=expected_registry,
     )
     claim = RcaJobClaim(
         worker_job_id=uuid4(),
@@ -420,12 +440,15 @@ async def test_gcp_rollout_modes_persist_exact_evidence_analysis_and_root_inputs
     if mode is SpecialistAnalysisMode.DISABLED:
         assert specialist_agent_calls == {kind: 0 for kind in kinds}
         assert root_calls == {"legacy": 1, "active": 0}
+        assert specialist_skill_bodies == {kind: [] for kind in kinds}
     elif mode is SpecialistAnalysisMode.SHADOW:
         assert specialist_agent_calls == {kind: 2 for kind in kinds}
         assert root_calls == {"legacy": 2, "active": 0}
+        assert all(len(bodies) == 2 for bodies in specialist_skill_bodies.values())
     else:
         assert specialist_agent_calls == {kind: 1 for kind in kinds}
         assert root_calls == {"legacy": 0, "active": 1}
+        assert all(len(bodies) == 1 for bodies in specialist_skill_bodies.values())
 
     async with sessions() as session:
         rows = (
