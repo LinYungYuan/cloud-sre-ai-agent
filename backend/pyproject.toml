@@ -8,6 +8,7 @@ dependencies = [
     "fastapi",
     "pydantic",
     "pydantic-settings",
+    "python-dotenv",
     "sqlalchemy[asyncio]",
     "asyncpg",
     "alembic",
