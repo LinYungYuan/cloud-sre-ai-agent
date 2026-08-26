@@ -177,6 +177,17 @@ async def test_specialist_analysis_audit_schema_enforces_safe_values() -> None:
                 {"status": status, "skill_sha256": "a" * 64},
             )
 
+        await connection.execute(
+            text(
+                """INSERT INTO test_specialist_analysis (
+                       rca_run_id, specialist_type, status,
+                       analysis_result, skill_sha256
+                   ) VALUES (
+                       gen_random_uuid(), 'LOGS', 'FAILED', NULL, NULL
+                   )"""
+            )
+        )
+
         with pytest.raises(IntegrityError):
             async with connection.begin_nested():
                 await connection.execute(

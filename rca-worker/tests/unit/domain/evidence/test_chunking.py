@@ -129,6 +129,12 @@ def test_chunks_allow_total_below_chunk_capacity() -> None:
 @pytest.mark.parametrize(
     ("chunk_chars", "max_chunks", "max_total_chars"),
     [
+        (True, 4, 32_000),
+        (8_000, True, 32_000),
+        (8_000, 4, True),
+        (8.0, 4, 32_000),
+        (8_000, 4.0, 32_000),
+        (8_000, 4, 32_000.0),
         (8_001, 4, 32_000),
         (8_000, 5, 32_000),
         (8_000, 4, 32_001),

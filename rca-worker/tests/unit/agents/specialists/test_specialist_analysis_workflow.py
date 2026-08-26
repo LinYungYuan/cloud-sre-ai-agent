@@ -17,7 +17,10 @@ from sre_rca_worker.agents.rca.models import (
     SpecialistAnalysisResult,
     SpecialistFailure,
 )
-from sre_rca_worker.agents.specialists.base import SpecialistRequest
+from sre_rca_worker.agents.specialists.base import (
+    McpResultInvalidError,
+    SpecialistRequest,
+)
 from sre_rca_worker.agents.specialists.validator import (
     SpecialistAnalysisValidationError,
     SpecialistValidationCode,
@@ -35,6 +38,7 @@ from sre_rca_worker.integrations.mcp.models import (
     AllowedTool,
     CapabilitySet,
     CloudScope,
+    DiscoveryFailure,
     SpecialistKind,
 )
 
@@ -194,6 +198,58 @@ async def test_missing_capability_skips_only_that_specialist() -> None:
 
 
 @pytest.mark.asyncio
+async def test_discovery_failure_is_preserved_alongside_successful_analysis() -> None:
+    async def invoke(
+        request: SpecialistRequest, kind: SpecialistKind, deadline: datetime
+    ) -> SpecialistAnalysisResult:
+        return _result(kind)
+
+    capabilities = CapabilitySet(
+        by_specialist={SpecialistKind.METRICS: (_tool(SpecialistKind.METRICS),)},
+        discovery_failures=(
+            DiscoveryFailure(specialist=SpecialistKind.TRACE, code="MCP_TIMEOUT"),
+        ),
+    )
+    bundle = await SpecialistAnalysisWorkflow(
+        cast(BranchInvoker, invoke), clock=lambda: NOW
+    ).run(_context(), capabilities, deadline=NOW + timedelta(minutes=1))
+
+    assert tuple(result.analysis.specialist for result in bundle.results) == (
+        SpecialistKind.METRICS,
+    )
+    assert [(failure.specialist, failure.code) for failure in bundle.failures] == [
+        (SpecialistKind.TRACE, "MCP_TIMEOUT")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_all_discovery_transport_failures_are_retained_in_fixed_order() -> None:
+    capabilities = CapabilitySet(
+        by_specialist={
+            SpecialistKind.METRICS: (),
+            SpecialistKind.TRACE: (),
+            SpecialistKind.LOG: (),
+        },
+        discovery_failures=tuple(
+            DiscoveryFailure(specialist=kind, code="MCP_TRANSPORT") for kind in ORDER
+        ),
+    )
+
+    async def unexpected_invoke(
+        request: SpecialistRequest, kind: SpecialistKind, deadline: datetime
+    ) -> SpecialistAnalysisResult:
+        raise AssertionError("all discovery failures must prevent branch execution")
+
+    bundle = await SpecialistAnalysisWorkflow(
+        cast(BranchInvoker, unexpected_invoke), clock=lambda: NOW
+    ).run(_context(), capabilities, deadline=NOW + timedelta(minutes=1))
+
+    assert [(failure.specialist, failure.code) for failure in bundle.failures] == [
+        (kind, "MCP_TRANSPORT") for kind in ORDER
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "context",
     [
@@ -231,6 +287,7 @@ async def test_unsafe_or_unsupported_scope_never_creates_a_branch(
     ("failure", "expected_code"),
     [
         (TimeoutError("secret timeout detail"), "ANALYSIS_TIMEOUT"),
+        (McpResultInvalidError(), "MCP_RESULT_INVALID"),
         (
             SpecialistAnalysisValidationError("ANALYSIS_SCHEMA_INVALID"),
             "ANALYSIS_SCHEMA_INVALID",
@@ -244,7 +301,7 @@ async def test_unsafe_or_unsupported_scope_never_creates_a_branch(
             "ANALYSIS_UNKNOWN_EVIDENCE",
         ),
     ],
-    ids=["timeout", "schema", "payload", "ownership"],
+    ids=["timeout", "invalid-result", "schema", "payload", "ownership"],
 )
 async def test_one_permanent_failure_preserves_other_results_without_secret_text(
     failure: Exception, expected_code: str

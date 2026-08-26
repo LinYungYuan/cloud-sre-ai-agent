@@ -58,6 +58,10 @@ def build_evidence_chunks(
 
 
 def _validate_limits(chunk_chars: int, max_chunks: int, max_total_chars: int) -> None:
+    if any(
+        type(value) is not int for value in (chunk_chars, max_chunks, max_total_chars)
+    ):
+        raise ValueError("evidence budgets must be integers")
     if not 0 < chunk_chars <= _MAX_CHUNK_CHARS:
         raise ValueError("chunk_chars exceeds the persisted evidence contract")
     if not 0 < max_chunks <= _MAX_CHUNKS:

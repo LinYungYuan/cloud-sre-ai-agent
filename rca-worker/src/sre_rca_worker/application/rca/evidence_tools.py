@@ -20,6 +20,7 @@ from sre_rca_worker.domain.evidence.chunking import (
     McpPayloadTooLargeError,
     build_evidence_chunks,
 )
+from sre_rca_worker.domain.evidence.errors import McpResultInvalidError
 from sre_rca_worker.domain.evidence.models import EvidenceDraft, EvidenceReference
 from sre_rca_worker.integrations.mcp.models import AllowedTool, SpecialistKind
 from sre_rca_worker.persistence.repositories.rca import (
@@ -76,13 +77,16 @@ class EvidenceToolSession:
     ) -> None:
         if deadline.tzinfo is None or deadline.utcoffset() is None:
             raise ValueError("deadline must be timezone-aware")
-        if not 0 < max_tool_calls <= 5:
+        if type(max_tool_calls) is not int or not 0 < max_tool_calls <= 5:
             raise ValueError("max_tool_calls must be between 1 and 5")
-        if not 0 < chunk_chars <= _MAX_CHUNK_CHARS:
+        if type(chunk_chars) is not int or not 0 < chunk_chars <= _MAX_CHUNK_CHARS:
             raise ValueError("chunk_chars exceeds the evidence contract")
-        if not 0 < max_chunks <= _MAX_CHUNKS:
+        if type(max_chunks) is not int or not 0 < max_chunks <= _MAX_CHUNKS:
             raise ValueError("max_chunks exceeds the evidence contract")
-        if not 0 < max_total_chars <= _MAX_TOTAL_CHARS:
+        if (
+            type(max_total_chars) is not int
+            or not 0 < max_total_chars <= _MAX_TOTAL_CHARS
+        ):
             raise ValueError("max_total_chars exceeds the evidence contract")
         if max_total_chars > chunk_chars * max_chunks:
             raise ValueError("max_total_chars exceeds chunk capacity")
@@ -151,6 +155,9 @@ class EvidenceToolSession:
             except McpPayloadTooLargeError:
                 self._terminal_error_code = "MCP_PAYLOAD_TOO_LARGE"
                 raise EvidenceToolError("MCP_PAYLOAD_TOO_LARGE") from None
+            except McpResultInvalidError:
+                self._terminal_error_code = "MCP_RESULT_INVALID"
+                raise EvidenceToolError("MCP_RESULT_INVALID") from None
             except AmbiguousEvidenceError:
                 self._terminal_error_code = "ANALYSIS_UNKNOWN_EVIDENCE"
                 raise EvidenceToolError("ANALYSIS_UNKNOWN_EVIDENCE") from None

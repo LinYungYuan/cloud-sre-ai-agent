@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any, Self, cast
 from uuid import uuid4
@@ -7,6 +8,7 @@ from uuid import uuid4
 import pytest
 
 from sre_rca_worker.application.rca.job_lifecycle import (
+    DeadlineExceededError,
     JobDisposition,
     RcaJobHandler,
     RcaProcessingResult,
@@ -159,6 +161,81 @@ async def test_unclaimed_expiry_uses_the_same_lower_configured_deadline() -> Non
     assert "LEAST(job.created_at + interval '5 minutes'" in select_sql
     assert "make_interval(secs => :configured)" in select_sql
     assert select_params == {"id": message.worker_job_id, "configured": 45}
+
+
+@pytest.mark.asyncio
+async def test_hung_processor_is_cancelled_at_claim_deadline_and_settled_terminally() -> (
+    None
+):
+    message = _message()
+    now = datetime.now(UTC)
+    claim = type("Claim", (), {})()
+    claim.worker_job_id = message.worker_job_id
+    claim.rca_run_id = message.rca_run_id
+    claim.incident_id = message.incident_id
+    claim.attempt_number = 1
+    claim.deadline_at = now + timedelta(milliseconds=40)
+    claim.lease_owner = "worker"
+    started = False
+    cancelled = False
+    settled: list[str] = []
+    never = asyncio.Event()
+
+    async def process(_claim):
+        nonlocal started, cancelled
+        started = True
+        try:
+            await never.wait()
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    handler = RcaJobHandler(
+        cast(Any, _Sessions()),
+        process,
+        worker_id="worker",
+        lease_renewal_seconds=1,
+    )
+
+    async def fake_claim(_message):
+        return claim
+
+    async def fake_settle_failure(_claim, failure_code):
+        settled.append(failure_code)
+        return JobDisposition.ACK
+
+    handler._claim = fake_claim
+    handler._settle_failure = fake_settle_failure
+
+    assert await handler.handle(message) is JobDisposition.ACK
+    assert started is True
+    assert cancelled is True
+    assert settled == ["DEADLINE_EXCEEDED"]
+
+
+@pytest.mark.asyncio
+async def test_lease_renewal_does_not_open_db_after_deadline() -> None:
+    now = datetime.now(UTC)
+    claim = type("Claim", (), {})()
+    claim.worker_job_id = uuid4()
+    claim.rca_run_id = uuid4()
+    claim.incident_id = uuid4()
+    claim.attempt_number = 1
+    claim.deadline_at = now + timedelta(milliseconds=10)
+    claim.lease_owner = "worker"
+    processor = asyncio.create_task(asyncio.Event().wait())
+    handler = RcaJobHandler(
+        cast(Any, _Sessions()),
+        lambda _claim: _completed(),
+        worker_id="worker",
+        lease_renewal_seconds=1,
+    )
+    try:
+        with pytest.raises(DeadlineExceededError):
+            await handler._renew_lease(claim, processor)
+    finally:
+        processor.cancel()
+        await asyncio.gather(processor, return_exceptions=True)
 
 
 async def _completed() -> RcaProcessingResult:

@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from referencing import Registry
 
 from sre_rca_worker.domain.evidence.chunking import McpPayloadTooLargeError
+from sre_rca_worker.domain.evidence.errors import McpResultInvalidError
 from sre_rca_worker.domain.evidence.models import EvidenceDraft, Finding, _aware
 from sre_rca_worker.integrations.mcp.client import McpClient
 from sre_rca_worker.integrations.mcp.models import (
@@ -98,7 +99,7 @@ class McpSpecialist:
         *,
         max_response_bytes: int = 2 * 1024 * 1024,
     ) -> None:
-        if max_response_bytes <= 0:
+        if type(max_response_bytes) is not int or max_response_bytes <= 0:
             raise ValueError("max_response_bytes must be positive")
         if max_response_bytes > 2 * 1024 * 1024:
             raise ValueError("max_response_bytes must not exceed 2 MiB")
@@ -157,16 +158,20 @@ class McpSpecialist:
                 raise McpPayloadTooLargeError(
                     "MCP response exceeds configured size limit"
                 )
+            if not isinstance(raw, bytes):
+                raise McpResultInvalidError
             try:
-                structured = json.loads(raw)
+                structured = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
-                structured = {"content": raw.decode("utf-8", errors="replace")}
+                raise McpResultInvalidError from None
             if not isinstance(structured, (dict, list)):
-                structured = {"value": structured}
-            normalized = self._normalize_structured(structured, request)
+                raise McpResultInvalidError
+            try:
+                normalized = self._normalize_structured(structured, request)
+            except Exception:  # noqa: BLE001 - close the untrusted result boundary
+                raise McpResultInvalidError from None
             if normalized is None:
-                missing.append("INVALID_TRACE_EVIDENCE")
-                continue
+                raise McpResultInvalidError
             structured = normalized
             encoded_input = json.dumps(
                 arguments, sort_keys=True, separators=(",", ":")

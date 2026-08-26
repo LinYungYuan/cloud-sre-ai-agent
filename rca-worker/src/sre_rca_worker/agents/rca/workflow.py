@@ -11,6 +11,7 @@ from sre_rca_worker.agents.rca.models import (
 )
 from sre_rca_worker.agents.rca.router import RuleRouter
 from sre_rca_worker.agents.specialists.base import (
+    McpResultInvalidError,
     Specialist,
     SpecialistRequest,
     SpecialistResult,
@@ -40,12 +41,19 @@ class RcaWorkflow:
             raise ValueError("deadline must be timezone-aware")
         if deadline <= datetime.now(UTC):
             raise TimeoutError("RCA deadline expired before routing")
+        results: dict[SpecialistKind, SpecialistResult] = {}
+        failures: dict[SpecialistKind, SpecialistFailure] = {
+            failure.specialist: SpecialistFailure(
+                specialist=failure.specialist,
+                code=failure.code,
+            )
+            for failure in capabilities.discovery_failures
+        }
         plan = self._router.route(context, capabilities)
         if not plan.selected:
-            return InvestigationBundle()
-
-        results: dict[SpecialistKind, SpecialistResult] = {}
-        failures: dict[SpecialistKind, SpecialistFailure] = {}
+            return InvestigationBundle(
+                failures=tuple(failures[kind] for kind in _ORDER if kind in failures)
+            )
 
         async def invoke(kind: SpecialistKind) -> None:
             request = SpecialistRequest(
@@ -80,6 +88,10 @@ class RcaWorkflow:
             except (ConnectionError, OSError):
                 failures[kind] = SpecialistFailure(
                     specialist=kind, code="SPECIALIST_TRANSPORT"
+                )
+            except McpResultInvalidError:
+                failures[kind] = SpecialistFailure(
+                    specialist=kind, code="MCP_RESULT_INVALID"
                 )
             except ValueError:
                 failures[kind] = SpecialistFailure(

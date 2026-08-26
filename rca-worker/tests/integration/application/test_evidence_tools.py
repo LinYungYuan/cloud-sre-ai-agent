@@ -48,6 +48,12 @@ class CountingClient:
         return b'{"cpu":85.23,"series":[1,2,3]}'
 
 
+class InvalidResultClient(CountingClient):
+    async def call(self, tool_name, arguments, deadline):
+        self.calls += 1
+        return b"not-json"
+
+
 class DraftCollector:
     kind = MetricsSpecialist.kind
 
@@ -580,6 +586,46 @@ async def test_failed_transaction_rolls_back_all_evidence_and_returns_no_receipt
         ]
         assert all("sensitive" not in str(failure) for failure in failures)
         assert client.calls == 2
+        async with sessions() as session:
+            count = await session.scalar(
+                text("SELECT count(*) FROM evidence_records WHERE rca_run_id=:run"),
+                {"run": run_id},
+            )
+        assert count == 0
+    finally:
+        await _cleanup_run(
+            sessions,
+            run_id=run_id,
+            team_id=parents[0],
+            project_id=parents[1],
+            environment_id=parents[2],
+            incident_id=parents[3],
+        )
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_invalid_mcp_result_persists_no_evidence_or_receipt_in_postgres() -> None:
+    engine = create_async_engine(DATABASE_URL)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    run_id, specialist_id = uuid4(), uuid4()
+    parents = await _seed_run(
+        sessions, run_id=run_id, specialist_ids={"METRICS": specialist_id}
+    )
+    client = InvalidResultClient()
+    try:
+        tools = _tools(
+            request=_request(run_id),
+            specialist_run_id=specialist_id,
+            collector=MetricsSpecialist(lambda: client),
+            sessions=sessions,
+        )
+
+        with pytest.raises(EvidenceToolError) as raised:
+            await tools.collect_evidence()
+
+        assert raised.value.code == "MCP_RESULT_INVALID"
+        assert tools.known_evidence == ()
         async with sessions() as session:
             count = await session.scalar(
                 text("SELECT count(*) FROM evidence_records WHERE rca_run_id=:run"),

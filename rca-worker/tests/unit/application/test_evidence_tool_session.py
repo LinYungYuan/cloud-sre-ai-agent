@@ -299,6 +299,27 @@ def test_public_tool_signatures_do_not_accept_model_controlled_routing() -> None
     ) == ("self", "evidence_id", "chunk_index")
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("max_tool_calls", True),
+        ("max_tool_calls", 5.0),
+        ("chunk_chars", True),
+        ("chunk_chars", 8_000.0),
+        ("max_chunks", True),
+        ("max_chunks", 4.0),
+        ("max_total_chars", True),
+        ("max_total_chars", 32_000.0),
+    ],
+)
+def test_numeric_budget_constructor_rejects_bool_and_non_integer_values(
+    field: str, value: object
+) -> None:
+    kwargs: dict[str, object] = {field: value}
+    with pytest.raises(ValueError):
+        _session(_Collector(), _Sessions(), **kwargs)  # type: ignore[arg-type]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "specialist_request",

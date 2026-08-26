@@ -17,7 +17,7 @@ from google.adk.models.llm_response import LlmResponse
 from google.genai.types import Content, Part
 from pydantic import Field
 
-from sre_rca_worker.agents.rca.adk_agent import AdkRcaAgent
+from sre_rca_worker.agents.rca.adk_agent import AdkRcaAgent, RootRcaFailure
 from sre_rca_worker.agents.rca.synthesizer import RcaSynthesizer
 from sre_rca_worker.agents.skills.loader import load_skill
 from sre_rca_worker.domain.evidence.analysis import (
@@ -329,7 +329,7 @@ async def test_root_zero_corrective_retries_returns_schema_code_after_one_model_
     invalid = _complete_report(known).model_copy(update={"hypotheses": ()})
     agent = _ResponseAgent((invalid.model_dump_json(),), corrective_retries=0)
 
-    with pytest.raises(ValueError, match="REPORT_SCHEMA_INVALID"):
+    with pytest.raises(RootRcaFailure) as raised:
         await agent.synthesize(
             alert_issue="CPU high",
             specialist_analyses=(_analysis(SpecialistKind.METRICS, known),),
@@ -337,6 +337,7 @@ async def test_root_zero_corrective_retries_returns_schema_code_after_one_model_
             deadline=NOW + timedelta(seconds=2),
         )
 
+    assert raised.value.code == "VALIDATION_FAILED"
     assert len(agent.prompts) == 1
 
 
@@ -460,7 +461,7 @@ async def test_active_boundary_rejects_constructed_analysis_before_serialization
     )
     agent = _ResponseAgent((_complete_report(known).model_dump_json(),))
 
-    with pytest.raises(ValueError) as raised:
+    with pytest.raises(RootRcaFailure) as raised:
         await agent.synthesize(
             alert_issue="CPU high",
             specialist_analyses=(unsafe,),
@@ -468,7 +469,7 @@ async def test_active_boundary_rejects_constructed_analysis_before_serialization
             deadline=NOW + timedelta(minutes=1),
         )
 
-    assert str(raised.value) == "REPORT_SCHEMA_INVALID"
+    assert raised.value.code == "VALIDATION_FAILED"
     assert secret not in str(raised.value)
     assert "delete_everything" not in str(raised.value)
     assert agent.prompts == []
@@ -514,7 +515,7 @@ async def test_active_boundary_rejects_non_exact_reference_models(
     )
     agent = _ResponseAgent((_complete_report(base).model_dump_json(),))
 
-    with pytest.raises(ValueError) as raised:
+    with pytest.raises(RootRcaFailure) as raised:
         await agent.synthesize(
             alert_issue="CPU high",
             specialist_analyses=(_analysis(SpecialistKind.METRICS, base),),
@@ -525,7 +526,7 @@ async def test_active_boundary_rejects_non_exact_reference_models(
             deadline=NOW + timedelta(minutes=1),
         )
 
-    assert str(raised.value) == "REPORT_SCHEMA_INVALID"
+    assert raised.value.code == "VALIDATION_FAILED"
     assert secret not in str(raised.value)
     assert "delete_everything" not in str(raised.value)
     assert agent.prompts == []
@@ -543,7 +544,7 @@ async def test_active_boundary_rejects_analysis_citation_outside_known_exact_pai
     )
     agent = _ResponseAgent((_complete_report(known).model_dump_json(),))
 
-    with pytest.raises(ValueError) as raised:
+    with pytest.raises(RootRcaFailure) as raised:
         await agent.synthesize(
             alert_issue="CPU high",
             specialist_analyses=(_analysis(SpecialistKind.METRICS, wrong_partition),),
@@ -551,7 +552,7 @@ async def test_active_boundary_rejects_analysis_citation_outside_known_exact_pai
             deadline=NOW + timedelta(minutes=1),
         )
 
-    assert str(raised.value) == "UNKNOWN_EVIDENCE_REFERENCE"
+    assert raised.value.code == "VALIDATION_FAILED"
     assert str(wrong_partition.id) not in str(raised.value)
     assert agent.prompts == []
 
@@ -654,7 +655,7 @@ async def test_deadline_expiry_prevents_corrective_model_call() -> None:
         clock=lambda: next(times),
     )
 
-    with pytest.raises(TimeoutError, match="RCA synthesis deadline expired"):
+    with pytest.raises(RootRcaFailure) as raised:
         await agent.synthesize(
             alert_issue="CPU high",
             specialist_analyses=(_analysis(SpecialistKind.METRICS, known),),
@@ -662,7 +663,29 @@ async def test_deadline_expiry_prevents_corrective_model_call() -> None:
             deadline=NOW + timedelta(minutes=1),
         )
 
+    assert raised.value.code == "DEADLINE_EXCEEDED"
     assert len(agent.prompts) == 1
+
+
+@pytest.mark.asyncio
+async def test_unexpected_root_model_failure_is_a_safe_internal_failure() -> None:
+    class FailingAgent(_ResponseAgent):
+        async def _run_once(self, prompt: str, *, deadline: datetime) -> str:
+            raise RuntimeError("secret model response detail")
+
+    known = _ref()
+    agent = FailingAgent(())
+
+    with pytest.raises(RootRcaFailure) as raised:
+        await agent.synthesize(
+            alert_issue="CPU high",
+            specialist_analyses=(_analysis(SpecialistKind.METRICS, known),),
+            known_evidence=(known,),
+            deadline=NOW + timedelta(seconds=2),
+        )
+
+    assert raised.value.code == "INTERNAL_ERROR"
+    assert "secret" not in str(raised.value)
 
 
 @pytest.mark.asyncio

@@ -32,6 +32,21 @@ _ANALYSIS_FIELDS = frozenset(
 )
 _OBSERVATION_FIELDS = frozenset({"statement", "confidence", "relation", "evidence"})
 _REFERENCE_FIELDS = frozenset({"id", "partition_timestamp"})
+RootFailureCode = Literal[
+    "DEADLINE_EXCEEDED",
+    "VALIDATION_FAILED",
+    "INTERNAL_ERROR",
+]
+
+
+class RootRcaFailure(ValueError):
+    """A safe terminal failure from Root RCA synthesis."""
+
+    def __init__(self, code: RootFailureCode) -> None:
+        allowed = {"DEADLINE_EXCEEDED", "VALIDATION_FAILED", "INTERNAL_ERROR"}
+        safe_code = code if type(code) is str and code in allowed else "INTERNAL_ERROR"
+        self.code: RootFailureCode = cast(RootFailureCode, safe_code)
+        super().__init__(self.code)
 
 
 def _reject_boundary(code: _ValidationCode = "REPORT_SCHEMA_INVALID") -> NoReturn:
@@ -247,10 +262,13 @@ class AdkRcaAgent:
         known_evidence: tuple[EvidenceReference, ...],
         deadline: datetime,
     ) -> RcaReportDraft:
-        canonical_analyses, canonical_known = _canonical_active_inputs(
-            specialist_analyses,
-            known_evidence,
-        )
+        try:
+            canonical_analyses, canonical_known = _canonical_active_inputs(
+                specialist_analyses,
+                known_evidence,
+            )
+        except ValueError:
+            raise RootRcaFailure("VALIDATION_FAILED") from None
         prompt = self._build_active_prompt(
             alert_issue=alert_issue,
             specialist_analyses=canonical_analyses,
@@ -275,7 +293,10 @@ class AdkRcaAgent:
         deadline: datetime,
     ) -> RcaReportDraft:
         """Serve DISABLED/SHADOW rollback until the ACTIVE rollout is complete."""
-        canonical_known = _canonical_known_evidence(known_evidence)
+        try:
+            canonical_known = _canonical_known_evidence(known_evidence)
+        except ValueError:
+            raise RootRcaFailure("VALIDATION_FAILED") from None
         prompt = self._build_legacy_prompt(
             alert_issue=alert_issue,
             evidence_summaries=evidence_summaries,
@@ -298,8 +319,17 @@ class AdkRcaAgent:
             raise ValueError("deadline must be timezone-aware")
         approved_prompt = prompt
         for attempt in range(self._corrective_retries + 1):
-            self._remaining_seconds(deadline)
-            final_text = await self._run_once(prompt, deadline=deadline)
+            try:
+                self._remaining_seconds(deadline)
+                final_text = await self._run_once(prompt, deadline=deadline)
+            except asyncio.CancelledError:
+                raise
+            except TimeoutError:
+                raise RootRcaFailure("DEADLINE_EXCEEDED") from None
+            except RootRcaFailure:
+                raise
+            except Exception:  # noqa: BLE001 - keep Root model details out of failures
+                raise RootRcaFailure("INTERNAL_ERROR") from None
             try:
                 draft = RcaReportDraft.model_validate_json(final_text)
             except (TypeError, ValidationError, ValueError):
@@ -317,7 +347,7 @@ class AdkRcaAgent:
                         else "REPORT_SCHEMA_INVALID"
                     )
             if attempt == self._corrective_retries:
-                raise ValueError(validation_code) from None
+                raise RootRcaFailure("VALIDATION_FAILED") from None
             prompt = self._correction_prompt(
                 approved_prompt,
                 code=validation_code,

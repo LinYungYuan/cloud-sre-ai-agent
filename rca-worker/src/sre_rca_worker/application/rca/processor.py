@@ -13,7 +13,7 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from sre_rca_worker.agents.rca.adk_agent import AdkRcaAgent
+from sre_rca_worker.agents.rca.adk_agent import AdkRcaAgent, RootRcaFailure
 from sre_rca_worker.agents.rca.models import (
     IncidentContext,
     InvestigationBundle,
@@ -105,27 +105,33 @@ class ProductionRcaProcessor:
             context.scope,
             self._settings.mcp_capability_manifest,
             self._skills.required_capabilities(),
+            deadline=claim.deadline_at,
         )
         mode = getattr(
             self._settings,
             "specialist_analysis_mode",
             SpecialistAnalysisMode.DISABLED,
         )
-        if mode is SpecialistAnalysisMode.DISABLED:
-            report = await self._run_legacy(
-                claim,
-                context,
-                capabilities,
-                clients,
-            )
-        else:
-            report = await self._run_specialist_analysis(
-                claim,
-                context,
-                capabilities,
-                clients,
-                mode=mode,
-            )
+        try:
+            if mode is SpecialistAnalysisMode.DISABLED:
+                report = await self._run_legacy(
+                    claim,
+                    context,
+                    capabilities,
+                    clients,
+                )
+            else:
+                report = await self._run_specialist_analysis(
+                    claim,
+                    context,
+                    capabilities,
+                    clients,
+                    mode=mode,
+                )
+        except RootRcaFailure as failure:
+            report = RcaSynthesizer().failed_analysis()
+            await self._persist_report(claim, report)
+            return RcaProcessingResult(status="FAILED", failure_code=failure.code)
         await self._persist_report(claim, report)
         return RcaProcessingResult(status=report.status)
 
@@ -586,6 +592,9 @@ class ProductionRcaProcessor:
             "SPECIALIST_TRANSPORT": "MCP_TRANSPORT",
             "SPECIALIST_VALIDATION": "VALIDATION_FAILED",
             "SPECIALIST_FAILED": "INTERNAL_ERROR",
+            "MCP_TIMEOUT": "MCP_TIMEOUT",
+            "MCP_TRANSPORT": "MCP_TRANSPORT",
+            "MCP_RESULT_INVALID": "MCP_RESULT_INVALID",
         }
         async with self._sessions() as session, session.begin():
             for failure in failures:
@@ -615,7 +624,8 @@ class ProductionRcaProcessor:
             and not bundle.results
             and bundle.failures
             and all(
-                failure.code == "SPECIALIST_TRANSPORT" for failure in bundle.failures
+                failure.code in {"SPECIALIST_TRANSPORT", "MCP_TRANSPORT"}
+                for failure in bundle.failures
             )
         ):
             raise ConnectionError("transient MCP failure")

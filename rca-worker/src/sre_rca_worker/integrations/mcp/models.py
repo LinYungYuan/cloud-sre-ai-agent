@@ -71,10 +71,25 @@ class AllowedTool(BaseModel):
         Draft202012Validator(self.input_schema).validate(arguments)
 
 
+DiscoveryFailureCode = Literal[
+    "MCP_TIMEOUT",
+    "MCP_TRANSPORT",
+    "MCP_RESULT_INVALID",
+]
+
+
+class DiscoveryFailure(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    specialist: SpecialistKind
+    code: DiscoveryFailureCode
+
+
 class CapabilitySet(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     by_specialist: Mapping[SpecialistKind, tuple[AllowedTool, ...]]
+    discovery_failures: tuple[DiscoveryFailure, ...] = ()
 
     def for_specialist(self, kind: SpecialistKind) -> tuple[AllowedTool, ...]:
         return self.by_specialist.get(kind, ())

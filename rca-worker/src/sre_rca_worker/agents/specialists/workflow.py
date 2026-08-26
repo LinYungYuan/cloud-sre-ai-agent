@@ -19,6 +19,7 @@ from sre_rca_worker.agents.specialists.validator import (
 )
 from sre_rca_worker.domain.evidence.analysis import StableSpecialistCode
 from sre_rca_worker.domain.evidence.chunking import McpPayloadTooLargeError
+from sre_rca_worker.domain.evidence.errors import McpResultInvalidError
 from sre_rca_worker.integrations.mcp.models import CapabilitySet, SpecialistKind
 
 _ORDER = (SpecialistKind.METRICS, SpecialistKind.TRACE, SpecialistKind.LOG)
@@ -62,12 +63,19 @@ class SpecialistAnalysisWorkflow:
         if deadline.tzinfo is None or deadline.utcoffset() is None:
             raise ValueError("deadline must be timezone-aware")
 
+        results: dict[SpecialistKind, SpecialistAnalysisResult] = {}
+        failures: dict[SpecialistKind, SpecialistFailure] = {
+            failure.specialist: SpecialistFailure(
+                specialist=failure.specialist,
+                code=failure.code,
+            )
+            for failure in capabilities.discovery_failures
+        }
         plan = self._router.route(context, capabilities)
         if not plan.selected:
-            return SpecialistAnalysisBundle()
-
-        results: dict[SpecialistKind, SpecialistAnalysisResult] = {}
-        failures: dict[SpecialistKind, SpecialistFailure] = {}
+            return SpecialistAnalysisBundle(
+                failures=tuple(failures[kind] for kind in _ORDER if kind in failures)
+            )
 
         async def invoke(kind: SpecialistKind) -> None:
             request = SpecialistRequest(
@@ -99,6 +107,9 @@ class SpecialistAnalysisWorkflow:
                     return
                 except McpPayloadTooLargeError:
                     failures[kind] = self._failure(kind, "MCP_PAYLOAD_TOO_LARGE")
+                    return
+                except McpResultInvalidError:
+                    failures[kind] = self._failure(kind, "MCP_RESULT_INVALID")
                     return
                 except SpecialistAnalysisValidationError as error:
                     failures[kind] = self._failure(

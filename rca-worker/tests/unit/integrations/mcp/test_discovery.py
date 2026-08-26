@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import pytest
@@ -9,6 +9,7 @@ from sre_rca_worker.integrations.mcp.factories import McpClientFactory
 from sre_rca_worker.integrations.mcp.models import (
     CloudScope,
     DiscoveredTool,
+    DiscoveryFailure,
     ManifestEntry,
     SpecialistKind,
 )
@@ -125,3 +126,161 @@ async def test_discovery_leaves_specialist_empty_when_required_capability_has_no
     )
 
     assert capabilities.for_specialist(SpecialistKind.METRICS) == ()
+
+
+@pytest.mark.asyncio
+async def test_discovery_does_not_construct_specialists_without_required_manifest_entry(
+    safe_scope: CloudScope,
+) -> None:
+    class RecordingFactory(FakeFactory):
+        def __init__(self, clients):
+            super().__init__(clients)
+            self.constructed: list[SpecialistKind] = []
+
+        def for_specialist(self, kind, scope):
+            self.constructed.append(kind)
+            return super().for_specialist(kind, scope)
+
+    factory = RecordingFactory(
+        {
+            SpecialistKind.METRICS: FakeClient((_tool("metrics_query"),)),
+            SpecialistKind.TRACE: FakeClient(()),
+            SpecialistKind.LOG: FakeClient(()),
+        }
+    )
+
+    capabilities, clients = await discover_capabilities(
+        cast(McpClientFactory, factory),
+        safe_scope,
+        (),
+        {
+            SpecialistKind.METRICS: ("metrics.query",),
+            SpecialistKind.TRACE: ("trace.query",),
+            SpecialistKind.LOG: ("log.query",),
+        },
+        deadline=datetime.now(UTC) + timedelta(seconds=1),
+    )
+
+    assert capabilities.by_specialist == {}
+    assert clients == {}
+    assert factory.constructed == []
+
+
+@pytest.mark.asyncio
+async def test_discovery_keeps_two_successes_when_one_endpoint_times_out_in_fixed_order(
+    safe_scope: CloudScope,
+) -> None:
+    class KindClient(FakeClient):
+        def __init__(self, kind: SpecialistKind, failure: Exception | None = None):
+            super().__init__(())
+            self.endpoint_identity = kind.value
+            self.failure = failure
+
+        async def list_tools(self):
+            self.list_tools_calls += 1
+            if self.failure is not None:
+                raise self.failure
+            return (
+                DiscoveredTool(
+                    name=f"{self.endpoint_identity}_query",
+                    input_schema=_manifest(
+                        f"{self.endpoint_identity}.query",
+                        endpoint_identity=self.endpoint_identity,
+                    ).input_schema,
+                    annotations={"readOnlyHint": True},
+                ),
+            )
+
+    class OrderedFactory:
+        def __init__(self):
+            self.clients = {
+                SpecialistKind.METRICS: KindClient(SpecialistKind.METRICS),
+                SpecialistKind.TRACE: KindClient(
+                    SpecialistKind.TRACE, TimeoutError("secret endpoint detail")
+                ),
+                SpecialistKind.LOG: KindClient(SpecialistKind.LOG),
+            }
+
+        def for_specialist(self, kind, scope):
+            return self.clients[kind]
+
+    factory = OrderedFactory()
+    manifest = tuple(
+        _manifest(f"{kind.value}.query", endpoint_identity=kind.value)
+        for kind in SpecialistKind
+    )
+    capabilities, _ = await discover_capabilities(
+        cast(McpClientFactory, factory),
+        safe_scope,
+        manifest,
+        {kind: (f"{kind.value}.query",) for kind in SpecialistKind},
+        deadline=datetime.now(UTC) + timedelta(seconds=1),
+    )
+
+    assert tuple(capabilities.by_specialist) == (
+        SpecialistKind.METRICS,
+        SpecialistKind.TRACE,
+        SpecialistKind.LOG,
+    )
+    assert capabilities.for_specialist(SpecialistKind.METRICS)
+    assert capabilities.for_specialist(SpecialistKind.TRACE) == ()
+    assert capabilities.for_specialist(SpecialistKind.LOG)
+    assert capabilities.discovery_failures == (
+        DiscoveryFailure(specialist=SpecialistKind.TRACE, code="MCP_TIMEOUT"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_discovery_transport_failure_is_stable_and_does_not_block_other_endpoints(
+    safe_scope: CloudScope,
+) -> None:
+    class Client:
+        def __init__(self, kind: SpecialistKind, failure: Exception | None = None):
+            self.endpoint_identity = kind.value
+            self.failure = failure
+            self.list_tools_calls = 0
+
+        async def list_tools(self):
+            self.list_tools_calls += 1
+            if self.failure:
+                raise self.failure
+            entry = _manifest(
+                f"{self.endpoint_identity}.query",
+                endpoint_identity=self.endpoint_identity,
+            )
+            return (
+                DiscoveredTool(
+                    name=f"{self.endpoint_identity}_query",
+                    input_schema=entry.input_schema,
+                    annotations={"readOnlyHint": True},
+                ),
+            )
+
+    clients = {
+        SpecialistKind.METRICS: Client(SpecialistKind.METRICS, OSError("secret")),
+        SpecialistKind.TRACE: Client(SpecialistKind.TRACE),
+        SpecialistKind.LOG: Client(SpecialistKind.LOG),
+    }
+
+    class Factory:
+        def for_specialist(self, kind, scope):
+            return clients[kind]
+
+    manifest = tuple(
+        _manifest(f"{kind.value}.query", endpoint_identity=kind.value)
+        for kind in SpecialistKind
+    )
+    capabilities, _ = await discover_capabilities(
+        cast(McpClientFactory, Factory()),
+        safe_scope,
+        manifest,
+        {kind: (f"{kind.value}.query",) for kind in SpecialistKind},
+        deadline=datetime.now(UTC) + timedelta(seconds=1),
+    )
+
+    assert capabilities.for_specialist(SpecialistKind.METRICS) == ()
+    assert capabilities.for_specialist(SpecialistKind.TRACE)
+    assert capabilities.for_specialist(SpecialistKind.LOG)
+    assert capabilities.discovery_failures == (
+        DiscoveryFailure(specialist=SpecialistKind.METRICS, code="MCP_TRANSPORT"),
+    )

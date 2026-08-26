@@ -20,9 +20,28 @@ class JobDisposition(StrEnum):
     NACK = "NACK"
 
 
+LifecycleFailureCode = Literal[
+    "DEADLINE_EXCEEDED",
+    "MCP_TIMEOUT",
+    "MCP_TRANSPORT",
+    "POLICY_DENIED",
+    "VALIDATION_FAILED",
+    "INTERNAL_ERROR",
+    "NO_SAFE_MCP_CAPABILITY",
+    "MCP_PAYLOAD_TOO_LARGE",
+    "MCP_RESULT_INVALID",
+    "ANALYSIS_TIMEOUT",
+    "ANALYSIS_SCHEMA_INVALID",
+    "ANALYSIS_UNKNOWN_EVIDENCE",
+    "ANALYSIS_INPUT_TRUNCATED",
+    "ANALYSIS_FAILED",
+]
+
+
 class RcaProcessingResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     status: Literal["COMPLETE", "PARTIAL", "FAILED"]
+    failure_code: LifecycleFailureCode | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,11 +87,17 @@ class RcaJobHandler:
             result = await self._execute_with_lease(claim)
         except LeaseLostError:
             return JobDisposition.NACK
-        except Exception:  # noqa: BLE001 - durable boundary stores only safe codes
-            return await self._settle_failure(claim)
+        except DeadlineExceededError:
+            return await self._settle_failure(claim, "DEADLINE_EXCEEDED")
+        except Exception as error:  # noqa: BLE001 - durable boundary stores only safe codes
+            return await self._settle_failure(claim, self._classify_failure(error))
         return await self._settle_success(claim, result)
 
     async def _execute_with_lease(self, claim: RcaJobClaim) -> RcaProcessingResult:
+        remaining = self._remaining_seconds(claim.deadline_at)
+        if remaining <= 0:
+            raise DeadlineExceededError
+
         async def invoke() -> RcaProcessingResult:
             return await self._processor(claim)
 
@@ -80,9 +105,15 @@ class RcaJobHandler:
         renewal = asyncio.create_task(self._renew_lease(claim, processor))
         try:
             done, _ = await asyncio.wait(
-                {processor, renewal}, return_when=asyncio.FIRST_COMPLETED
+                {processor, renewal},
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
             )
+            if not done:
+                raise DeadlineExceededError
             if processor in done:
+                if self._remaining_seconds(claim.deadline_at) <= 0:
+                    raise DeadlineExceededError
                 return await processor
             if renewal in done:
                 await renewal
@@ -98,21 +129,45 @@ class RcaJobHandler:
         self, claim: RcaJobClaim, processor: asyncio.Task[RcaProcessingResult]
     ) -> None:
         while not processor.done():
-            await asyncio.sleep(self._lease_renewal_seconds)
+            remaining = self._remaining_seconds(claim.deadline_at)
+            if remaining <= 0:
+                raise DeadlineExceededError
+            await asyncio.sleep(min(self._lease_renewal_seconds, remaining))
             if processor.done():
                 return
-            async with self._sessions() as session, session.begin():
-                renewed = await session.scalar(
-                    text(
-                        """UPDATE worker_jobs
-                           SET lease_expires_at=now()+interval '60 seconds', updated_at=now()
-                           WHERE id=:id AND status='RUNNING' AND lease_owner=:owner
-                           RETURNING id"""
-                    ),
-                    {"id": claim.worker_job_id, "owner": claim.lease_owner},
-                )
+            remaining = self._remaining_seconds(claim.deadline_at)
+            if remaining <= 0:
+                raise DeadlineExceededError
+            try:
+                async with asyncio.timeout(remaining):
+                    async with self._sessions() as session, session.begin():
+                        renewed = await session.scalar(
+                            text(
+                                """UPDATE worker_jobs
+                                   SET lease_expires_at=now()+interval '60 seconds', updated_at=now()
+                                   WHERE id=:id AND status='RUNNING' AND lease_owner=:owner
+                                   RETURNING id"""
+                            ),
+                            {"id": claim.worker_job_id, "owner": claim.lease_owner},
+                        )
+            except TimeoutError:
+                raise DeadlineExceededError from None
             if renewed is None:
                 raise LeaseLostError
+
+    @staticmethod
+    def _remaining_seconds(deadline: datetime) -> float:
+        if deadline.tzinfo is None or deadline.utcoffset() is None:
+            raise ValueError("claim deadline must be timezone-aware")
+        return (deadline - datetime.now(deadline.tzinfo)).total_seconds()
+
+    @staticmethod
+    def _classify_failure(error: Exception) -> LifecycleFailureCode:
+        if isinstance(error, ConnectionError):
+            return "MCP_TRANSPORT"
+        if isinstance(error, TimeoutError):
+            return "DEADLINE_EXCEEDED"
+        return "INTERNAL_ERROR"
 
     async def _claim(self, message: RcaJobMessage) -> RcaJobClaim | None:
         async with self._sessions() as session, session.begin():
@@ -249,7 +304,9 @@ class RcaJobHandler:
             "PARTIAL": "PARTIAL",
             "FAILED": "FAILED",
         }[result.status]
-        failure_code = "INTERNAL_ERROR" if result.status == "FAILED" else None
+        failure_code = result.failure_code if result.status == "FAILED" else None
+        if result.status == "FAILED" and failure_code is None:
+            failure_code = "INTERNAL_ERROR"
         async with self._sessions() as session, session.begin():
             updated = await session.scalar(
                 text(
@@ -285,8 +342,10 @@ class RcaJobHandler:
             )
         return JobDisposition.ACK
 
-    async def _settle_failure(self, claim: RcaJobClaim) -> JobDisposition:
-        terminal = claim.attempt_number >= 3
+    async def _settle_failure(
+        self, claim: RcaJobClaim, failure_code: LifecycleFailureCode
+    ) -> JobDisposition:
+        terminal = failure_code != "MCP_TRANSPORT" or claim.attempt_number >= 3
         async with self._sessions() as session, session.begin():
             updated = await session.scalar(
                 text(
@@ -308,10 +367,14 @@ class RcaJobHandler:
                 return JobDisposition.NACK
             await session.execute(
                 text(
-                    """UPDATE worker_attempts SET completed_at=now(), failure_code='MCP_TRANSPORT'
+                    """UPDATE worker_attempts SET completed_at=now(), failure_code=:failure
                        WHERE worker_job_id=:id AND attempt_number=:attempt"""
                 ),
-                {"id": claim.worker_job_id, "attempt": claim.attempt_number},
+                {
+                    "failure": failure_code,
+                    "id": claim.worker_job_id,
+                    "attempt": claim.attempt_number,
+                },
             )
             await session.execute(
                 text(
@@ -319,7 +382,7 @@ class RcaJobHandler:
                 ),
                 {
                     "status": "FAILED" if terminal else "QUEUED",
-                    "failure": "MCP_TRANSPORT" if terminal else None,
+                    "failure": failure_code if terminal else None,
                     "id": claim.rca_run_id,
                 },
             )
@@ -328,3 +391,7 @@ class RcaJobHandler:
 
 class LeaseLostError(RuntimeError):
     pass
+
+
+class DeadlineExceededError(RuntimeError):
+    """The claim deadline expired before durable processing could settle."""

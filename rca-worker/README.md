@@ -39,6 +39,12 @@ transaction 保存，commit 成功後才建立 receipt/chunks 並回給 Agent。
 deterministic rebuild，不保存另一份 raw chunk。超大 response fail closed；可接受但被
 chunk budget 截斷的輸入只允許 `PARTIAL`，並加入 `ANALYSIS_INPUT_TRUNCATED`。
 
+`EvidenceReceipt.total_chunks` 是 receipt 內所有 evidence references 的 chunk 總數；
+`EvidenceChunk.chunk_index` 則只在各自的 evidence reference 內從零開始計算。為維持跨
+process 的 exactly-once collection reservation，PostgreSQL advisory-lock transaction 會
+在 collection 與 specialist analysis 完成前持有同一個 connection；production pool size
+必須按同時執行的 reserved branches 留出額外容量，否則長分析可能造成 connection 等待。
+
 Specialist output 是 validated `SpecialistAnalysisDraft`：最多 20 observations；每個
 非 `MISSING` observation 必須引用同一 specialist 的 known evidence；analysis audit 只
 保存 validated JSON、model/Skill/hash/timestamp，不複製 raw telemetry。Root ACTIVE
@@ -50,7 +56,9 @@ Worker migration head 是 `0002_adk_specialist_analysis`，增加 Specialist ana
 
 `NO_SAFE_MCP_CAPABILITY`、`MCP_TIMEOUT`、`MCP_TRANSPORT`、`MCP_PAYLOAD_TOO_LARGE`、
 `MCP_RESULT_INVALID`、`ANALYSIS_TIMEOUT`、`ANALYSIS_SCHEMA_INVALID`、
-`ANALYSIS_UNKNOWN_EVIDENCE`、`ANALYSIS_INPUT_TRUNCATED`、`ANALYSIS_FAILED`。
+`ANALYSIS_UNKNOWN_EVIDENCE`、`ANALYSIS_INPUT_TRUNCATED`、`ANALYSIS_FAILED`；job
+terminal status also uses the stable `DEADLINE_EXCEEDED`、`VALIDATION_FAILED`、
+`INTERNAL_ERROR` codes.
 
 ## 設定與硬上限
 
