@@ -7,8 +7,9 @@ from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
-from jsonschema import Draft202012Validator, SchemaError
+from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from referencing import Registry
 
 from sre_rca_worker.domain.evidence.chunking import McpPayloadTooLargeError
 from sre_rca_worker.domain.evidence.models import EvidenceDraft, Finding, _aware
@@ -24,6 +25,32 @@ _SPECIALIST_QUERY_POLICY = {
     SpecialistKind.TRACE: "trace.critical_path",
     SpecialistKind.LOG: "log.exception_pattern",
 }
+
+
+def _contains_remote_schema_reference(schema: object) -> bool:
+    """Reject schema references that would require loading another resource."""
+    pending: list[object] = [schema]
+    seen: set[int] = set()
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            identity = id(value)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            for key in ("$ref", "$dynamicRef"):
+                if key in value:
+                    reference = value[key]
+                    if not isinstance(reference, str) or not reference.startswith("#"):
+                        return True
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            identity = id(value)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            pending.extend(value)
+    return False
 
 
 class SpecialistRequest(BaseModel):
@@ -173,11 +200,19 @@ class McpSpecialist:
     def _arguments(
         self, tool: AllowedTool, request: SpecialistRequest
     ) -> dict[str, object] | None:
+        # Capability schemas are trusted data, but no external schema resource
+        # is trusted by this boundary.  Reject remote (and malformed) refs
+        # before jsonschema can attempt resolution.
+        if _contains_remote_schema_reference(tool.input_schema):
+            return None
         properties = tool.input_schema.get("properties", {})
         required_value = tool.input_schema.get("required", [])
         if not isinstance(properties, dict) or not isinstance(required_value, list):
             return None
-        required = set(required_value)
+        try:
+            required = set(required_value)
+        except TypeError:
+            return None
         candidates: dict[str, object] = {
             "project_id": request.scope.scope_id if request.scope else "",
             "projectId": request.scope.scope_id if request.scope else "",
@@ -191,19 +226,19 @@ class McpSpecialist:
 
         if "query" in properties:
             policy_query = _SPECIALIST_QUERY_POLICY[self.kind]
-            query_schema = properties["query"]
-            try:
-                query_is_safe = Draft202012Validator(query_schema).is_valid(
-                    policy_query
-                )
-            except (SchemaError, TypeError):
-                query_is_safe = False
-            if query_is_safe:
-                candidates["query"] = policy_query
-            elif "query" in required:
-                # A required query is only satisfiable with the fixed policy
-                # value.  Never substitute alert text or another model value.
-                return None
+            candidates["query"] = policy_query
         if not required <= candidates.keys():
             return None
-        return {name: candidates[name] for name in properties if name in candidates}
+        arguments: dict[str, Any] = {
+            name: candidates[name] for name in properties if name in candidates
+        }
+        try:
+            valid = Draft202012Validator(
+                tool.input_schema,
+                # Never retrieve a schema from a URI.  The complete trusted
+                # root schema keeps local `$defs` references in context.
+                registry=Registry(),
+            ).is_valid(arguments)
+        except Exception:  # noqa: BLE001 - fail closed at the schema boundary
+            return None
+        return arguments if valid else None
