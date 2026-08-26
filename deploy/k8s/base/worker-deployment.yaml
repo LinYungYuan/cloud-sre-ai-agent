@@ -94,6 +94,51 @@ spec:
                 configMapKeyRef:
                   name: sre-agent-config
                   key: LOG_MCP_URL
+            - name: SPECIALIST_ANALYSIS_MODE
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: SPECIALIST_ANALYSIS_MODE
+            - name: MCP_MAX_RESPONSE_BYTES
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: MCP_MAX_RESPONSE_BYTES
+            - name: EVIDENCE_CHUNK_CHARS
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: EVIDENCE_CHUNK_CHARS
+            - name: EVIDENCE_MAX_CHUNKS
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: EVIDENCE_MAX_CHUNKS
+            - name: EVIDENCE_MAX_TOTAL_CHARS
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: EVIDENCE_MAX_TOTAL_CHARS
+            - name: SPECIALIST_MAX_TOOL_CALLS
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: SPECIALIST_MAX_TOOL_CALLS
+            - name: SPECIALIST_MAX_OBSERVATIONS
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: SPECIALIST_MAX_OBSERVATIONS
+            - name: RCA_DEADLINE_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: RCA_DEADLINE_SECONDS
+            - name: AGENT_CORRECTIVE_RETRIES
+              valueFrom:
+                configMapKeyRef:
+                  name: sre-agent-config
+                  key: AGENT_CORRECTIVE_RETRIES
           securityContext:
             runAsNonRoot: true
             runAsUser: 65532

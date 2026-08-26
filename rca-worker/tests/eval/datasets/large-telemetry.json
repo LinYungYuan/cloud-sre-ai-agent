@@ -1,0 +1,21 @@
+{
+  "case": "large-telemetry",
+  "kind": "metrics",
+  "provider": "GCP",
+  "scopeId": "project-large",
+  "safe": true,
+  "alertIssue": "Large CPU telemetry payload requires bounded analysis input.",
+  "windowStart": "2026-08-25T07:45:00Z",
+  "windowEnd": "2026-08-25T08:00:00Z",
+  "available": ["metrics"],
+  "expectedRoute": ["metrics"],
+  "referenceId": "00000000-0000-0000-0000-000000000106",
+  "telemetryUnit": "cpu=95.2;timestamp=2026-08-25T07:59:00Z;",
+  "telemetryChars": 40000,
+  "chunkChars": 8000,
+  "maxChunks": 4,
+  "maxTotalChars": 32000,
+  "maxToolCalls": 5,
+  "expectedStatus": "PARTIAL",
+  "expectedMissingEvidence": "ANALYSIS_INPUT_TRUNCATED"
+}

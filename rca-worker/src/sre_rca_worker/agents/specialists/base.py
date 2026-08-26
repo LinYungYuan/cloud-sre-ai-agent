@@ -7,8 +7,12 @@ from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
+from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from referencing import Registry
 
+from sre_rca_worker.domain.evidence.chunking import McpPayloadTooLargeError
+from sre_rca_worker.domain.evidence.errors import McpResultInvalidError
 from sre_rca_worker.domain.evidence.models import EvidenceDraft, Finding, _aware
 from sre_rca_worker.integrations.mcp.client import McpClient
 from sre_rca_worker.integrations.mcp.models import (
@@ -16,6 +20,38 @@ from sre_rca_worker.integrations.mcp.models import (
     CloudScope,
     SpecialistKind,
 )
+
+_SPECIALIST_QUERY_POLICY = {
+    SpecialistKind.METRICS: "metrics.anomaly",
+    SpecialistKind.TRACE: "trace.critical_path",
+    SpecialistKind.LOG: "log.exception_pattern",
+}
+
+
+def _contains_remote_schema_reference(schema: object) -> bool:
+    """Reject schema references that would require loading another resource."""
+    pending: list[object] = [schema]
+    seen: set[int] = set()
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            identity = id(value)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            for key in ("$ref", "$dynamicRef"):
+                if key in value:
+                    reference = value[key]
+                    if not isinstance(reference, str) or not reference.startswith("#"):
+                        return True
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            identity = id(value)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            pending.extend(value)
+    return False
 
 
 class SpecialistRequest(BaseModel):
@@ -57,24 +93,56 @@ class Specialist(Protocol):
 class McpSpecialist:
     kind: SpecialistKind
 
-    def __init__(self, client_factory: Callable[[], McpClient]) -> None:
+    def __init__(
+        self,
+        client_factory: Callable[[], McpClient],
+        *,
+        max_response_bytes: int = 2 * 1024 * 1024,
+    ) -> None:
+        if type(max_response_bytes) is not int or max_response_bytes <= 0:
+            raise ValueError("max_response_bytes must be positive")
+        if max_response_bytes > 2 * 1024 * 1024:
+            raise ValueError("max_response_bytes must not exceed 2 MiB")
         self._client_factory = client_factory
+        self._max_response_bytes = max_response_bytes
 
     async def run(
         self, request: SpecialistRequest, deadline: datetime
     ) -> SpecialistResult:
+        drafts, missing = await self._collect_evidence(request, deadline)
+        findings = tuple(
+            Finding(
+                summary=f"{self.kind.value} MCP 回傳可用觀測資料",
+                confidence=0.5,
+                evidence=(draft,),
+            )
+            for draft in drafts
+        )
+        return SpecialistResult(
+            specialist=self.kind,
+            findings=findings,
+            missing_evidence=missing,
+        )
+
+    async def collect_evidence_drafts(
+        self, request: SpecialistRequest, deadline: datetime
+    ) -> tuple[EvidenceDraft, ...]:
+        """Collect validated evidence without constructing legacy findings."""
+        drafts, _ = await self._collect_evidence(request, deadline)
+        return drafts
+
+    async def _collect_evidence(
+        self, request: SpecialistRequest, deadline: datetime
+    ) -> tuple[tuple[EvidenceDraft, ...], tuple[str, ...]]:
         if (
             not request.available_tools
             or request.scope is None
             or request.scope.provider != "GCP"
             or not request.scope.safe
         ):
-            return SpecialistResult(
-                specialist=self.kind,
-                missing_evidence=("NO_SAFE_MCP_CAPABILITY",),
-            )
+            return (), ("NO_SAFE_MCP_CAPABILITY",)
         client = self._client_factory()
-        findings: list[Finding] = []
+        drafts: list[EvidenceDraft] = []
         missing: list[str] = []
         for tool in request.available_tools:
             if tool.endpoint_identity != self.kind.value:
@@ -86,16 +154,24 @@ class McpSpecialist:
                 continue
             tool.validate_arguments(arguments)
             raw = await client.call(tool.name, arguments, deadline)
+            if len(raw) > self._max_response_bytes:
+                raise McpPayloadTooLargeError(
+                    "MCP response exceeds configured size limit"
+                )
+            if not isinstance(raw, bytes):
+                raise McpResultInvalidError
             try:
-                structured = json.loads(raw)
+                structured = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
-                structured = {"content": raw.decode("utf-8", errors="replace")}
+                raise McpResultInvalidError from None
             if not isinstance(structured, (dict, list)):
-                structured = {"value": structured}
-            normalized = self._normalize_structured(structured, request)
+                raise McpResultInvalidError
+            try:
+                normalized = self._normalize_structured(structured, request)
+            except Exception:  # noqa: BLE001 - close the untrusted result boundary
+                raise McpResultInvalidError from None
             if normalized is None:
-                missing.append("INVALID_TRACE_EVIDENCE")
-                continue
+                raise McpResultInvalidError
             structured = normalized
             encoded_input = json.dumps(
                 arguments, sort_keys=True, separators=(",", ":")
@@ -116,18 +192,8 @@ class McpSpecialist:
                 content_type="application/json",
                 input_sha256=hashlib.sha256(encoded_input).hexdigest(),
             )
-            findings.append(
-                Finding(
-                    summary=f"{self.kind.value} MCP 回傳可用觀測資料",
-                    confidence=0.5,
-                    evidence=(evidence,),
-                )
-            )
-        return SpecialistResult(
-            specialist=self.kind,
-            findings=tuple(findings),
-            missing_evidence=tuple(missing),
-        )
+            drafts.append(evidence)
+        return tuple(drafts), tuple(missing)
 
     def _normalize_structured(
         self,
@@ -136,15 +202,22 @@ class McpSpecialist:
     ) -> dict[str, Any] | list[Any] | None:
         return structured
 
-    @staticmethod
     def _arguments(
-        tool: AllowedTool, request: SpecialistRequest
+        self, tool: AllowedTool, request: SpecialistRequest
     ) -> dict[str, object] | None:
+        # Capability schemas are trusted data, but no external schema resource
+        # is trusted by this boundary.  Reject remote (and malformed) refs
+        # before jsonschema can attempt resolution.
+        if _contains_remote_schema_reference(tool.input_schema):
+            return None
         properties = tool.input_schema.get("properties", {})
         required_value = tool.input_schema.get("required", [])
         if not isinstance(properties, dict) or not isinstance(required_value, list):
             return None
-        required = set(required_value)
+        try:
+            required = set(required_value)
+        except TypeError:
+            return None
         candidates: dict[str, object] = {
             "project_id": request.scope.scope_id if request.scope else "",
             "projectId": request.scope.scope_id if request.scope else "",
@@ -154,8 +227,23 @@ class McpSpecialist:
             "startTime": request.window_start.isoformat(),
             "end_time": request.window_end.isoformat(),
             "endTime": request.window_end.isoformat(),
-            "query": request.alert_issue,
         }
+
+        if "query" in properties:
+            policy_query = _SPECIALIST_QUERY_POLICY[self.kind]
+            candidates["query"] = policy_query
         if not required <= candidates.keys():
             return None
-        return {name: candidates[name] for name in properties if name in candidates}
+        arguments: dict[str, Any] = {
+            name: candidates[name] for name in properties if name in candidates
+        }
+        try:
+            valid = Draft202012Validator(
+                tool.input_schema,
+                # Never retrieve a schema from a URI.  The complete trusted
+                # root schema keeps local `$defs` references in context.
+                registry=Registry(),
+            ).is_valid(arguments)
+        except Exception:  # noqa: BLE001 - fail closed at the schema boundary
+            return None
+        return arguments if valid else None

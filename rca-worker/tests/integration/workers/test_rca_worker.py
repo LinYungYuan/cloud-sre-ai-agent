@@ -34,9 +34,10 @@ async def test_production_runner_passes_configured_worker_identity_to_job_handle
             "app_environment": "local",
             "model_name": "test-model",
             "worker_id": "pod-identity",
+            "rca_deadline_seconds": 47,
         }
     )
-    captured: dict[str, str] = {}
+    captured: dict[str, object] = {}
 
     class FakeEngine:
         async def dispose(self) -> None:
@@ -57,12 +58,22 @@ async def test_production_runner_passes_configured_worker_identity_to_job_handle
             raise StopWorker
 
     class CapturingHandler:
-        def __init__(self, sessions, processor, *, worker_id: str) -> None:
+        def __init__(
+            self,
+            sessions,
+            processor,
+            *,
+            worker_id: str,
+            deadline_seconds: int,
+        ) -> None:
             captured["worker_id"] = worker_id
+            captured["deadline_seconds"] = deadline_seconds
 
     monkeypatch.setattr(rca_worker, "WorkerSettings", lambda: settings)
     monkeypatch.setattr(rca_worker, "create_async_engine", lambda _: FakeEngine())
-    monkeypatch.setattr(rca_worker, "async_sessionmaker", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        rca_worker, "async_sessionmaker", lambda *args, **kwargs: object()
+    )
     monkeypatch.setattr(rca_worker, "ProductionRcaProcessor", lambda *args: object())
     monkeypatch.setattr(rca_worker, "RcaJobHandler", CapturingHandler)
     monkeypatch.setattr(rca_worker.pubsub_v1, "PublisherClient", FakePublisher)
@@ -76,7 +87,10 @@ async def test_production_runner_passes_configured_worker_identity_to_job_handle
     with pytest.raises(StopWorker):
         await rca_worker.run_production()
 
-    assert captured == {"worker_id": settings.worker_id}
+    assert captured == {
+        "worker_id": settings.worker_id,
+        "deadline_seconds": settings.rca_deadline_seconds,
+    }
 
 
 async def _seed(session_factory) -> RcaJobMessage:
@@ -263,15 +277,22 @@ async def test_long_processing_renews_lease_before_terminal_commit() -> None:
             text("SELECT lease_expires_at FROM worker_jobs WHERE id=:id"),
             {"id": message.worker_job_id},
         )
-    await asyncio.sleep(0.05)
-    async with sessions() as session:
-        renewed_expiry = await session.scalar(
-            text("SELECT lease_expires_at FROM worker_jobs WHERE id=:id"),
-            {"id": message.worker_job_id},
-        )
-    assert renewed_expiry > first_expiry
+    renewed_expiry = first_expiry
+    observation_deadline = asyncio.get_running_loop().time() + 1
+    while (
+        renewed_expiry <= first_expiry
+        and asyncio.get_running_loop().time() < observation_deadline
+    ):
+        await asyncio.sleep(0.01)
+        async with sessions() as session:
+            renewed_expiry = await session.scalar(
+                text("SELECT lease_expires_at FROM worker_jobs WHERE id=:id"),
+                {"id": message.worker_job_id},
+            )
     release.set()
-    assert await task is JobDisposition.ACK
+    disposition = await task
+    assert renewed_expiry > first_expiry
+    assert disposition is JobDisposition.ACK
     await engine.dispose()
 
 

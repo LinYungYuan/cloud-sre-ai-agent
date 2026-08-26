@@ -32,9 +32,6 @@ class SdkMcpClient:
                 yield session
 
     async def list_tools(self) -> tuple[DiscoveredTool, ...]:
-        # Google ADK and MCP imports remain confined to this adapter boundary.
-        from google.adk.tools.mcp_tool import McpToolset  # noqa: F401
-
         async with self._session() as session:
             result = await session.list_tools()
         return tuple(

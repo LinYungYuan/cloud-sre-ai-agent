@@ -4,10 +4,16 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from sre_rca_worker.agents.specialists.base import SpecialistRequest
+from sre_rca_worker.agents.specialists import base as specialist_base
+from sre_rca_worker.agents.specialists.base import (
+    McpPayloadTooLargeError,
+    McpResultInvalidError,
+    SpecialistRequest,
+)
 from sre_rca_worker.agents.specialists.metrics_agent import MetricsSpecialist
 from sre_rca_worker.agents.specialists.trace_agent import TraceSpecialist
 from sre_rca_worker.domain.evidence.models import EvidenceDraft, Finding
+from sre_rca_worker.integrations.mcp.client import McpClient
 from sre_rca_worker.integrations.mcp.models import (
     AllowedTool,
     CloudScope,
@@ -61,6 +67,32 @@ def test_finding_requires_evidence_and_bounded_confidence() -> None:
         Finding(summary="CPU high", confidence=1.1, evidence=())
     with pytest.raises(ValidationError):
         Finding(summary="CPU high", confidence=0.5, evidence=())
+
+
+def test_specialist_constructor_accepts_the_two_mib_response_cap() -> None:
+    def unused_client_factory() -> McpClient:
+        raise AssertionError("the no-safe-scope path must not construct MCP")
+
+    MetricsSpecialist(unused_client_factory, max_response_bytes=2 * 1024 * 1024)
+
+
+def test_specialist_constructor_rejects_a_response_limit_above_two_mib() -> None:
+    def unused_client_factory() -> McpClient:
+        raise AssertionError("the no-safe-scope path must not construct MCP")
+
+    with pytest.raises(ValueError, match="must not exceed 2 MiB"):
+        MetricsSpecialist(unused_client_factory, max_response_bytes=2 * 1024 * 1024 + 1)
+
+
+@pytest.mark.parametrize("value", [True, 1.0, "1024"])
+def test_specialist_constructor_rejects_non_integer_response_budget(
+    value: object,
+) -> None:
+    def unused_client_factory() -> McpClient:
+        raise AssertionError("the constructor must reject the invalid budget")
+
+    with pytest.raises(ValueError):
+        MetricsSpecialist(unused_client_factory, max_response_bytes=value)  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -131,11 +163,78 @@ async def test_safe_specialist_calls_only_allowed_tool_and_returns_exact_evidenc
     assert result.findings[0].evidence[0].raw_result == b'{ "cpu": 85.23 }\n'
 
 
+def _safe_metrics_request() -> SpecialistRequest:
+    tool = AllowedTool(
+        name="metrics_query",
+        capability="metrics.query",
+        endpoint_identity="metrics",
+        input_schema={
+            "type": "object",
+            "properties": {"project_id": {"type": "string"}},
+            "required": ["project_id"],
+            "additionalProperties": False,
+        },
+    )
+    return SpecialistRequest(
+        incident_id=uuid4(),
+        rca_run_id=uuid4(),
+        alert_issue="CPU high",
+        scope=CloudScope(provider="GCP", scope_id="project-a", safe=True),
+        window_start=NOW - timedelta(minutes=15),
+        window_end=NOW,
+        available_tools=(tool,),
+    )
+
+
+@pytest.mark.asyncio
+async def test_specialist_rejects_raw_response_larger_than_limit_before_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Client:
+        endpoint_identity = "metrics"
+
+        async def list_tools(self):
+            return ()
+
+        async def call(self, tool_name, arguments, deadline):
+            return b"{" + (b" " * (2 * 1024 * 1024))
+
+    def unexpected_parse(raw: object) -> None:
+        raise AssertionError("oversized payload must not be parsed")
+
+    monkeypatch.setattr(specialist_base.json, "loads", unexpected_parse)
+
+    with pytest.raises(McpPayloadTooLargeError):
+        await MetricsSpecialist(Client, max_response_bytes=2 * 1024 * 1024).run(
+            _safe_metrics_request(), NOW + timedelta(minutes=1)
+        )
+
+
+@pytest.mark.asyncio
+async def test_specialist_accepts_raw_response_exactly_at_byte_limit() -> None:
+    class Client:
+        endpoint_identity = "metrics"
+
+        async def list_tools(self):
+            return ()
+
+        async def call(self, tool_name, arguments, deadline):
+            return b'{"padding":"' + (b" " * (2 * 1024 * 1024 - 14)) + b'"}'
+
+    result = await MetricsSpecialist(Client, max_response_bytes=2 * 1024 * 1024).run(
+        _safe_metrics_request(), NOW + timedelta(minutes=1)
+    )
+
+    assert result.findings[0].evidence[0].structured_json == {
+        "padding": " " * (2 * 1024 * 1024 - 14)
+    }
+
+
 @pytest.mark.asyncio
 async def test_trace_specialist_persists_normalized_waterfall_and_exact_raw_result() -> (
     None
 ):
-    raw = b'''{
+    raw = b"""{
       "traceId": "trace-1",
       "startedAt": "2026-08-23T04:21:00Z",
       "spans": [{
@@ -150,7 +249,7 @@ async def test_trace_specialist_persists_normalized_waterfall_and_exact_raw_resu
         "criticalPath": true,
         "attributes": {"authorization": "Bearer secret"}
       }]
-    }'''
+    }"""
 
     class Client:
         endpoint_identity = "trace"
@@ -185,9 +284,14 @@ async def test_trace_specialist_persists_normalized_waterfall_and_exact_raw_resu
     result = await TraceSpecialist(Client).run(request, NOW + timedelta(minutes=1))
 
     evidence = result.findings[0].evidence[0]
-    assert evidence.structured_json["schemaVersion"] == 1
-    assert evidence.structured_json["traceId"] == "trace-1"
-    assert evidence.structured_json["spans"][0]["attributes"] == {}
+    structured = evidence.structured_json
+    assert isinstance(structured, dict)
+    assert structured["schemaVersion"] == 1
+    assert structured["traceId"] == "trace-1"
+    spans = structured["spans"]
+    assert isinstance(spans, list)
+    assert isinstance(spans[0], dict)
+    assert spans[0]["attributes"] == {}
     assert evidence.raw_result == raw
 
 
@@ -223,7 +327,76 @@ async def test_trace_specialist_marks_malformed_trace_as_invalid_evidence() -> N
         available_tools=(tool,),
     )
 
-    result = await TraceSpecialist(Client).run(request, NOW + timedelta(minutes=1))
+    with pytest.raises(McpResultInvalidError) as raised:
+        await TraceSpecialist(Client).run(request, NOW + timedelta(minutes=1))
 
-    assert result.findings == ()
-    assert result.missing_evidence == ("INVALID_TRACE_EVIDENCE",)
+    assert raised.value.code == "MCP_RESULT_INVALID"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw",
+    [b"\xff", b"{", b"null", b"true", b"42", b'"scalar"'],
+    ids=[
+        "invalid-utf8",
+        "invalid-json",
+        "null-root",
+        "bool-root",
+        "number-root",
+        "string-root",
+    ],
+)
+async def test_specialist_rejects_invalid_mcp_result_without_wrapping_payload(
+    raw: bytes,
+) -> None:
+    class Client:
+        endpoint_identity = "metrics"
+
+        async def list_tools(self):
+            return ()
+
+        async def call(self, tool_name, arguments, deadline):
+            return raw
+
+    with pytest.raises(McpResultInvalidError) as raised:
+        await MetricsSpecialist(Client).run(
+            _safe_metrics_request(), NOW + timedelta(minutes=1)
+        )
+
+    assert raised.value.code == "MCP_RESULT_INVALID"
+    assert "content" not in repr(raised.value).lower()
+    assert "value" not in repr(raised.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_mixed_valid_then_invalid_collection_returns_no_partial_findings() -> (
+    None
+):
+    calls = 0
+
+    class Client:
+        endpoint_identity = "metrics"
+
+        async def list_tools(self):
+            return ()
+
+        async def call(self, tool_name, arguments, deadline):
+            nonlocal calls
+            calls += 1
+            return b'{"cpu":85.23}' if calls == 1 else b"not-json"
+
+    base_request = _safe_metrics_request()
+    first_tool = base_request.available_tools[0]
+    request = base_request.model_copy(
+        update={
+            "available_tools": (
+                first_tool,
+                first_tool.model_copy(update={"name": "metrics_query_2"}),
+            )
+        }
+    )
+
+    with pytest.raises(McpResultInvalidError):
+        await MetricsSpecialist(Client).collect_evidence_drafts(
+            request, NOW + timedelta(minutes=1)
+        )

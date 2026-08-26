@@ -6,7 +6,12 @@ import pytest
 
 from sre_rca_worker.agents.rca.models import IncidentContext
 from sre_rca_worker.agents.rca.workflow import RcaWorkflow
-from sre_rca_worker.agents.specialists.base import SpecialistRequest, SpecialistResult
+from sre_rca_worker.agents.specialists.base import (
+    McpPayloadTooLargeError,
+    McpResultInvalidError,
+    SpecialistRequest,
+    SpecialistResult,
+)
 from sre_rca_worker.integrations.mcp.models import (
     AllowedTool,
     CapabilitySet,
@@ -178,16 +183,12 @@ async def test_exhausted_transport_retry_has_a_distinct_safe_failure_code() -> N
     now = datetime.now(UTC)
     barrier = asyncio.Event()
     barrier.set()
-    metrics = FakeSpecialist(
-        SpecialistKind.METRICS, [], barrier, transient_failures=2
-    )
+    metrics = FakeSpecialist(SpecialistKind.METRICS, [], barrier, transient_failures=2)
 
     bundle = await RcaWorkflow({SpecialistKind.METRICS: metrics}).run(
         _context(now),
         CapabilitySet(
-            by_specialist={
-                SpecialistKind.METRICS: (_tool(SpecialistKind.METRICS),)
-            }
+            by_specialist={SpecialistKind.METRICS: (_tool(SpecialistKind.METRICS),)}
         ),
         deadline=now + timedelta(seconds=5),
     )
@@ -195,4 +196,56 @@ async def test_exhausted_transport_retry_has_a_distinct_safe_failure_code() -> N
     assert metrics.calls == 2
     assert [(item.specialist, item.code) for item in bundle.failures] == [
         (SpecialistKind.METRICS, "SPECIALIST_TRANSPORT")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_invalid_mcp_result_is_terminal_and_not_retried_as_transport() -> None:
+    now = datetime.now(UTC)
+    barrier = asyncio.Event()
+    barrier.set()
+    metrics = FakeSpecialist(
+        SpecialistKind.METRICS,
+        [],
+        barrier,
+        failure=McpResultInvalidError(),
+    )
+
+    bundle = await RcaWorkflow({SpecialistKind.METRICS: metrics}).run(
+        _context(now),
+        CapabilitySet(
+            by_specialist={SpecialistKind.METRICS: (_tool(SpecialistKind.METRICS),)}
+        ),
+        deadline=now + timedelta(seconds=5),
+    )
+
+    assert metrics.calls == 1
+    assert [(item.specialist, item.code) for item in bundle.failures] == [
+        (SpecialistKind.METRICS, "MCP_RESULT_INVALID")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_oversized_mcp_result_keeps_payload_failure_code() -> None:
+    now = datetime.now(UTC)
+    barrier = asyncio.Event()
+    barrier.set()
+    metrics = FakeSpecialist(
+        SpecialistKind.METRICS,
+        [],
+        barrier,
+        failure=McpPayloadTooLargeError("secret response metadata"),
+    )
+
+    bundle = await RcaWorkflow({SpecialistKind.METRICS: metrics}).run(
+        _context(now),
+        CapabilitySet(
+            by_specialist={SpecialistKind.METRICS: (_tool(SpecialistKind.METRICS),)}
+        ),
+        deadline=now + timedelta(seconds=5),
+    )
+
+    assert metrics.calls == 1
+    assert [(item.specialist, item.code) for item in bundle.failures] == [
+        (SpecialistKind.METRICS, "MCP_PAYLOAD_TOO_LARGE")
     ]
