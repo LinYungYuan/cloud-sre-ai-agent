@@ -136,9 +136,11 @@ class SpecialistAnalysisWorkflow:
             for kind in plan.selected:
                 group.create_task(invoke(kind), name=f"analysis-{kind.value}")
 
-        return SpecialistAnalysisBundle(
-            results=tuple(results[kind] for kind in _ORDER if kind in results),
-            failures=tuple(failures[kind] for kind in _ORDER if kind in failures),
+        return normalize_specialist_analysis_bundle(
+            SpecialistAnalysisBundle(
+                results=tuple(results[kind] for kind in _ORDER if kind in results),
+                failures=tuple(failures[kind] for kind in _ORDER if kind in failures),
+            )
         )
 
     def _remaining_seconds(self, deadline: datetime) -> float | None:
@@ -166,7 +168,41 @@ class SpecialistAnalysisWorkflow:
         return SpecialistFailure(specialist=kind, code=code)
 
 
+def normalize_specialist_analysis_bundle(
+    bundle: SpecialistAnalysisBundle,
+) -> SpecialistAnalysisBundle:
+    """Convert unusable returned analyses into deterministic specialist failures."""
+    results: dict[SpecialistKind, SpecialistAnalysisResult] = {}
+    failures: dict[SpecialistKind, SpecialistFailure] = {
+        failure.specialist: failure for failure in bundle.failures
+    }
+    for result in bundle.results:
+        analysis = result.analysis
+        if analysis.status == "FAILED" or not analysis.observations:
+            failures[analysis.specialist] = SpecialistFailure(
+                specialist=analysis.specialist,
+                code=_returned_analysis_failure_code(analysis),
+            )
+        else:
+            results[analysis.specialist] = result
+    return SpecialistAnalysisBundle(
+        results=tuple(results[kind] for kind in _ORDER if kind in results),
+        failures=tuple(failures[kind] for kind in _ORDER if kind in failures),
+    )
+
+
+def _returned_analysis_failure_code(analysis: object) -> StableSpecialistCode:
+    missing_evidence = getattr(analysis, "missing_evidence", ())
+    if not isinstance(missing_evidence, tuple):
+        return "ANALYSIS_FAILED"
+    for code in missing_evidence:
+        if type(code) is str and code in _STABLE_SPECIALIST_CODES:
+            return cast(StableSpecialistCode, code)
+    return "ANALYSIS_FAILED"
+
+
 __all__ = [
     "SpecialistAnalysisWorkflow",
     "SpecialistBranchInvoker",
+    "normalize_specialist_analysis_bundle",
 ]

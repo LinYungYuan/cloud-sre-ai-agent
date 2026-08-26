@@ -111,6 +111,22 @@ def _result(kind: SpecialistKind) -> SpecialistAnalysisResult:
     )
 
 
+def _failed_result(
+    kind: SpecialistKind,
+    *,
+    missing_evidence: tuple[str, ...] = (),
+) -> SpecialistAnalysisResult:
+    return SpecialistAnalysisResult(
+        analysis=SpecialistAnalysisDraft(
+            specialist=kind,
+            status="FAILED",
+            observations=(),
+            missing_evidence=cast(tuple[StableSpecialistCode, ...], missing_evidence),
+        ),
+        known_evidence=(),
+    )
+
+
 BranchInvoker = Callable[
     [SpecialistRequest, SpecialistKind, datetime],
     Awaitable[SpecialistAnalysisResult],
@@ -666,6 +682,113 @@ async def test_wrong_kind_result_is_a_stable_schema_failure() -> None:
     assert [(item.specialist, item.code) for item in bundle.failures] == [
         (SpecialistKind.METRICS, "ANALYSIS_SCHEMA_INVALID")
     ]
+
+
+@pytest.mark.asyncio
+async def test_returned_failed_analyses_become_fixed_order_failures() -> None:
+    returned = {
+        SpecialistKind.METRICS: _failed_result(
+            SpecialistKind.METRICS,
+            missing_evidence=("MCP_RESULT_INVALID", "ANALYSIS_FAILED"),
+        ),
+        SpecialistKind.TRACE: _failed_result(
+            SpecialistKind.TRACE,
+            missing_evidence=("ANALYSIS_SCHEMA_INVALID",),
+        ),
+        SpecialistKind.LOG: _failed_result(SpecialistKind.LOG),
+    }
+
+    async def invoke(
+        request: SpecialistRequest, kind: SpecialistKind, deadline: datetime
+    ) -> SpecialistAnalysisResult:
+        del request, deadline
+        await asyncio.sleep({
+            SpecialistKind.METRICS: 0.003,
+            SpecialistKind.TRACE: 0.002,
+            SpecialistKind.LOG: 0.001,
+        }[kind])
+        return returned[kind]
+
+    bundle = await SpecialistAnalysisWorkflow(
+        cast(BranchInvoker, invoke), clock=lambda: NOW
+    ).run(
+        _context(),
+        _capabilities(*ORDER),
+        deadline=NOW + timedelta(minutes=1),
+    )
+
+    assert bundle.results == ()
+    assert [(item.specialist, item.code) for item in bundle.failures] == [
+        (SpecialistKind.METRICS, "MCP_RESULT_INVALID"),
+        (SpecialistKind.TRACE, "ANALYSIS_SCHEMA_INVALID"),
+        (SpecialistKind.LOG, "ANALYSIS_FAILED"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_observationless_partial_analysis_becomes_failure() -> None:
+    partial = SpecialistAnalysisResult(
+        analysis=SpecialistAnalysisDraft(
+            specialist=SpecialistKind.METRICS,
+            status="PARTIAL",
+            observations=(),
+            missing_evidence=("ANALYSIS_INPUT_TRUNCATED",),
+        ),
+        known_evidence=(),
+    )
+
+    async def invoke(
+        request: SpecialistRequest, kind: SpecialistKind, deadline: datetime
+    ) -> SpecialistAnalysisResult:
+        del request, kind, deadline
+        return partial
+
+    bundle = await SpecialistAnalysisWorkflow(
+        cast(BranchInvoker, invoke), clock=lambda: NOW
+    ).run(
+        _context(),
+        _capabilities(SpecialistKind.METRICS),
+        deadline=NOW + timedelta(minutes=1),
+    )
+
+    assert bundle.results == ()
+    assert bundle.failures == (
+        SpecialistFailure(
+            specialist=SpecialistKind.METRICS,
+            code="ANALYSIS_INPUT_TRUNCATED",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_partial_analysis_with_observations_remains_result_without_failure() -> None:
+    partial = _result(SpecialistKind.METRICS).model_copy(
+        update={
+            "analysis": _result(SpecialistKind.METRICS).analysis.model_copy(
+                update={
+                    "status": "PARTIAL",
+                    "missing_evidence": ("ANALYSIS_INPUT_TRUNCATED",),
+                }
+            )
+        }
+    )
+
+    async def invoke(
+        request: SpecialistRequest, kind: SpecialistKind, deadline: datetime
+    ) -> SpecialistAnalysisResult:
+        del request, kind, deadline
+        return partial
+
+    bundle = await SpecialistAnalysisWorkflow(
+        cast(BranchInvoker, invoke), clock=lambda: NOW
+    ).run(
+        _context(),
+        _capabilities(SpecialistKind.METRICS),
+        deadline=NOW + timedelta(minutes=1),
+    )
+
+    assert bundle.results == (partial,)
+    assert bundle.failures == ()
 
 
 def test_analysis_bundle_models_forbid_extra_fields_and_unknown_failure_codes() -> None:

@@ -85,6 +85,22 @@ def _analysis_result(
     )
 
 
+def _failed_analysis_result(
+    kind: SpecialistKind,
+    *,
+    missing_evidence: tuple[str, ...] = (),
+) -> SpecialistAnalysisResult:
+    return SpecialistAnalysisResult(
+        analysis=SpecialistAnalysisDraft(
+            specialist=kind,
+            status="FAILED",
+            observations=(),
+            missing_evidence=cast(tuple[Any, ...], missing_evidence),
+        ),
+        known_evidence=(),
+    )
+
+
 def _complete_report(reference: EvidenceReference) -> RcaReportDraft:
     return RcaReportDraft(
         status="COMPLETE",
@@ -813,6 +829,37 @@ async def test_all_failed_analysis_matrix_controls_durable_retry(
         assert report is not None
         assert report.status == "FAILED"
         assert report.hypotheses == ()
+
+
+@pytest.mark.asyncio
+async def test_processor_normalizes_all_failed_analysis_results_for_audit_and_terminal_code() -> None:
+    bundle = SpecialistAnalysisBundle(
+        results=tuple(
+            _failed_analysis_result(kind, missing_evidence=missing)
+            for kind, missing in (
+                (SpecialistKind.LOG, ()),
+                (SpecialistKind.TRACE, ("ANALYSIS_SCHEMA_INVALID",)),
+                (SpecialistKind.METRICS, ("MCP_RESULT_INVALID", "ANALYSIS_FAILED")),
+            )
+        )
+    )
+
+    report, calls = await _exercise_analysis_outcome(bundle=bundle)
+
+    assert report is not None
+    assert report.status == "FAILED"
+    assert report.hypotheses == ()
+    assert calls["persisted_results"] == ()
+    assert [
+        (failure.specialist, failure.code)
+        for failure in cast(tuple[SpecialistFailure, ...], calls["persisted_failures"])
+    ] == [
+        (SpecialistKind.METRICS, "MCP_RESULT_INVALID"),
+        (SpecialistKind.TRACE, "ANALYSIS_SCHEMA_INVALID"),
+        (SpecialistKind.LOG, "ANALYSIS_FAILED"),
+    ]
+    assert calls["run_failure_code"] == "MCP_RESULT_INVALID"
+    assert calls["root"] == 0
 
 
 @pytest.mark.asyncio

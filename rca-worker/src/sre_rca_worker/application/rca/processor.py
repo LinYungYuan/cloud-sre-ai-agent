@@ -33,6 +33,7 @@ from sre_rca_worker.agents.specialists.metrics_agent import MetricsSpecialist
 from sre_rca_worker.agents.specialists.trace_agent import TraceSpecialist
 from sre_rca_worker.agents.specialists.workflow import (
     SpecialistAnalysisWorkflow,
+    normalize_specialist_analysis_bundle,
 )
 from sre_rca_worker.application.rca.evidence_tools import EvidenceToolSession
 from sre_rca_worker.application.rca.job_lifecycle import (
@@ -253,10 +254,12 @@ class ProductionRcaProcessor:
             "_analysis_workflow_factory",
             SpecialistAnalysisWorkflow,
         )
-        bundle = await workflow_factory(invoke).run(
-            context,
-            capabilities,
-            deadline=claim.deadline_at,
+        bundle = normalize_specialist_analysis_bundle(
+            await workflow_factory(invoke).run(
+                context,
+                capabilities,
+                deadline=claim.deadline_at,
+            )
         )
         bundle = self._ordered_analysis_bundle(bundle)
         persisted_results, audit_failures = await self._persist_specialist_analyses(
