@@ -43,13 +43,13 @@ class CountingClient:
     async def list_tools(self):
         return ()
 
-    async def call(self, tool_name, arguments, deadline):
+    async def call(self, tool_name, arguments, deadline) -> bytes:
         self.calls += 1
         return b'{"cpu":85.23,"series":[1,2,3]}'
 
 
 class InvalidResultClient(CountingClient):
-    async def call(self, tool_name, arguments, deadline):
+    async def call(self, tool_name, arguments, deadline) -> bytes:
         self.calls += 1
         return b"not-json"
 

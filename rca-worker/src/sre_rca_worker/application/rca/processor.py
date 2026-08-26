@@ -5,6 +5,7 @@ import hashlib
 import json
 from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, get_args
@@ -35,6 +36,7 @@ from sre_rca_worker.agents.specialists.workflow import (
 )
 from sre_rca_worker.application.rca.evidence_tools import EvidenceToolSession
 from sre_rca_worker.application.rca.job_lifecycle import (
+    LifecycleFailureCode,
     RcaJobClaim,
     RcaProcessingResult,
 )
@@ -67,6 +69,36 @@ _SPECIALIST_TYPES = {
     SpecialistKind.LOG: "LOGS",
 }
 _STABLE_SPECIALIST_CODES = frozenset(get_args(StableSpecialistCode))
+
+
+@dataclass(frozen=True, slots=True)
+class _ProcessorRunOutcome:
+    report: RcaReportDraft
+    failure_code: LifecycleFailureCode | None = None
+
+
+_LEGACY_FAILURE_CODES: Mapping[str, LifecycleFailureCode] = {
+    "SPECIALIST_TIMEOUT": "MCP_TIMEOUT",
+    "SPECIALIST_TRANSPORT": "MCP_TRANSPORT",
+    "SPECIALIST_VALIDATION": "VALIDATION_FAILED",
+    "SPECIALIST_FAILED": "INTERNAL_ERROR",
+    "MCP_TIMEOUT": "MCP_TIMEOUT",
+    "MCP_TRANSPORT": "MCP_TRANSPORT",
+    "MCP_PAYLOAD_TOO_LARGE": "MCP_PAYLOAD_TOO_LARGE",
+    "MCP_RESULT_INVALID": "MCP_RESULT_INVALID",
+}
+_ANALYSIS_FAILURE_CODES: Mapping[str, LifecycleFailureCode] = {
+    "MCP_TIMEOUT": "MCP_TIMEOUT",
+    "MCP_TRANSPORT": "MCP_TRANSPORT",
+    "MCP_PAYLOAD_TOO_LARGE": "MCP_PAYLOAD_TOO_LARGE",
+    "MCP_RESULT_INVALID": "MCP_RESULT_INVALID",
+    "ANALYSIS_TIMEOUT": "ANALYSIS_TIMEOUT",
+    "ANALYSIS_SCHEMA_INVALID": "ANALYSIS_SCHEMA_INVALID",
+    "ANALYSIS_UNKNOWN_EVIDENCE": "ANALYSIS_UNKNOWN_EVIDENCE",
+    "ANALYSIS_INPUT_TRUNCATED": "ANALYSIS_INPUT_TRUNCATED",
+    "ANALYSIS_FAILED": "ANALYSIS_FAILED",
+    "NO_SAFE_MCP_CAPABILITY": "NO_SAFE_MCP_CAPABILITY",
+}
 
 
 class ProductionRcaProcessor:
@@ -114,14 +146,14 @@ class ProductionRcaProcessor:
         )
         try:
             if mode is SpecialistAnalysisMode.DISABLED:
-                report = await self._run_legacy(
+                outcome = await self._run_legacy(
                     claim,
                     context,
                     capabilities,
                     clients,
                 )
             else:
-                report = await self._run_specialist_analysis(
+                outcome = await self._run_specialist_analysis(
                     claim,
                     context,
                     capabilities,
@@ -132,8 +164,11 @@ class ProductionRcaProcessor:
             report = RcaSynthesizer().failed_analysis()
             await self._persist_report(claim, report)
             return RcaProcessingResult(status="FAILED", failure_code=failure.code)
-        await self._persist_report(claim, report)
-        return RcaProcessingResult(status=report.status)
+        await self._persist_report(claim, outcome.report)
+        return RcaProcessingResult(
+            status=outcome.report.status,
+            failure_code=outcome.failure_code,
+        )
 
     def _legacy_specialists(
         self,
@@ -160,7 +195,7 @@ class ProductionRcaProcessor:
         context: IncidentContext,
         capabilities: CapabilitySet,
         clients: Mapping[SpecialistKind, McpClient],
-    ) -> RcaReportDraft:
+    ) -> _ProcessorRunOutcome:
         bundle = await RcaWorkflow(self._legacy_specialists(clients)).run(
             context, capabilities, deadline=claim.deadline_at
         )
@@ -184,7 +219,13 @@ class ProductionRcaProcessor:
             )
             if bundle.failures:
                 report = RcaSynthesizer().with_specialist_failures(report)
-        return report
+        return _ProcessorRunOutcome(
+            report=report,
+            failure_code=self._terminal_failure_code(
+                bundle.failures,
+                failure_codes=_LEGACY_FAILURE_CODES,
+            ),
+        )
 
     async def _run_specialist_analysis(
         self,
@@ -194,7 +235,7 @@ class ProductionRcaProcessor:
         clients: Mapping[SpecialistKind, McpClient],
         *,
         mode: SpecialistAnalysisMode,
-    ) -> RcaReportDraft:
+    ) -> _ProcessorRunOutcome:
         async def invoke(
             request: SpecialistRequest,
             kind: SpecialistKind,
@@ -236,9 +277,17 @@ class ProductionRcaProcessor:
         )
         if not usable:
             if bundle.failures or bundle.results:
-                return RcaSynthesizer().failed_analysis()
-            return RcaSynthesizer().insufficient_evidence(
-                provider=context.scope.provider if context.scope else None
+                return _ProcessorRunOutcome(
+                    report=RcaSynthesizer().failed_analysis(),
+                    failure_code=self._terminal_failure_code(
+                        bundle.failures,
+                        failure_codes=_ANALYSIS_FAILURE_CODES,
+                    ),
+                )
+            return _ProcessorRunOutcome(
+                report=RcaSynthesizer().insufficient_evidence(
+                    provider=context.scope.provider if context.scope else None
+                )
             )
 
         references = self._known_evidence(bundle.results)
@@ -260,7 +309,7 @@ class ProductionRcaProcessor:
             result.analysis.status != "COMPLETE" for result in bundle.results
         ):
             report = RcaSynthesizer().with_specialist_failures(report)
-        return report
+        return _ProcessorRunOutcome(report=report)
 
     def _root_agent(self) -> Any:
         factory = getattr(self, "_root_agent_factory", AdkRcaAgent)
@@ -269,6 +318,22 @@ class ProductionRcaProcessor:
             skill_instruction=self._skills.get_for_agent("rca").body,
             corrective_retries=getattr(self._settings, "agent_corrective_retries", 1),
         )
+
+    @staticmethod
+    def _terminal_failure_code(
+        failures: tuple[SpecialistFailure, ...],
+        *,
+        failure_codes: Mapping[str, LifecycleFailureCode],
+    ) -> LifecycleFailureCode | None:
+        if not failures:
+            return None
+        fallback: LifecycleFailureCode = "INTERNAL_ERROR"
+        for kind in _SPECIALIST_ORDER:
+            for failure in failures:
+                if failure.specialist is kind:
+                    code = failure_codes.get(failure.code)
+                    return code if code is not None else fallback
+        return fallback
 
     @staticmethod
     def _ordered_analysis_bundle(
@@ -587,15 +652,6 @@ class ProductionRcaProcessor:
             SpecialistKind.TRACE: "TRACES",
             SpecialistKind.LOG: "LOGS",
         }
-        failure_codes = {
-            "SPECIALIST_TIMEOUT": "MCP_TIMEOUT",
-            "SPECIALIST_TRANSPORT": "MCP_TRANSPORT",
-            "SPECIALIST_VALIDATION": "VALIDATION_FAILED",
-            "SPECIALIST_FAILED": "INTERNAL_ERROR",
-            "MCP_TIMEOUT": "MCP_TIMEOUT",
-            "MCP_TRANSPORT": "MCP_TRANSPORT",
-            "MCP_RESULT_INVALID": "MCP_RESULT_INVALID",
-        }
         async with self._sessions() as session, session.begin():
             for failure in failures:
                 await session.execute(
@@ -611,7 +667,9 @@ class ProductionRcaProcessor:
                     {
                         "run": claim.rca_run_id,
                         "kind": specialist_types[failure.specialist],
-                        "failure_code": failure_codes[failure.code],
+                        "failure_code": _LEGACY_FAILURE_CODES.get(
+                            failure.code, "INTERNAL_ERROR"
+                        ),
                     },
                 )
 

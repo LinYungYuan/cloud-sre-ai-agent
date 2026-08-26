@@ -16,7 +16,11 @@ from sre_rca_worker.agents.rca.models import (
     SpecialistFailure,
 )
 from sre_rca_worker.agents.specialists.base import SpecialistRequest, SpecialistResult
-from sre_rca_worker.application.rca.job_lifecycle import RcaJobClaim, RcaJobHandler
+from sre_rca_worker.application.rca.job_lifecycle import (
+    RcaJobClaim,
+    RcaJobHandler,
+    RcaProcessingResult,
+)
 from sre_rca_worker.application.rca.processor import ProductionRcaProcessor
 from sre_rca_worker.config.settings import (
     SpecialistAnalysisMode,
@@ -517,15 +521,17 @@ async def test_active_to_disabled_rollback_uses_legacy_path_without_downgrade(
         clients: object,
         *,
         mode: SpecialistAnalysisMode,
-    ) -> RcaReportDraft:
+    ) -> processor_module._ProcessorRunOutcome:
         calls.append(f"analysis:{mode.value}")
-        return RcaReportDraft(
-            status="PARTIAL",
-            summary_zh_tw="active report",
-            hypotheses=(),
-            missing_evidence=("ROLLBACK_TEST",),
-            remediation=("inspect",),
-            verification_steps=("verify",),
+        return processor_module._ProcessorRunOutcome(
+            report=RcaReportDraft(
+                status="PARTIAL",
+                summary_zh_tw="active report",
+                hypotheses=(),
+                missing_evidence=("ROLLBACK_TEST",),
+                remediation=("inspect",),
+                verification_steps=("verify",),
+            )
         )
 
     async def fake_run_legacy(
@@ -534,15 +540,17 @@ async def test_active_to_disabled_rollback_uses_legacy_path_without_downgrade(
         actual_context: IncidentContext,
         capabilities: CapabilitySet,
         clients: object,
-    ) -> RcaReportDraft:
+    ) -> processor_module._ProcessorRunOutcome:
         calls.append("legacy")
-        return RcaReportDraft(
-            status="PARTIAL",
-            summary_zh_tw="legacy report",
-            hypotheses=(),
-            missing_evidence=("ROLLBACK_TEST",),
-            remediation=("inspect",),
-            verification_steps=("verify",),
+        return processor_module._ProcessorRunOutcome(
+            report=RcaReportDraft(
+                status="PARTIAL",
+                summary_zh_tw="legacy report",
+                hypotheses=(),
+                missing_evidence=("ROLLBACK_TEST",),
+                remediation=("inspect",),
+                verification_steps=("verify",),
+            )
         )
 
     async def fake_persist_report(
@@ -728,13 +736,15 @@ async def _exercise_analysis_outcome(
         by_specialist={kind: (_allowed_tool(kind),) for kind in ORDER}
     )
     try:
-        report = await processor._run_specialist_analysis(
+        outcome = await processor._run_specialist_analysis(
             claim,
             context,
             capabilities,
             cast(Any, {kind: object() for kind in ORDER}),
             mode=SpecialistAnalysisMode.ACTIVE,
         )
+        report = outcome.report
+        calls["run_failure_code"] = outcome.failure_code
     except ConnectionError:
         calls["raised_transport"] = True
         report = None
@@ -1137,3 +1147,205 @@ async def test_evidence_bearing_legacy_processor_calls_only_explicit_legacy_root
 
     assert result.status == "PARTIAL"
     assert calls == {"legacy": 1, "active": 0, "persisted": 1}
+
+
+@pytest.mark.asyncio
+async def test_processor_returns_fixed_order_legacy_terminal_failure_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 25, 11, 0, tzinfo=UTC)
+    context = IncidentContext(
+        incident_id=uuid4(),
+        rca_run_id=uuid4(),
+        alert_issue="CPU high",
+        scope=CloudScope(provider="GCP", scope_id="project-a", safe=True),
+        window_start=now - timedelta(minutes=15),
+        window_end=now,
+    )
+    claim = RcaJobClaim(
+        worker_job_id=uuid4(),
+        rca_run_id=context.rca_run_id,
+        incident_id=context.incident_id,
+        attempt_number=3,
+        deadline_at=now + timedelta(minutes=5),
+        lease_owner="test",
+    )
+    bundle = InvestigationBundle(
+        failures=tuple(
+            SpecialistFailure(specialist=kind, code=code)
+            for kind, code in (
+                (SpecialistKind.LOG, "SPECIALIST_FAILED"),
+                (SpecialistKind.TRACE, "SPECIALIST_VALIDATION"),
+                (SpecialistKind.METRICS, "MCP_PAYLOAD_TOO_LARGE"),
+            )
+        )
+    )
+
+    class FakeWorkflow:
+        def __init__(self, specialists: object) -> None:
+            assert specialists
+
+        async def run(
+            self,
+            actual_context: IncidentContext,
+            capabilities: CapabilitySet,
+            *,
+            deadline: datetime,
+        ) -> InvestigationBundle:
+            assert actual_context == context
+            assert capabilities == CapabilitySet(by_specialist={})
+            assert deadline == claim.deadline_at
+            return bundle
+
+    async def fake_discover(*args: object, **kwargs: object) -> tuple[
+        CapabilitySet, dict[SpecialistKind, object]
+    ]:
+        del args, kwargs
+        return CapabilitySet(by_specialist={}), {}
+
+    async def fake_load_context(
+        self: ProductionRcaProcessor, actual_claim: RcaJobClaim
+    ) -> IncidentContext:
+        assert actual_claim == claim
+        return context
+
+    async def fake_persist_failures(
+        self: ProductionRcaProcessor,
+        actual_claim: RcaJobClaim,
+        failures: tuple[SpecialistFailure, ...],
+    ) -> None:
+        assert actual_claim == claim
+        assert failures == bundle.failures
+
+    async def fake_persist_bundle(
+        self: ProductionRcaProcessor,
+        actual_claim: RcaJobClaim,
+        results: tuple[SpecialistResult, ...],
+    ) -> tuple[tuple[EvidenceReference, ...], tuple[dict[str, object], ...]]:
+        assert actual_claim == claim
+        assert results == ()
+        return (), ()
+
+    async def fake_persist_report(
+        self: ProductionRcaProcessor,
+        actual_claim: RcaJobClaim,
+        report: RcaReportDraft,
+    ) -> None:
+        assert actual_claim == claim
+        assert report.status == "FAILED"
+
+    monkeypatch.setattr(processor_module, "McpClientFactory", lambda settings: object())
+    monkeypatch.setattr(processor_module, "discover_capabilities", fake_discover)
+    monkeypatch.setattr(processor_module, "RcaWorkflow", FakeWorkflow)
+    monkeypatch.setattr(ProductionRcaProcessor, "_load_context", fake_load_context)
+    monkeypatch.setattr(ProductionRcaProcessor, "_persist_failures", fake_persist_failures)
+    monkeypatch.setattr(ProductionRcaProcessor, "_persist_bundle", fake_persist_bundle)
+    monkeypatch.setattr(ProductionRcaProcessor, "_persist_report", fake_persist_report)
+
+    processor = ProductionRcaProcessor(
+        cast(Any, object()),
+        cast(Any, _processor_settings(SpecialistAnalysisMode.DISABLED)),
+    )
+
+    result = await processor(claim)
+
+    assert result == RcaProcessingResult(
+        status="FAILED", failure_code="MCP_PAYLOAD_TOO_LARGE"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [SpecialistAnalysisMode.SHADOW, SpecialistAnalysisMode.ACTIVE])
+async def test_processor_returns_fixed_order_analysis_terminal_failure_code(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: SpecialistAnalysisMode,
+) -> None:
+    now = datetime(2026, 8, 25, 11, 0, tzinfo=UTC)
+    context = IncidentContext(
+        incident_id=uuid4(),
+        rca_run_id=uuid4(),
+        alert_issue="CPU high",
+        scope=CloudScope(provider="GCP", scope_id="project-a", safe=True),
+        window_start=now - timedelta(minutes=15),
+        window_end=now,
+    )
+    claim = RcaJobClaim(
+        worker_job_id=uuid4(),
+        rca_run_id=context.rca_run_id,
+        incident_id=context.incident_id,
+        attempt_number=3,
+        deadline_at=now + timedelta(minutes=5),
+        lease_owner="test",
+    )
+    bundle = SpecialistAnalysisBundle(
+        failures=tuple(
+            SpecialistFailure(specialist=kind, code=code)
+            for kind, code in (
+                (SpecialistKind.LOG, "ANALYSIS_FAILED"),
+                (SpecialistKind.TRACE, "ANALYSIS_SCHEMA_INVALID"),
+                (SpecialistKind.METRICS, "MCP_RESULT_INVALID"),
+            )
+        )
+    )
+
+    class FakeWorkflow:
+        def __init__(self, invoker: object) -> None:
+            assert invoker
+
+        async def run(
+            self,
+            actual_context: IncidentContext,
+            capabilities: CapabilitySet,
+            *,
+            deadline: datetime,
+        ) -> SpecialistAnalysisBundle:
+            assert actual_context == context
+            assert capabilities == CapabilitySet(by_specialist={})
+            assert deadline == claim.deadline_at
+            return bundle
+
+    async def fake_discover(*args: object, **kwargs: object) -> tuple[
+        CapabilitySet, dict[SpecialistKind, object]
+    ]:
+        del args, kwargs
+        return CapabilitySet(by_specialist={}), {}
+
+    async def fake_load_context(
+        self: ProductionRcaProcessor, actual_claim: RcaJobClaim
+    ) -> IncidentContext:
+        assert actual_claim == claim
+        return context
+
+    async def fake_persist_failures(
+        self: ProductionRcaProcessor,
+        actual_claim: RcaJobClaim,
+        failures: tuple[SpecialistFailure, ...],
+    ) -> None:
+        assert actual_claim == claim
+        assert tuple(item.specialist for item in failures) == ORDER
+
+    async def fake_persist_report(
+        self: ProductionRcaProcessor,
+        actual_claim: RcaJobClaim,
+        report: RcaReportDraft,
+    ) -> None:
+        assert actual_claim == claim
+        assert report.status == "FAILED"
+
+    monkeypatch.setattr(processor_module, "McpClientFactory", lambda settings: object())
+    monkeypatch.setattr(processor_module, "discover_capabilities", fake_discover)
+    monkeypatch.setattr(processor_module, "SpecialistAnalysisWorkflow", FakeWorkflow)
+    monkeypatch.setattr(ProductionRcaProcessor, "_load_context", fake_load_context)
+    monkeypatch.setattr(ProductionRcaProcessor, "_persist_analysis_failures", fake_persist_failures)
+    monkeypatch.setattr(ProductionRcaProcessor, "_persist_report", fake_persist_report)
+
+    processor = ProductionRcaProcessor(
+        cast(Any, object()),
+        cast(Any, _processor_settings(mode)),
+    )
+
+    result = await processor(claim)
+
+    assert result == RcaProcessingResult(
+        status="FAILED", failure_code="MCP_RESULT_INVALID"
+    )

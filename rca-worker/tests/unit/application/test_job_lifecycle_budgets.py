@@ -10,6 +10,8 @@ import pytest
 from sre_rca_worker.application.rca.job_lifecycle import (
     DeadlineExceededError,
     JobDisposition,
+    LifecycleFailureCode,
+    RcaJobClaim,
     RcaJobHandler,
     RcaProcessingResult,
 )
@@ -169,19 +171,20 @@ async def test_hung_processor_is_cancelled_at_claim_deadline_and_settled_termina
 ):
     message = _message()
     now = datetime.now(UTC)
-    claim = type("Claim", (), {})()
-    claim.worker_job_id = message.worker_job_id
-    claim.rca_run_id = message.rca_run_id
-    claim.incident_id = message.incident_id
-    claim.attempt_number = 1
-    claim.deadline_at = now + timedelta(milliseconds=40)
-    claim.lease_owner = "worker"
+    claim = RcaJobClaim(
+        worker_job_id=message.worker_job_id,
+        rca_run_id=message.rca_run_id,
+        incident_id=message.incident_id,
+        attempt_number=1,
+        deadline_at=now + timedelta(milliseconds=40),
+        lease_owner="worker",
+    )
     started = False
     cancelled = False
     settled: list[str] = []
     never = asyncio.Event()
 
-    async def process(_claim):
+    async def process(_claim: RcaJobClaim) -> RcaProcessingResult:
         nonlocal started, cancelled
         started = True
         try:
@@ -189,6 +192,7 @@ async def test_hung_processor_is_cancelled_at_claim_deadline_and_settled_termina
         except asyncio.CancelledError:
             cancelled = True
             raise
+        raise AssertionError("the hanging processor must be cancelled")
 
     handler = RcaJobHandler(
         cast(Any, _Sessions()),
@@ -197,33 +201,47 @@ async def test_hung_processor_is_cancelled_at_claim_deadline_and_settled_termina
         lease_renewal_seconds=1,
     )
 
-    async def fake_claim(_message):
+    async def fake_claim(_message: RcaJobMessage) -> RcaJobClaim:
         return claim
 
-    async def fake_settle_failure(_claim, failure_code):
+    async def fake_settle_failure(
+        _claim: RcaJobClaim, failure_code: LifecycleFailureCode
+    ) -> JobDisposition:
         settled.append(failure_code)
         return JobDisposition.ACK
 
-    handler._claim = fake_claim
-    handler._settle_failure = fake_settle_failure
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(RcaJobHandler, "_claim", fake_claim)
+    monkeypatch.setattr(RcaJobHandler, "_settle_failure", fake_settle_failure)
 
-    assert await handler.handle(message) is JobDisposition.ACK
-    assert started is True
-    assert cancelled is True
-    assert settled == ["DEADLINE_EXCEEDED"]
+    try:
+        assert await handler.handle(message) is JobDisposition.ACK
+        assert started is True
+        assert cancelled is True
+        assert settled == ["DEADLINE_EXCEEDED"]
+    finally:
+        monkeypatch.undo()
 
 
 @pytest.mark.asyncio
 async def test_lease_renewal_does_not_open_db_after_deadline() -> None:
     now = datetime.now(UTC)
-    claim = type("Claim", (), {})()
-    claim.worker_job_id = uuid4()
-    claim.rca_run_id = uuid4()
-    claim.incident_id = uuid4()
-    claim.attempt_number = 1
-    claim.deadline_at = now + timedelta(milliseconds=10)
-    claim.lease_owner = "worker"
-    processor = asyncio.create_task(asyncio.Event().wait())
+    claim = RcaJobClaim(
+        worker_job_id=uuid4(),
+        rca_run_id=uuid4(),
+        incident_id=uuid4(),
+        attempt_number=1,
+        deadline_at=now + timedelta(milliseconds=10),
+        lease_owner="worker",
+    )
+
+    async def wait_forever() -> RcaProcessingResult:
+        await asyncio.Event().wait()
+        raise AssertionError("the lease renewal processor must be cancelled")
+
+    processor: asyncio.Task[RcaProcessingResult] = asyncio.create_task(
+        wait_forever()
+    )
     handler = RcaJobHandler(
         cast(Any, _Sessions()),
         lambda _claim: _completed(),

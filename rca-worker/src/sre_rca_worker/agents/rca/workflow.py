@@ -16,6 +16,7 @@ from sre_rca_worker.agents.specialists.base import (
     SpecialistRequest,
     SpecialistResult,
 )
+from sre_rca_worker.domain.evidence.chunking import McpPayloadTooLargeError
 from sre_rca_worker.integrations.mcp.models import CapabilitySet, SpecialistKind
 
 _ORDER = (SpecialistKind.METRICS, SpecialistKind.TRACE, SpecialistKind.LOG)
@@ -92,6 +93,10 @@ class RcaWorkflow:
             except McpResultInvalidError:
                 failures[kind] = SpecialistFailure(
                     specialist=kind, code="MCP_RESULT_INVALID"
+                )
+            except McpPayloadTooLargeError:
+                failures[kind] = SpecialistFailure(
+                    specialist=kind, code="MCP_PAYLOAD_TOO_LARGE"
                 )
             except ValueError:
                 failures[kind] = SpecialistFailure(
