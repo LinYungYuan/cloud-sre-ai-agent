@@ -10,9 +10,7 @@ import pytest
 import sqlalchemy as sa
 
 ROOT = Path(__file__).resolve().parents[3]
-MIGRATION_PATH = (
-    ROOT / "migrations/versions/0002_adk_specialist_analysis.py"
-)
+MIGRATION_PATH = ROOT / "migrations/versions/0002_adk_specialist_analysis.py"
 
 STATUS_EXPRESSION = """status = ANY (ARRAY[
     'QUEUED'::text, 'RUNNING'::text, 'SUCCEEDED'::text,
@@ -40,9 +38,7 @@ class _CatalogResult:
         self._candidates = candidates
 
     def scalars(self):
-        return (
-            candidate["constraint_name"] for candidate in self._candidates
-        )
+        return (candidate["constraint_name"] for candidate in self._candidates)
 
     def mappings(self):
         return iter(self._candidates)
@@ -137,8 +133,9 @@ def test_required_check_name_accepts_exact_legacy_allowlist(
         lambda: _CatalogConnection((candidate,)),
     )
 
-    assert migration._required_check_name(table_name, column_name) == (
-        candidate["constraint_name"]
+    assert (
+        migration._required_check_name(table_name, column_name)
+        == (candidate["constraint_name"])
     )
 
 
@@ -161,9 +158,7 @@ def test_downgrade_updates_only_specialist_only_failure_codes() -> None:
 
     with engine.begin() as connection:
         connection.execute(
-            sa.text(
-                "CREATE TABLE rca_runs (id INTEGER PRIMARY KEY, failure_code TEXT)"
-            )
+            sa.text("CREATE TABLE rca_runs (id INTEGER PRIMARY KEY, failure_code TEXT)")
         )
         connection.execute(sa.text("CREATE TABLE updated_rows (id INTEGER)"))
         connection.execute(

@@ -75,8 +75,7 @@ def _check_skeleton(sql: str) -> str:
 
 def _check_literals(sql: str) -> set[str]:
     return {
-        match.group(1).replace("''", "'")
-        for match in SQL_TEXT_LITERAL.finditer(sql)
+        match.group(1).replace("''", "'") for match in SQL_TEXT_LITERAL.finditer(sql)
     }
 
 
@@ -259,17 +258,13 @@ def downgrade() -> None:
     op.execute("UPDATE specialist_runs SET status = 'FAILED' WHERE status = 'PARTIAL'")
     for table_name in LIFECYCLE_TABLES:
         _downgrade_failure_codes(op.get_bind(), table_name)
-        op.drop_constraint(
-            f"ck_{table_name}_failure_code", table_name, type_="check"
-        )
+        op.drop_constraint(f"ck_{table_name}_failure_code", table_name, type_="check")
         op.create_check_constraint(
             f"ck_{table_name}_failure_code",
             table_name,
             _check(LEGACY_FAILURE_CODES, "failure_code"),
         )
-    op.drop_constraint(
-        "ck_specialist_runs_status", "specialist_runs", type_="check"
-    )
+    op.drop_constraint("ck_specialist_runs_status", "specialist_runs", type_="check")
     op.create_check_constraint(
         "ck_specialist_runs_status",
         "specialist_runs",

@@ -178,16 +178,12 @@ async def test_exhausted_transport_retry_has_a_distinct_safe_failure_code() -> N
     now = datetime.now(UTC)
     barrier = asyncio.Event()
     barrier.set()
-    metrics = FakeSpecialist(
-        SpecialistKind.METRICS, [], barrier, transient_failures=2
-    )
+    metrics = FakeSpecialist(SpecialistKind.METRICS, [], barrier, transient_failures=2)
 
     bundle = await RcaWorkflow({SpecialistKind.METRICS: metrics}).run(
         _context(now),
         CapabilitySet(
-            by_specialist={
-                SpecialistKind.METRICS: (_tool(SpecialistKind.METRICS),)
-            }
+            by_specialist={SpecialistKind.METRICS: (_tool(SpecialistKind.METRICS),)}
         ),
         deadline=now + timedelta(seconds=5),
     )

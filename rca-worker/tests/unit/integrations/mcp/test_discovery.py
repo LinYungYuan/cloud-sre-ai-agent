@@ -1,10 +1,11 @@
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from sre_rca_worker.integrations.mcp.discovery import discover_capabilities
+from sre_rca_worker.integrations.mcp.factories import McpClientFactory
 from sre_rca_worker.integrations.mcp.models import (
     CloudScope,
     DiscoveredTool,
@@ -13,9 +14,7 @@ from sre_rca_worker.integrations.mcp.models import (
 )
 
 
-def _manifest(
-    capability: str, *, endpoint_identity: str = "metrics"
-) -> ManifestEntry:
+def _manifest(capability: str, *, endpoint_identity: str = "metrics") -> ManifestEntry:
     return ManifestEntry.model_validate(
         {
             "endpoint_identity": endpoint_identity,
@@ -89,7 +88,7 @@ async def test_discovery_exposes_only_capabilities_required_by_skill(
     manifest = (_manifest("metrics.query"), _manifest("metrics.unused"))
 
     capabilities, _ = await discover_capabilities(
-        factory,
+        cast(McpClientFactory, factory),
         safe_scope,
         manifest,
         {SpecialistKind.METRICS: ("metrics.query",)},
@@ -119,7 +118,7 @@ async def test_discovery_leaves_specialist_empty_when_required_capability_has_no
     )
 
     capabilities, _ = await discover_capabilities(
-        factory,
+        cast(McpClientFactory, factory),
         safe_scope,
         manifest,
         {SpecialistKind.METRICS: ("metrics.query",)},

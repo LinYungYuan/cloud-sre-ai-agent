@@ -419,9 +419,7 @@ def test_preserves_canonical_unscoped_ip_server_addresses(
     )
 
     assert result is not None
-    assert result["spans"][0]["attributes"] == {
-        "server.address": server_address
-    }
+    assert result["spans"][0]["attributes"] == {"server.address": server_address}
 
 
 @pytest.mark.parametrize(
@@ -613,7 +611,11 @@ def test_overflow_returns_only_parent_closed_critical_path_spans() -> None:
         )
 
     result = normalize_trace_evidence(
-        {"traceId": "overflow-trace", "startedAt": "2026-08-23T04:21:00Z", "spans": spans},
+        {
+            "traceId": "overflow-trace",
+            "startedAt": "2026-08-23T04:21:00Z",
+            "spans": spans,
+        },
         alert_issue="checkout latency",
     )
 
@@ -648,7 +650,9 @@ def test_overflow_returns_only_parent_closed_critical_path_spans() -> None:
         ),
         (
             "non-object attributes",
-            lambda payload: payload["spans"][0].update({"attributes": ["not", "an", "object"]}),
+            lambda payload: payload["spans"][0].update(
+                {"attributes": ["not", "an", "object"]}
+            ),
         ),
     ],
 )

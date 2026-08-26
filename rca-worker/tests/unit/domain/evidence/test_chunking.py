@@ -25,7 +25,9 @@ def test_chunks_canonical_json_by_unicode_code_points() -> None:
         max_total_chars=32,
     )
 
-    assert [(chunk.chunk_index, chunk.chunk_count, chunk.content) for chunk in chunks] == [
+    assert [
+        (chunk.chunk_index, chunk.chunk_count, chunk.content) for chunk in chunks
+    ] == [
         (0, 2, '{"a":"台🔥'),
         (1, 2, '","z":1}'),
     ]

@@ -12,6 +12,7 @@ from sre_rca_worker.agents.specialists.base import (
 from sre_rca_worker.agents.specialists.metrics_agent import MetricsSpecialist
 from sre_rca_worker.agents.specialists.trace_agent import TraceSpecialist
 from sre_rca_worker.domain.evidence.models import EvidenceDraft, Finding
+from sre_rca_worker.integrations.mcp.client import McpClient
 from sre_rca_worker.integrations.mcp.models import (
     AllowedTool,
     CloudScope,
@@ -68,12 +69,18 @@ def test_finding_requires_evidence_and_bounded_confidence() -> None:
 
 
 def test_specialist_constructor_accepts_the_two_mib_response_cap() -> None:
-    MetricsSpecialist(lambda: None, max_response_bytes=2 * 1024 * 1024)
+    def unused_client_factory() -> McpClient:
+        raise AssertionError("the no-safe-scope path must not construct MCP")
+
+    MetricsSpecialist(unused_client_factory, max_response_bytes=2 * 1024 * 1024)
 
 
 def test_specialist_constructor_rejects_a_response_limit_above_two_mib() -> None:
+    def unused_client_factory() -> McpClient:
+        raise AssertionError("the no-safe-scope path must not construct MCP")
+
     with pytest.raises(ValueError, match="must not exceed 2 MiB"):
-        MetricsSpecialist(lambda: None, max_response_bytes=2 * 1024 * 1024 + 1)
+        MetricsSpecialist(unused_client_factory, max_response_bytes=2 * 1024 * 1024 + 1)
 
 
 @pytest.mark.asyncio
@@ -202,9 +209,9 @@ async def test_specialist_accepts_raw_response_exactly_at_byte_limit() -> None:
         async def call(self, tool_name, arguments, deadline):
             return b'{"padding":"' + (b" " * (2 * 1024 * 1024 - 14)) + b'"}'
 
-    result = await MetricsSpecialist(
-        Client, max_response_bytes=2 * 1024 * 1024
-    ).run(_safe_metrics_request(), NOW + timedelta(minutes=1))
+    result = await MetricsSpecialist(Client, max_response_bytes=2 * 1024 * 1024).run(
+        _safe_metrics_request(), NOW + timedelta(minutes=1)
+    )
 
     assert result.findings[0].evidence[0].structured_json == {
         "padding": " " * (2 * 1024 * 1024 - 14)
@@ -215,7 +222,7 @@ async def test_specialist_accepts_raw_response_exactly_at_byte_limit() -> None:
 async def test_trace_specialist_persists_normalized_waterfall_and_exact_raw_result() -> (
     None
 ):
-    raw = b'''{
+    raw = b"""{
       "traceId": "trace-1",
       "startedAt": "2026-08-23T04:21:00Z",
       "spans": [{
@@ -230,7 +237,7 @@ async def test_trace_specialist_persists_normalized_waterfall_and_exact_raw_resu
         "criticalPath": true,
         "attributes": {"authorization": "Bearer secret"}
       }]
-    }'''
+    }"""
 
     class Client:
         endpoint_identity = "trace"
@@ -265,9 +272,14 @@ async def test_trace_specialist_persists_normalized_waterfall_and_exact_raw_resu
     result = await TraceSpecialist(Client).run(request, NOW + timedelta(minutes=1))
 
     evidence = result.findings[0].evidence[0]
-    assert evidence.structured_json["schemaVersion"] == 1
-    assert evidence.structured_json["traceId"] == "trace-1"
-    assert evidence.structured_json["spans"][0]["attributes"] == {}
+    structured = evidence.structured_json
+    assert isinstance(structured, dict)
+    assert structured["schemaVersion"] == 1
+    assert structured["traceId"] == "trace-1"
+    spans = structured["spans"]
+    assert isinstance(spans, list)
+    assert isinstance(spans[0], dict)
+    assert spans[0]["attributes"] == {}
     assert evidence.raw_result == raw
 
 

@@ -62,7 +62,9 @@ async def test_production_runner_passes_configured_worker_identity_to_job_handle
 
     monkeypatch.setattr(rca_worker, "WorkerSettings", lambda: settings)
     monkeypatch.setattr(rca_worker, "create_async_engine", lambda _: FakeEngine())
-    monkeypatch.setattr(rca_worker, "async_sessionmaker", lambda *args, **kwargs: object())
+    monkeypatch.setattr(
+        rca_worker, "async_sessionmaker", lambda *args, **kwargs: object()
+    )
     monkeypatch.setattr(rca_worker, "ProductionRcaProcessor", lambda *args: object())
     monkeypatch.setattr(rca_worker, "RcaJobHandler", CapturingHandler)
     monkeypatch.setattr(rca_worker.pubsub_v1, "PublisherClient", FakePublisher)

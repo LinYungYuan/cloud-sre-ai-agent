@@ -55,9 +55,7 @@ class SpecialistAnalysisDraft(BaseModel):
         if self.status == "PARTIAL" and not (
             self.observations or self.missing_evidence
         ):
-            raise ValueError(
-                "PARTIAL requires observations or missing evidence codes"
-            )
+            raise ValueError("PARTIAL requires observations or missing evidence codes")
         if self.status == "FAILED" and self.observations:
             raise ValueError("FAILED cannot contain observations")
         return self

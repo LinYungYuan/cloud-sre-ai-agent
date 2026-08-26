@@ -366,6 +366,102 @@ async def test_processor_rollout_modes_keep_root_inputs_strictly_separate(
 
 
 @pytest.mark.asyncio
+async def test_active_to_disabled_rollback_uses_legacy_path_without_downgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 25, 8, 0, tzinfo=UTC)
+    context = IncidentContext(
+        incident_id=uuid4(),
+        rca_run_id=uuid4(),
+        alert_issue="untrusted raw alert",
+        scope=CloudScope(provider="GCP", scope_id="project-a", safe=True),
+        window_start=now - timedelta(minutes=15),
+        window_end=now,
+    )
+    claim = RcaJobClaim(
+        worker_job_id=uuid4(),
+        rca_run_id=context.rca_run_id,
+        incident_id=context.incident_id,
+        attempt_number=1,
+        deadline_at=now + timedelta(minutes=5),
+        lease_owner="test",
+    )
+    settings = _processor_settings(SpecialistAnalysisMode.ACTIVE)
+    calls: list[str] = []
+
+    async def fake_discover(*args: object, **kwargs: object):
+        return CapabilitySet(by_specialist={}), {}
+
+    async def fake_load_context(
+        self: ProductionRcaProcessor, actual_claim: RcaJobClaim
+    ) -> IncidentContext:
+        assert actual_claim == claim
+        return context
+
+    async def fake_run_specialist_analysis(
+        self: ProductionRcaProcessor,
+        actual_claim: RcaJobClaim,
+        actual_context: IncidentContext,
+        capabilities: CapabilitySet,
+        clients: object,
+        *,
+        mode: SpecialistAnalysisMode,
+    ) -> RcaReportDraft:
+        calls.append(f"analysis:{mode.value}")
+        return RcaReportDraft(
+            status="PARTIAL",
+            summary_zh_tw="active report",
+            hypotheses=(),
+            missing_evidence=("ROLLBACK_TEST",),
+            remediation=("inspect",),
+            verification_steps=("verify",),
+        )
+
+    async def fake_run_legacy(
+        self: ProductionRcaProcessor,
+        actual_claim: RcaJobClaim,
+        actual_context: IncidentContext,
+        capabilities: CapabilitySet,
+        clients: object,
+    ) -> RcaReportDraft:
+        calls.append("legacy")
+        return RcaReportDraft(
+            status="PARTIAL",
+            summary_zh_tw="legacy report",
+            hypotheses=(),
+            missing_evidence=("ROLLBACK_TEST",),
+            remediation=("inspect",),
+            verification_steps=("verify",),
+        )
+
+    async def fake_persist_report(
+        self: ProductionRcaProcessor,
+        actual_claim: RcaJobClaim,
+        report: RcaReportDraft,
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(processor_module, "McpClientFactory", lambda settings: object())
+    monkeypatch.setattr(processor_module, "discover_capabilities", fake_discover)
+    monkeypatch.setattr(ProductionRcaProcessor, "_load_context", fake_load_context)
+    monkeypatch.setattr(
+        ProductionRcaProcessor,
+        "_run_specialist_analysis",
+        fake_run_specialist_analysis,
+    )
+    monkeypatch.setattr(ProductionRcaProcessor, "_run_legacy", fake_run_legacy)
+    monkeypatch.setattr(ProductionRcaProcessor, "_persist_report", fake_persist_report)
+
+    processor = ProductionRcaProcessor(cast(Any, object()), cast(Any, settings))
+    first = await processor(claim)
+    settings.specialist_analysis_mode = SpecialistAnalysisMode.DISABLED
+    second = await processor(claim)
+
+    assert first.status == second.status == "PARTIAL"
+    assert calls == ["analysis:ACTIVE", "legacy"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "scope",
     (

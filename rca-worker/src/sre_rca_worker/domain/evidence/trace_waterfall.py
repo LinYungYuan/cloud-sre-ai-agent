@@ -56,9 +56,7 @@ _HTTP_METHODS = frozenset(
     {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT"}
 )
 _RPC_SYSTEMS = frozenset({"grpc", "http", "jsonrpc", "aws-api"})
-_DB_SYSTEMS = frozenset(
-    {"postgresql", "mysql", "sqlite", "mssql", "mongodb", "redis"}
-)
+_DB_SYSTEMS = frozenset({"postgresql", "mysql", "sqlite", "mssql", "mongodb", "redis"})
 _MAX_RESPONSE_SPANS = 100
 
 
@@ -79,10 +77,7 @@ class _InputSpan(BaseModel):
     @field_validator("service_name")
     @classmethod
     def _safe_service_name(cls, value: str) -> str:
-        if (
-            _SERVICE_NAME_PATTERN.fullmatch(value) is None
-            or _is_compact_jwt(value)
-        ):
+        if _SERVICE_NAME_PATTERN.fullmatch(value) is None or _is_compact_jwt(value):
             raise ValueError("serviceName must be a conventional service identifier")
         return value
 
@@ -216,7 +211,9 @@ class _SelectedTrace(BaseModel):
             "spanCount": len(self.candidate.spans),
             "representativeScore": self.representative_score,
             "truncated": self.truncated,
-            "spans": [spans[span_id].to_storage_dict() for span_id in self.selected_span_ids],
+            "spans": [
+                spans[span_id].to_storage_dict() for span_id in self.selected_span_ids
+            ],
         }
 
 
@@ -254,13 +251,9 @@ _SPAN_ALIASES = {
 
 def _is_compact_jwt(value: str) -> bool:
     parts = value.split(".")
-    if (
-        len(parts) != 3
-        or any(
-            _BASE64URL_PART_PATTERN.fullmatch(part) is None
-            or len(part) % 4 == 1
-            for part in parts
-        )
+    if len(parts) != 3 or any(
+        _BASE64URL_PART_PATTERN.fullmatch(part) is None or len(part) % 4 == 1
+        for part in parts
     ):
         return False
     try:
@@ -303,7 +296,9 @@ def normalize_trace_evidence(
         ),
         reverse=True,
     )
-    return _truncate(ranked[0], max_spans=min(max_spans, _MAX_RESPONSE_SPANS)).to_storage_dict()
+    return _truncate(
+        ranked[0], max_spans=min(max_spans, _MAX_RESPONSE_SPANS)
+    ).to_storage_dict()
 
 
 def _parse_candidates(payload: dict[str, Any] | list[Any]) -> Iterable[_CandidateTrace]:
@@ -313,7 +308,9 @@ def _parse_candidates(payload: dict[str, Any] | list[Any]) -> Iterable[_Candidat
             yield candidate
 
 
-def _candidate_objects(payload: dict[str, Any] | list[Any]) -> Iterable[Mapping[str, Any]]:
+def _candidate_objects(
+    payload: dict[str, Any] | list[Any],
+) -> Iterable[Mapping[str, Any]]:
     if isinstance(payload, list):
         yield from (item for item in payload if isinstance(item, Mapping))
         return
@@ -379,7 +376,9 @@ def _validated_candidate(trace: _InputTrace) -> _CandidateTrace | None:
     derived_duration = max(
         span.start_offset_ms + span.duration_ms for span in trace.spans
     )
-    duration_ms = trace.duration_ms if trace.duration_ms is not None else derived_duration
+    duration_ms = (
+        trace.duration_ms if trace.duration_ms is not None else derived_duration
+    )
     if any(
         span.start_offset_ms + span.duration_ms > duration_ms + 1
         for span in trace.spans
@@ -485,11 +484,7 @@ def _is_related_diagnostic_label(value: object, *related: str) -> bool:
 
 
 def _is_safe_server_address(value: object) -> bool:
-    if (
-        not isinstance(value, str)
-        or "%" in value
-        or _is_compact_jwt(value)
-    ):
+    if not isinstance(value, str) or "%" in value or _is_compact_jwt(value):
         return False
     try:
         parsed = ip_address(value)
@@ -507,8 +502,7 @@ def _issue_match_score(candidate: _CandidateTrace, alert_issue: str) -> int:
     if not issue_tokens:
         return 0
     trace_text = " ".join(
-        f"{span.service_name} {span.operation_name}".lower()
-        for span in candidate.spans
+        f"{span.service_name} {span.operation_name}".lower() for span in candidate.spans
     )
     return sum(token in trace_text for token in issue_tokens)
 
@@ -524,9 +518,7 @@ def _truncate(candidate: _CandidateTrace, *, max_spans: int) -> _SelectedTrace:
     if len(required_ids) > max_spans:
         critical_closure = _ancestor_closure(spans, critical_ids)
         critical_closure.add(candidate.root_span_id)
-        selected_ids = set(
-            _topological_order(candidate, critical_closure)[:max_spans]
-        )
+        selected_ids = set(_topological_order(candidate, critical_closure)[:max_spans])
     else:
         selected_ids = set(required_ids)
         for span_id in _stable_span_ids(candidate, set(spans)):
@@ -565,16 +557,14 @@ def _add_with_ancestors(
         selected_ids.update(chain)
 
 
-def _stable_span_ids(
-    candidate: _CandidateTrace, span_ids: set[str]
-) -> list[str]:
+def _stable_span_ids(candidate: _CandidateTrace, span_ids: set[str]) -> list[str]:
     spans = candidate.span_by_id
-    return sorted(span_ids, key=lambda span_id: (spans[span_id].start_offset_ms, span_id))
+    return sorted(
+        span_ids, key=lambda span_id: (spans[span_id].start_offset_ms, span_id)
+    )
 
 
-def _topological_order(
-    candidate: _CandidateTrace, selected_ids: set[str]
-) -> list[str]:
+def _topological_order(candidate: _CandidateTrace, selected_ids: set[str]) -> list[str]:
     spans = candidate.span_by_id
     children: dict[str | None, list[str]] = {}
     for span_id in selected_ids:

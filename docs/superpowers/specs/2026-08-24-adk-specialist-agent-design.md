@@ -1,8 +1,15 @@
 # RCA Worker 的 Google ADK Specialist Agent 設計
 
 **日期：** 2026-08-24
-**狀態：** 提案
+**狀態：** 已核准／實作完成（待部署）
 **範圍：** 僅限 `rca-worker/`
+
+**Implementation plan：** [ADK Specialist Agent implementation plan](../plans/2026-08-24-adk-specialist-agent-implementation.md)
+
+本規格的 production activation 仍受 rollout gate 控制，預設維持
+`SPECIALIST_ANALYSIS_MODE=DISABLED`；migration、contract 與 security/evaluation
+coverage 已完成，repository-wide verification 與 deployment activation 仍是明確的
+rollout gate。ACTIVE 僅能在 SHADOW audit 與 rollback checks 通過後由部署流程啟用。
 
 ## 1. 摘要
 
@@ -37,7 +44,10 @@ RCA Worker 目前只在最終 RCA 綜合分析階段使用 Google ADK。Metrics�
 - 不將 deterministic routing 移入 LLM。
 - 除非未來需要顯示已保存的 Specialist analysis，否則不修改 Backend、Pub/Sub contract 或 Operator API response shape。
 
-## 4. 現況
+## 4. 變更前現況（baseline）
+
+以下描述是本 implementation plan 的變更前基線；「目前」在這一節不表示實作後的
+runtime 行為。
 
 目前 production path：
 
@@ -53,7 +63,14 @@ Pub/Sub job
   -> 保存 RCA report
 ```
 
-目前只有 `AdkRcaAgent` 會建立 `google.adk.agents.LlmAgent`。三個 specialist class 都繼承 `McpSpecialist`，不會呼叫模型。`SdkMcpClient` 使用 MCP Python SDK 的 `ClientSession`；其中未實際使用的 `McpToolset` import 並不構成 ADK MCP integration。
+變更前只有 `AdkRcaAgent` 會建立 `google.adk.agents.LlmAgent`。三個 specialist class 都
+繼承 `McpSpecialist`，不會呼叫模型。`SdkMcpClient` 使用 MCP Python SDK 的
+`ClientSession`；其中未實際使用的 `McpToolset` import 並不構成 ADK MCP integration。
+
+實作後已由第 5 節目標架構取代此基線：Metrics、Trace、Log 分別建立真正的 ADK
+Specialist Agent，並只取得 run-scoped `collect_evidence()` 與 `read_evidence_chunk()`；
+Root RCA Agent 維持 `tools=[]`。變更前 deterministic adapters 的描述保留在此，供
+deployment audit 區分 before/after。
 
 ## 5. 目標架構
 

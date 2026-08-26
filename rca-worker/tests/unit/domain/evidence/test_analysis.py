@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Literal, cast
 from uuid import UUID
 
 import pytest
@@ -42,7 +43,7 @@ def _observation(
     return SpecialistObservation(
         statement=statement,
         confidence=confidence,
-        relation=relation,
+        relation=cast(Literal["SUPPORTS", "CONTRADICTS", "MISSING"], relation),
         evidence=evidence,
     )
 
@@ -54,7 +55,7 @@ def _draft(**overrides: object) -> SpecialistAnalysisDraft:
         "observations": (_observation(),),
     }
     values.update(overrides)
-    return SpecialistAnalysisDraft(**values)
+    return SpecialistAnalysisDraft.model_validate(values)
 
 
 def test_complete_requires_an_observation() -> None:
@@ -138,12 +139,14 @@ def test_rejects_remediation_and_root_cause_fields(field: str) -> None:
 
 def test_rejects_extra_observation_fields() -> None:
     with pytest.raises(ValidationError, match="root_cause"):
-        SpecialistObservation(
-            statement="The latency increased.",
-            confidence=0.8,
-            relation="SUPPORTS",
-            evidence=(_EVIDENCE_REFERENCE,),
-            root_cause="not allowed",
+        SpecialistObservation.model_validate(
+            {
+                "statement": "The latency increased.",
+                "confidence": 0.8,
+                "relation": "SUPPORTS",
+                "evidence": (_EVIDENCE_REFERENCE,),
+                "root_cause": "not allowed",
+            }
         )
 
 
