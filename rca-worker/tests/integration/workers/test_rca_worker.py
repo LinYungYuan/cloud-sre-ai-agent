@@ -277,15 +277,22 @@ async def test_long_processing_renews_lease_before_terminal_commit() -> None:
             text("SELECT lease_expires_at FROM worker_jobs WHERE id=:id"),
             {"id": message.worker_job_id},
         )
-    await asyncio.sleep(0.05)
-    async with sessions() as session:
-        renewed_expiry = await session.scalar(
-            text("SELECT lease_expires_at FROM worker_jobs WHERE id=:id"),
-            {"id": message.worker_job_id},
-        )
-    assert renewed_expiry > first_expiry
+    renewed_expiry = first_expiry
+    observation_deadline = asyncio.get_running_loop().time() + 1
+    while (
+        renewed_expiry <= first_expiry
+        and asyncio.get_running_loop().time() < observation_deadline
+    ):
+        await asyncio.sleep(0.01)
+        async with sessions() as session:
+            renewed_expiry = await session.scalar(
+                text("SELECT lease_expires_at FROM worker_jobs WHERE id=:id"),
+                {"id": message.worker_job_id},
+            )
     release.set()
-    assert await task is JobDisposition.ACK
+    disposition = await task
+    assert renewed_expiry > first_expiry
+    assert disposition is JobDisposition.ACK
     await engine.dispose()
 
 

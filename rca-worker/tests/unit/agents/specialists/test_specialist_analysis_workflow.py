@@ -702,11 +702,13 @@ async def test_returned_failed_analyses_become_fixed_order_failures() -> None:
         request: SpecialistRequest, kind: SpecialistKind, deadline: datetime
     ) -> SpecialistAnalysisResult:
         del request, deadline
-        await asyncio.sleep({
-            SpecialistKind.METRICS: 0.003,
-            SpecialistKind.TRACE: 0.002,
-            SpecialistKind.LOG: 0.001,
-        }[kind])
+        await asyncio.sleep(
+            {
+                SpecialistKind.METRICS: 0.003,
+                SpecialistKind.TRACE: 0.002,
+                SpecialistKind.LOG: 0.001,
+            }[kind]
+        )
         return returned[kind]
 
     bundle = await SpecialistAnalysisWorkflow(
@@ -761,7 +763,9 @@ async def test_observationless_partial_analysis_becomes_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_partial_analysis_with_observations_remains_result_without_failure() -> None:
+async def test_partial_analysis_with_observations_remains_result_without_failure() -> (
+    None
+):
     partial = _result(SpecialistKind.METRICS).model_copy(
         update={
             "analysis": _result(SpecialistKind.METRICS).analysis.model_copy(

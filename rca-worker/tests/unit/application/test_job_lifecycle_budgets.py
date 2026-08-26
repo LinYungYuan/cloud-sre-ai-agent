@@ -201,11 +201,15 @@ async def test_hung_processor_is_cancelled_at_claim_deadline_and_settled_termina
         lease_renewal_seconds=1,
     )
 
-    async def fake_claim(_message: RcaJobMessage) -> RcaJobClaim:
+    async def fake_claim(
+        _handler: RcaJobHandler, _message: RcaJobMessage
+    ) -> RcaJobClaim:
         return claim
 
     async def fake_settle_failure(
-        _claim: RcaJobClaim, failure_code: LifecycleFailureCode
+        _handler: RcaJobHandler,
+        _claim: RcaJobClaim,
+        failure_code: LifecycleFailureCode,
     ) -> JobDisposition:
         settled.append(failure_code)
         return JobDisposition.ACK
@@ -239,9 +243,7 @@ async def test_lease_renewal_does_not_open_db_after_deadline() -> None:
         await asyncio.Event().wait()
         raise AssertionError("the lease renewal processor must be cancelled")
 
-    processor: asyncio.Task[RcaProcessingResult] = asyncio.create_task(
-        wait_forever()
-    )
+    processor: asyncio.Task[RcaProcessingResult] = asyncio.create_task(wait_forever())
     handler = RcaJobHandler(
         cast(Any, _Sessions()),
         lambda _claim: _completed(),

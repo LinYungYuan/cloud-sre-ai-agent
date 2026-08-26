@@ -832,7 +832,9 @@ async def test_all_failed_analysis_matrix_controls_durable_retry(
 
 
 @pytest.mark.asyncio
-async def test_processor_normalizes_all_failed_analysis_results_for_audit_and_terminal_code() -> None:
+async def test_processor_normalizes_all_failed_analysis_results_for_audit_and_terminal_code() -> (
+    None
+):
     bundle = SpecialistAnalysisBundle(
         results=tuple(
             _failed_analysis_result(kind, missing_evidence=missing)
@@ -1244,9 +1246,9 @@ async def test_processor_returns_fixed_order_legacy_terminal_failure_code(
             assert deadline == claim.deadline_at
             return bundle
 
-    async def fake_discover(*args: object, **kwargs: object) -> tuple[
-        CapabilitySet, dict[SpecialistKind, object]
-    ]:
+    async def fake_discover(
+        *args: object, **kwargs: object
+    ) -> tuple[CapabilitySet, dict[SpecialistKind, object]]:
         del args, kwargs
         return CapabilitySet(by_specialist={}), {}
 
@@ -1285,7 +1287,9 @@ async def test_processor_returns_fixed_order_legacy_terminal_failure_code(
     monkeypatch.setattr(processor_module, "discover_capabilities", fake_discover)
     monkeypatch.setattr(processor_module, "RcaWorkflow", FakeWorkflow)
     monkeypatch.setattr(ProductionRcaProcessor, "_load_context", fake_load_context)
-    monkeypatch.setattr(ProductionRcaProcessor, "_persist_failures", fake_persist_failures)
+    monkeypatch.setattr(
+        ProductionRcaProcessor, "_persist_failures", fake_persist_failures
+    )
     monkeypatch.setattr(ProductionRcaProcessor, "_persist_bundle", fake_persist_bundle)
     monkeypatch.setattr(ProductionRcaProcessor, "_persist_report", fake_persist_report)
 
@@ -1302,7 +1306,9 @@ async def test_processor_returns_fixed_order_legacy_terminal_failure_code(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", [SpecialistAnalysisMode.SHADOW, SpecialistAnalysisMode.ACTIVE])
+@pytest.mark.parametrize(
+    "mode", [SpecialistAnalysisMode.SHADOW, SpecialistAnalysisMode.ACTIVE]
+)
 async def test_processor_returns_fixed_order_analysis_terminal_failure_code(
     monkeypatch: pytest.MonkeyPatch,
     mode: SpecialistAnalysisMode,
@@ -1351,9 +1357,9 @@ async def test_processor_returns_fixed_order_analysis_terminal_failure_code(
             assert deadline == claim.deadline_at
             return bundle
 
-    async def fake_discover(*args: object, **kwargs: object) -> tuple[
-        CapabilitySet, dict[SpecialistKind, object]
-    ]:
+    async def fake_discover(
+        *args: object, **kwargs: object
+    ) -> tuple[CapabilitySet, dict[SpecialistKind, object]]:
         del args, kwargs
         return CapabilitySet(by_specialist={}), {}
 
@@ -1383,7 +1389,9 @@ async def test_processor_returns_fixed_order_analysis_terminal_failure_code(
     monkeypatch.setattr(processor_module, "discover_capabilities", fake_discover)
     monkeypatch.setattr(processor_module, "SpecialistAnalysisWorkflow", FakeWorkflow)
     monkeypatch.setattr(ProductionRcaProcessor, "_load_context", fake_load_context)
-    monkeypatch.setattr(ProductionRcaProcessor, "_persist_analysis_failures", fake_persist_failures)
+    monkeypatch.setattr(
+        ProductionRcaProcessor, "_persist_analysis_failures", fake_persist_failures
+    )
     monkeypatch.setattr(ProductionRcaProcessor, "_persist_report", fake_persist_report)
 
     processor = ProductionRcaProcessor(
