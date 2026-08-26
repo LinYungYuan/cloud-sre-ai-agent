@@ -17,8 +17,8 @@ partition，因而需要常態維運 Partition CronJob。Outbox Worker 則持續
 
 1. 移除獨立 Outbox Worker。Backend API 在 request transaction commit 後，只嘗試發布
    該次 request 建立的 outbox event；Backend 啟動或運行期間均不自動掃描舊 backlog。
-2. 保留 durable `outbox_events`，並提供明確的人工重送 CLI。漏發或失敗事件只由管理者
-   手動恢復。
+2. 保留 durable `outbox_events`，並提供受保護的人工重送 REST API。漏發或失敗事件只由
+   管理者手動恢復。
 3. 將六張 partitioned tables 轉成普通 PostgreSQL tables，移除 Partition Worker 與
    Kubernetes CronJob。
 4. 將 runtime、migration 與 Compose 設定拆成五份完全隔離的環境檔。
@@ -29,7 +29,7 @@ partition，因而需要常態維運 Partition CronJob。Outbox Worker 則持續
 - Backend request 的業務資料、RCA job 與 outbox event 維持同一個 DB transaction。
 - transaction commit 後立即嘗試發布該筆 event，但 publish 失敗不得回滾已 commit 的資料。
 - Backend restart 不自動重送任何既有 `PENDING`／`FAILED` event。
-- 提供可稽核、冪等且不能改寫 payload 的人工 Outbox recovery CLI。
+- 提供可稽核、冪等且不能改寫 payload 的人工 Outbox recovery REST API。
 - 移除獨立 Outbox Deployment、entrypoint 與設定檔。
 - 將所有 partitioned tables 轉成普通表並完整保留資料、constraints、indexes 與關聯。
 - 移除 Partition Worker、entrypoint、CronJob 與設定檔。
@@ -68,7 +68,7 @@ Grafana request
        -> report persistence
 
 Operator
-  -> manual Outbox recovery CLI
+  -> protected manual Outbox recovery REST API
        -> exact event or explicit PENDING/FAILED batch
        -> Pub/Sub
 ```
@@ -122,25 +122,57 @@ Backend lifespan 不得：
 
 ## 6. 人工 Outbox recovery
 
-提供內部 CLI，不新增公開 HTTP endpoint：
+提供 Backend 內部管理 REST API，不提供 recovery CLI：
 
-```bash
-sre-agent-retry-outbox --event-id EVENT_UUID
-sre-agent-retry-outbox --all-pending
-sre-agent-retry-outbox --all-failed
+```http
+POST /api/v1/operations/outbox-events/{eventId}/retry
+POST /api/v1/operations/outbox-events/retry-pending?limit=100
+POST /api/v1/operations/outbox-events/retry-failed?limit=100
 ```
 
-CLI 要求：
+API 要求：
 
-- 三種 selector 互斥；未指定或同時指定多種時 fail closed。
-- `--event-id` 只允許 `PENDING`／`FAILED`；`PUBLISHED` 回報 no-op 並以成功碼結束。
-- batch selector 依 `available_at, created_at, id` 穩定排序，使用有界 batch size。
+- endpoint 只允許具 Outbox recovery 權限的管理者或內部 service account 呼叫；未驗證與
+  未授權分別回傳 `401`／`403`。
+- `{eventId}` 只允許 `PENDING`／`FAILED`；`PUBLISHED` 回傳 `200` no-op。
+- 不存在的 event 回傳 `404`，不得洩漏 payload 或其他 tenant/scope 資訊。
+- batch endpoint 的 `limit` 必須限制在 `1..100`；未提供時使用固定 server default。
+- batch selector 依 `available_at, created_at, id` 穩定排序。
 - 使用 `FOR UPDATE SKIP LOCKED`，可由多位管理者安全並行執行。
 - 只能發布 DB 中已保存的 canonical payload、topic 與 idempotency key。
-- 不接受任意 message body、topic、project、subscription 或 attribute override。
+- endpoint 不接受 message body，也不接受任意 topic、project、subscription、payload 或
+  attribute override。
 - 成功更新 `PUBLISHED/published_at`；失敗保持/更新為 `FAILED`。
-- 輸出 event ID、原狀態、結果與 stable failure category，不輸出秘密或完整 payload。
+- response 只輸出 event ID、原狀態、結果、selected/published/failed/no-op counts 與 stable
+  failure category，不輸出秘密或完整 payload。
 - 操作必須留下 audit record，包含 operator identity、執行時間、selector 與結果計數。
+- 單筆與批次操作同步完成有界 publish 後回傳 `200`；部分 publish 失敗仍回傳結果摘要，並
+  以 response schema 的 `failed` count 與 stable categories 表達，不使用未定義的 5xx 重試
+  語意。
+
+單筆 response：
+
+```json
+{
+  "eventId": "00000000-0000-0000-0000-000000000000",
+  "previousStatus": "FAILED",
+  "result": "PUBLISHED"
+}
+```
+
+批次 response：
+
+```json
+{
+  "selected": 10,
+  "published": 8,
+  "failed": 2,
+  "noOp": 0
+}
+```
+
+Backend 本身不可用時無法執行 recovery API；必須先恢復 Backend。這是已核准的服務生命
+週期與人工恢復政策。
 
 ## 7. Outbox 元件調整
 
@@ -159,8 +191,8 @@ CLI 要求：
 - `.env.outbox` 與 `.env.outbox.example`。
 
 既有 `OutboxPublisher` 應拆成可重用的「指定 event publish」與「明確 selector batch recovery」
-application service；Backend request 與 CLI 共用相同 persistence/publisher primitive，避免兩套
-settlement 規則。
+application service；Backend request 與 recovery API 共用相同 persistence/publisher primitive，
+避免兩套 settlement 規則。
 
 ## 8. 普通非分區資料表
 
@@ -347,8 +379,9 @@ Backend 必須提供不含 payload/secret 的 structured events：
 - 不自動處理的 `PENDING`／`FAILED` backlog count 應由監控 query/metric 顯示，但不得觸發
   自動 replay。
 
-Manual CLI 必須輸出選取、成功、失敗、no-op 數量，並以非零 exit status 表示任何未完成
-publish。Runbook 必須說明如何先 dry-run/query backlog，再執行指定 selector。
+Recovery API 必須回傳選取、成功、失敗與 no-op 數量；OpenAPI contract 必須固定 response
+schema 與 authorization errors。Runbook 必須說明如何先查詢 backlog，再呼叫指定 endpoint，
+且不得將 API 暴露為未受保護的 public route。
 
 ## 14. 測試與驗收
 
@@ -360,7 +393,8 @@ publish。Runbook 必須說明如何先 dry-run/query backlog，再執行指定 
 - publish 失敗標記 `FAILED`，webhook 維持既有 accepted contract。
 - Backend startup 有既存 `PENDING`／`FAILED` 時不發布。
 - Backend runtime 沒有 periodic backlog polling。
-- manual exact/batch selector、`PUBLISHED` no-op、stable ordering、concurrency 與 payload immutability。
+- recovery REST API authorization、OpenAPI schema、exact/batch selector、`PUBLISHED` no-op、
+  stable ordering、concurrency 與 payload immutability。
 - crash-window duplicate delivery 不建立第二個 RCA run/job。
 
 ### 14.2 Schema conversion
@@ -395,7 +429,7 @@ publish。Runbook 必須說明如何先 dry-run/query backlog，再執行指定 
 
 1. 先完成 environment isolation 與 Backend AI/MCP setting cleanup。
 2. 將 Outbox publish primitive 改成 request-scoped/manual-scoped，再整合 Backend commit 後流程。
-3. 完成人工 recovery CLI 與 audit/observability。
+3. 完成人工 recovery REST API、authorization、OpenAPI contract 與 audit/observability。
 4. 在 PostgreSQL integration coverage 下完成普通表 forward migration。
 5. 移除 Partition runtime/CronJob 與 Outbox Deployment。
 6. 更新 Compose、Kubernetes、README/runbook，最後做完整驗證與 rollout gate。
