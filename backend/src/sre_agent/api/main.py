@@ -13,11 +13,14 @@ from sre_agent.api.middleware.correlation_id import CorrelationIdMiddleware
 from sre_agent.api.routers.grafana_webhook import router as grafana_webhook_router
 from sre_agent.api.routers.health import router as health_router
 from sre_agent.api.routers.operator_incidents import router as operator_router
+from sre_agent.config.env_files import resolve_backend_env_file
 from sre_agent.config.settings import Settings
 
 
 def _load_settings() -> Settings:
-    return Settings()  # pyright: ignore[reportCallIssue]
+    return Settings(  # pyright: ignore[reportCallIssue]
+        _env_file=resolve_backend_env_file()
+    )
 
 
 def create_app(

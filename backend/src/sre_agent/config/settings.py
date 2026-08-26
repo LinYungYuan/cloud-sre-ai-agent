@@ -2,11 +2,11 @@ from typing import Annotated
 from uuid import UUID
 
 from pydantic import (
-    AnyHttpUrl,
     Field,
     SecretStr,
     StringConstraints,
     field_validator,
+    model_validator,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -27,12 +27,8 @@ class Settings(BaseSettings):
     grafana_tokens: dict[UUID, dict[TokenId, SecretStr]]
     pubsub_project_id: str
     rca_topic_id: str
+    pubsub_emulator_host: str | None = None
     app_environment: str
-    model_name: str
-    metrics_mcp_url: AnyHttpUrl
-    trace_mcp_url: AnyHttpUrl
-    log_mcp_url: AnyHttpUrl
-    rca_deadline_seconds: int = Field(default=300, ge=60, le=300)
     webhook_max_body_bytes: int = Field(default=1_048_576, ge=1024, le=1_048_576)
 
     @field_validator("database_url")
@@ -66,3 +62,9 @@ class Settings(BaseSettings):
                         "Grafana token credentials must be non-empty ASCII without whitespace"
                     )
         return value
+
+    @model_validator(mode="after")
+    def reject_production_emulator(self) -> "Settings":
+        if self.app_environment == "production" and self.pubsub_emulator_host:
+            raise ValueError("PUBSUB_EMULATOR_HOST is forbidden in production")
+        return self

@@ -13,6 +13,7 @@ from sre_rca_worker.application.rca.job_lifecycle import (
     RcaJobHandler,
 )
 from sre_rca_worker.application.rca.processor import ProductionRcaProcessor
+from sre_rca_worker.config.env_files import resolve_worker_env_file
 from sre_rca_worker.config.settings import WorkerSettings
 from sre_rca_worker.integrations.pubsub.bootstrap import prepare_topic_and_subscription
 from sre_rca_worker.integrations.pubsub.messages import RcaJobMessage
@@ -33,6 +34,13 @@ async def settle_delivery(
         delivery.ack()
     else:
         delivery.nack()
+
+
+def _load_settings() -> WorkerSettings:
+    env_file = resolve_worker_env_file()
+    if env_file is None:
+        return WorkerSettings()  # pyright: ignore[reportCallIssue]
+    return WorkerSettings(_env_file=env_file)  # pyright: ignore[reportCallIssue]
 
 
 def main(
@@ -70,7 +78,7 @@ def main(
 
 async def run_production(stop_event: asyncio.Event | None = None) -> None:
     shutdown = stop_event or asyncio.Event()
-    settings = WorkerSettings()  # pyright: ignore[reportCallIssue]
+    settings = _load_settings()
     engine = create_async_engine(settings.database_url.get_secret_value())
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     processor = ProductionRcaProcessor(sessions, settings)

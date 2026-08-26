@@ -123,10 +123,6 @@ def _set_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "PUBSUB_PROJECT_ID": "local-project",
         "RCA_TOPIC_ID": "rca-jobs",
         "APP_ENVIRONMENT": "test",
-        "MODEL_NAME": "test-model",
-        "METRICS_MCP_URL": "https://gateway/gcp/metrics/mcp",
-        "TRACE_MCP_URL": "https://gateway/gcp/trace/mcp",
-        "LOG_MCP_URL": "https://gateway/gcp/log/mcp",
     }
     for key, value in values.items():
         monkeypatch.setenv(key, value)
@@ -195,10 +191,6 @@ async def test_missing_configuration_fails_lifespan_startup(monkeypatch) -> None
         "PUBSUB_PROJECT_ID",
         "RCA_TOPIC_ID",
         "APP_ENVIRONMENT",
-        "MODEL_NAME",
-        "METRICS_MCP_URL",
-        "TRACE_MCP_URL",
-        "LOG_MCP_URL",
     ):
         monkeypatch.delenv(key, raising=False)
     app = create_app()
