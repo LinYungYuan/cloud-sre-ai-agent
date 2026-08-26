@@ -203,6 +203,7 @@ def _agent(
     responses: tuple[str | Exception, ...],
     *,
     clock: Callable[[], datetime] | None = None,
+    **agent_kwargs: object,
 ) -> _ResponseAgent:
     return _ResponseAgent(
         responses,
@@ -210,6 +211,7 @@ def _agent(
         model_name="gemini-test",
         skill_instruction=METRICS_SKILL.body,
         clock=clock or (lambda: NOW),
+        **agent_kwargs,
     )
 
 
@@ -261,6 +263,57 @@ async def test_unknown_citation_gets_exactly_one_safe_correction() -> None:
     assert "raw_result" not in agent.prompts[0]
     assert "http://" not in agent.prompts[0]
     assert "https://" not in agent.prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_zero_corrective_retries_returns_schema_code_after_one_model_call() -> (
+    None
+):
+    invalid = '{"specialist":"metrics"}'
+    agent = _agent((invalid,), corrective_retries=0)
+
+    with pytest.raises(SpecialistAnalysisValidationError) as raised:
+        await agent.analyze(
+            request=_request(),
+            evidence_tools=_as_session(_EvidenceTools()),
+            deadline=NOW + timedelta(minutes=1),
+        )
+
+    assert raised.value.code == "ANALYSIS_SCHEMA_INVALID"
+    assert len(agent.prompts) == 1
+
+
+@pytest.mark.asyncio
+async def test_lower_observation_cap_uses_the_configured_correction_budget() -> None:
+    too_many = SpecialistAnalysisDraft(
+        specialist=SpecialistKind.METRICS,
+        status="COMPLETE",
+        observations=(
+            _draft().observations[0],
+            SpecialistObservation(
+                statement="A second bounded observation.",
+                confidence=0.8,
+                relation="SUPPORTS",
+                evidence=(OWNED,),
+            ),
+        ),
+    )
+    agent = _agent(
+        (too_many.model_dump_json(), _draft().model_dump_json()),
+        max_observations=1,
+    )
+
+    result = await agent.analyze(
+        request=_request(),
+        evidence_tools=_as_session(_EvidenceTools()),
+        deadline=NOW + timedelta(minutes=1),
+    )
+
+    assert result == _draft()
+    assert len(agent.prompts) == 2
+    assert json.loads(agent.prompts[1])["validationCorrection"] == (
+        "ANALYSIS_SCHEMA_INVALID"
+    )
 
 
 @pytest.mark.asyncio

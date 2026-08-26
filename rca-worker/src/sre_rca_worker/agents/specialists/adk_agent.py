@@ -35,6 +35,8 @@ class AdkSpecialistAgent:
         kind: SpecialistKind,
         model_name: str,
         skill_instruction: str,
+        max_observations: int = 20,
+        corrective_retries: int = 1,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not isinstance(kind, SpecialistKind):
@@ -43,11 +45,18 @@ class AdkSpecialistAgent:
             raise ValueError("model_name must not be empty")
         if not skill_instruction:
             raise ValueError("skill_instruction must not be empty")
+        if (
+            type(corrective_retries) is not int
+            or corrective_retries < 0
+            or corrective_retries > 1
+        ):
+            raise ValueError("corrective_retries must be an integer between 0 and 1")
         self.kind = kind
         self._model_name = model_name
         self._instruction = skill_instruction
+        self._corrective_retries = corrective_retries
         self._clock = clock or (lambda: datetime.now(UTC))
-        self._validator = SpecialistAnalysisValidator()
+        self._validator = SpecialistAnalysisValidator(max_observations=max_observations)
 
     async def analyze(
         self,
@@ -63,7 +72,7 @@ class AdkSpecialistAgent:
             allowed_evidence=evidence_tools.known_evidence,
         )
         prompt = self._encode_prompt(approved_context)
-        for attempt in range(2):
+        for attempt in range(self._corrective_retries + 1):
             self._remaining_seconds(deadline)
             final_text = await self._run_once(
                 prompt,
@@ -87,7 +96,7 @@ class AdkSpecialistAgent:
                 except SpecialistAnalysisValidationError as error:
                     validation_error = error
 
-            if attempt == 1:
+            if attempt == self._corrective_retries:
                 raise validation_error
             prompt = self._correction_prompt(
                 approved_context,

@@ -74,7 +74,12 @@ async def run_production(stop_event: asyncio.Event | None = None) -> None:
     engine = create_async_engine(settings.database_url.get_secret_value())
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     processor = ProductionRcaProcessor(sessions, settings)
-    handler = RcaJobHandler(sessions, processor, worker_id=settings.worker_id)
+    handler = RcaJobHandler(
+        sessions,
+        processor,
+        worker_id=settings.worker_id,
+        deadline_seconds=settings.rca_deadline_seconds,
+    )
     publisher = pubsub_v1.PublisherClient()
     subscriber = pubsub_v1.SubscriberClient()
     try:

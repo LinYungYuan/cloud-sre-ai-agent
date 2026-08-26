@@ -113,6 +113,9 @@ def _processor_settings(mode: SpecialistAnalysisMode) -> SimpleNamespace:
         evidence_max_chunks=4,
         evidence_max_total_chars=32_000,
         specialist_max_tool_calls=5,
+        specialist_max_observations=20,
+        rca_deadline_seconds=300,
+        agent_corrective_retries=1,
         model_name="root-and-specialist-model",
     )
 
@@ -150,6 +153,113 @@ def test_job_claim_deadline_matches_the_300_second_configured_hard_cap() -> None
 
     assert WorkerSettings.model_fields["rca_deadline_seconds"].default == 300
     assert claim_sql.count("job.created_at + interval '5 minutes'") == 2
+
+
+def test_processor_passes_corrective_retries_to_the_root_factory() -> None:
+    settings = _processor_settings(SpecialistAnalysisMode.ACTIVE)
+    settings.agent_corrective_retries = 0
+    captured: dict[str, object] = {}
+
+    def fake_root_factory(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    processor = ProductionRcaProcessor(
+        cast(Any, object()),
+        cast(Any, settings),
+        root_agent_factory=fake_root_factory,
+    )
+
+    processor._root_agent()
+
+    assert captured == {
+        "model_name": "root-and-specialist-model",
+        "skill_instruction": processor._skills.get_for_agent("rca").body,
+        "corrective_retries": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_processor_passes_observation_and_correction_budgets_to_specialist_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _processor_settings(SpecialistAnalysisMode.ACTIVE)
+    settings.specialist_max_observations = 3
+    settings.agent_corrective_retries = 0
+    now = datetime(2026, 8, 25, 8, 0, tzinfo=UTC)
+    request = SpecialistRequest(
+        incident_id=uuid4(),
+        rca_run_id=uuid4(),
+        alert_issue="alert",
+        scope=CloudScope(provider="GCP", scope_id="project-a", safe=True),
+        window_start=now - timedelta(minutes=15),
+        window_end=now,
+        available_tools=(),
+    )
+    captured: dict[str, object] = {}
+
+    class FakeEvidenceTools:
+        known_evidence = ()
+        input_truncated = False
+
+    class FakeAgent:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def analyze(self, **kwargs: object) -> SpecialistAnalysisDraft:
+            del kwargs
+            return _analysis_result(SpecialistKind.METRICS, index=1).analysis
+
+    def fake_evidence_tools(**kwargs: object) -> FakeEvidenceTools:
+        captured["evidence_tools"] = kwargs
+        return FakeEvidenceTools()
+
+    @asynccontextmanager
+    async def fake_reservation(*args: object, **kwargs: object):
+        del args, kwargs
+        yield
+
+    async def fake_specialist_run(*args: object, **kwargs: object) -> UUID:
+        del args, kwargs
+        return uuid4()
+
+    monkeypatch.setattr(processor_module, "EvidenceToolSession", fake_evidence_tools)
+    monkeypatch.setattr(
+        ProductionRcaProcessor,
+        "_legacy_specialists",
+        lambda *args: {SpecialistKind.METRICS: object()},
+    )
+    monkeypatch.setattr(
+        ProductionRcaProcessor,
+        "_specialist_collection_reservation",
+        fake_reservation,
+    )
+    monkeypatch.setattr(
+        ProductionRcaProcessor,
+        "_get_or_create_specialist_run",
+        fake_specialist_run,
+    )
+    processor = ProductionRcaProcessor(
+        cast(Any, object()),
+        cast(Any, settings),
+        specialist_agent_factory=FakeAgent,
+    )
+
+    result = await processor._invoke_specialist_branch(
+        request,
+        SpecialistKind.METRICS,
+        now + timedelta(minutes=5),
+        clients={},
+    )
+
+    assert result.analysis.specialist is SpecialistKind.METRICS
+    assert captured["kind"] is SpecialistKind.METRICS
+    assert captured["model_name"] == "root-and-specialist-model"
+    assert (
+        captured["skill_instruction"] == processor._skills.get_for_agent("metrics").body
+    )
+    assert captured["max_observations"] == 3
+    assert captured["corrective_retries"] == 0
 
 
 @pytest.mark.asyncio
@@ -283,6 +393,7 @@ async def test_processor_rollout_modes_keep_root_inputs_strictly_separate(
         assert kwargs == {
             "model_name": "root-and-specialist-model",
             "skill_instruction": cast(Any, processor)._skills.get_for_agent("rca").body,
+            "corrective_retries": 1,
         }
         return FakeRootAgent()
 
@@ -928,9 +1039,16 @@ async def test_evidence_bearing_legacy_processor_calls_only_explicit_legacy_root
             return bundle
 
     class FakeRootAdapter:
-        def __init__(self, *, model_name: str, skill_instruction: str) -> None:
+        def __init__(
+            self,
+            *,
+            model_name: str,
+            skill_instruction: str,
+            corrective_retries: int,
+        ) -> None:
             assert model_name == "root-model"
             assert skill_instruction == "exact RCA skill"
+            assert corrective_retries == 1
 
         async def synthesize_legacy(
             self,

@@ -261,6 +261,7 @@ class ProductionRcaProcessor:
         return factory(
             model_name=self._settings.model_name,
             skill_instruction=self._skills.get_for_agent("rca").body,
+            corrective_retries=getattr(self._settings, "agent_corrective_retries", 1),
         )
 
     @staticmethod
@@ -346,6 +347,12 @@ class ProductionRcaProcessor:
                 kind=kind,
                 model_name=self._settings.model_name,
                 skill_instruction=skill.body,
+                max_observations=getattr(
+                    self._settings, "specialist_max_observations", 20
+                ),
+                corrective_retries=getattr(
+                    self._settings, "agent_corrective_retries", 1
+                ),
             )
             analysis = await agent.analyze(
                 request=request,

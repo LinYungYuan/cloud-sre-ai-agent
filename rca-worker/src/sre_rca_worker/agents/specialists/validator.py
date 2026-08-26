@@ -23,6 +23,15 @@ class SpecialistAnalysisValidationError(ValueError):
 
 
 class SpecialistAnalysisValidator:
+    def __init__(self, *, max_observations: int = 20) -> None:
+        if (
+            type(max_observations) is not int
+            or max_observations < 1
+            or max_observations > 20
+        ):
+            raise ValueError("max_observations must be an integer between 1 and 20")
+        self._max_observations = max_observations
+
     def validate(
         self,
         draft: SpecialistAnalysisDraft,
@@ -39,6 +48,9 @@ class SpecialistAnalysisValidator:
             raise SpecialistAnalysisValidationError("ANALYSIS_SCHEMA_INVALID") from None
 
         if validated.specialist is not expected_specialist:
+            raise SpecialistAnalysisValidationError("ANALYSIS_SCHEMA_INVALID")
+
+        if len(validated.observations) > self._max_observations:
             raise SpecialistAnalysisValidationError("ANALYSIS_SCHEMA_INVALID")
 
         owned = {

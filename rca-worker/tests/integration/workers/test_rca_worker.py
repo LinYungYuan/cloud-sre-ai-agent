@@ -34,9 +34,10 @@ async def test_production_runner_passes_configured_worker_identity_to_job_handle
             "app_environment": "local",
             "model_name": "test-model",
             "worker_id": "pod-identity",
+            "rca_deadline_seconds": 47,
         }
     )
-    captured: dict[str, str] = {}
+    captured: dict[str, object] = {}
 
     class FakeEngine:
         async def dispose(self) -> None:
@@ -57,8 +58,16 @@ async def test_production_runner_passes_configured_worker_identity_to_job_handle
             raise StopWorker
 
     class CapturingHandler:
-        def __init__(self, sessions, processor, *, worker_id: str) -> None:
+        def __init__(
+            self,
+            sessions,
+            processor,
+            *,
+            worker_id: str,
+            deadline_seconds: int,
+        ) -> None:
             captured["worker_id"] = worker_id
+            captured["deadline_seconds"] = deadline_seconds
 
     monkeypatch.setattr(rca_worker, "WorkerSettings", lambda: settings)
     monkeypatch.setattr(rca_worker, "create_async_engine", lambda _: FakeEngine())
@@ -78,7 +87,10 @@ async def test_production_runner_passes_configured_worker_identity_to_job_handle
     with pytest.raises(StopWorker):
         await rca_worker.run_production()
 
-    assert captured == {"worker_id": settings.worker_id}
+    assert captured == {
+        "worker_id": settings.worker_id,
+        "deadline_seconds": settings.rca_deadline_seconds,
+    }
 
 
 async def _seed(session_factory) -> RcaJobMessage:

@@ -46,11 +46,19 @@ class RcaJobHandler:
         *,
         worker_id: str,
         lease_renewal_seconds: float = 20,
+        deadline_seconds: int = 300,
     ) -> None:
+        if (
+            type(deadline_seconds) is not int
+            or deadline_seconds < 1
+            or deadline_seconds > 300
+        ):
+            raise ValueError("deadline_seconds must be an integer between 1 and 300")
         self._sessions = sessions
         self._processor = processor
         self._worker_id = worker_id
         self._lease_renewal_seconds = lease_renewal_seconds
+        self._deadline_seconds = deadline_seconds
 
     async def handle(self, message: RcaJobMessage) -> JobDisposition:
         claim = await self._claim(message)
@@ -121,18 +129,21 @@ class RcaJobHandler:
                            WHERE job.id=:job_id AND job.rca_run_id=:run_id
                              AND run.id=job.rca_run_id AND run.incident_id=:incident_id
                              AND job.available_at <= now() AND job.attempt_count < 3
-                             AND job.created_at + interval '5 minutes' > now()
+                             AND LEAST(job.created_at + interval '5 minutes',
+                                       now() + make_interval(secs => :configured)) > now()
                              AND (job.status='QUEUED' OR
                                   (job.status='RUNNING' AND job.lease_expires_at < now()))
                            RETURNING job.id, job.rca_run_id, run.incident_id,
                                      job.attempt_count,
-                                     job.created_at + interval '5 minutes' AS deadline_at"""
+                                     LEAST(job.created_at + interval '5 minutes',
+                                           now() + make_interval(secs => :configured)) AS deadline_at"""
                         ),
                         {
                             "owner": self._worker_id,
                             "job_id": message.worker_job_id,
                             "run_id": message.rca_run_id,
                             "incident_id": message.incident_id,
+                            "configured": self._deadline_seconds,
                         },
                     )
                 )
@@ -170,11 +181,16 @@ class RcaJobHandler:
                     await session.execute(
                         text(
                             """SELECT job.status, job.attempt_count, run.id AS run_id,
-                                  run.incident_id, job.created_at + interval '5 minutes' <= now() AS expired
+                                  run.incident_id,
+                                  LEAST(job.created_at + interval '5 minutes',
+                                        now() + make_interval(secs => :configured)) <= now() AS expired
                            FROM worker_jobs job JOIN rca_runs run ON run.id=job.rca_run_id
                            WHERE job.id=:id"""
                         ),
-                        {"id": message.worker_job_id},
+                        {
+                            "id": message.worker_job_id,
+                            "configured": self._deadline_seconds,
+                        },
                     )
                 )
                 .mappings()

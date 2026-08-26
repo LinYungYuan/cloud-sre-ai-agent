@@ -155,6 +155,27 @@ def test_validator_revalidates_the_twenty_observation_domain_limit() -> None:
     assert raised.value.code == "ANALYSIS_SCHEMA_INVALID"
 
 
+def test_validator_enforces_a_configured_lower_observation_cap() -> None:
+    observations = tuple(
+        _observation(statement=f"Observation {index}") for index in range(2)
+    )
+    draft = SpecialistAnalysisDraft(
+        specialist=SpecialistKind.METRICS,
+        status="COMPLETE",
+        observations=observations,
+    )
+
+    with pytest.raises(SpecialistAnalysisValidationError) as raised:
+        SpecialistAnalysisValidator(max_observations=1).validate(
+            draft,
+            expected_specialist=SpecialistKind.METRICS,
+            owned_evidence=(OWNED,),
+            input_truncated=False,
+        )
+
+    assert raised.value.code == "ANALYSIS_SCHEMA_INVALID"
+
+
 def test_validator_revalidates_failed_status_invariants() -> None:
     unvalidated = SpecialistAnalysisDraft.model_construct(
         specialist=SpecialistKind.METRICS,

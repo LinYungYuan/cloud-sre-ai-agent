@@ -221,14 +221,22 @@ class AdkRcaAgent:
         *,
         model_name: str,
         skill_instruction: str,
+        corrective_retries: int = 1,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not model_name:
             raise ValueError("model_name must not be empty")
         if not skill_instruction:
             raise ValueError("skill_instruction must not be empty")
+        if (
+            type(corrective_retries) is not int
+            or corrective_retries < 0
+            or corrective_retries > 1
+        ):
+            raise ValueError("corrective_retries must be an integer between 0 and 1")
         self._model_name = model_name
         self._instruction = skill_instruction
+        self._corrective_retries = corrective_retries
         self._clock = clock or (lambda: datetime.now(UTC))
 
     async def synthesize(
@@ -289,7 +297,7 @@ class AdkRcaAgent:
         if deadline.tzinfo is None or deadline.utcoffset() is None:
             raise ValueError("deadline must be timezone-aware")
         approved_prompt = prompt
-        for attempt in range(2):
+        for attempt in range(self._corrective_retries + 1):
             self._remaining_seconds(deadline)
             final_text = await self._run_once(prompt, deadline=deadline)
             try:
@@ -308,7 +316,7 @@ class AdkRcaAgent:
                         if str(error) == "RCA report cites unknown evidence"
                         else "REPORT_SCHEMA_INVALID"
                     )
-            if attempt == 1:
+            if attempt == self._corrective_retries:
                 raise ValueError(validation_code) from None
             prompt = self._correction_prompt(
                 approved_prompt,

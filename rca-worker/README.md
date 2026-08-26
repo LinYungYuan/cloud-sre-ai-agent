@@ -84,16 +84,21 @@ bound、read-only、具 canonical capability、tool-name pattern 與完整 input
 production：
 
 ```bash
+# Run these commands from the repository root.
 docker compose up -d postgres pubsub-emulator
 export PUBSUB_EMULATOR_HOST=127.0.0.1:58085
-export PUBSUB_PROJECT_ID=sre-agent-test
+export PUBSUB_PROJECT_ID=sre-agent-local
 export PUBSUB_AUTO_CREATE=true
-export MIGRATION_TEST_DATABASE_URL='postgresql+asyncpg://postgres:postgres@127.0.0.1:55432/sre_agent_test'
-cd rca-worker
-UV_CACHE_DIR="$PWD/.uv-cache" uv run alembic upgrade head
-PUBSUB_EMULATOR_HOST=127.0.0.1:58085 PUBSUB_PROJECT_ID=sre-agent-test \
-  MIGRATION_TEST_DATABASE_URL="$MIGRATION_TEST_DATABASE_URL" \
-  UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest -v
+export MIGRATION_TEST_DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent'
+
+# Apply the Backend migration first, then the RCA Worker migration, using the
+# same database URL for both Alembic environments.
+(cd backend && UV_CACHE_DIR="$PWD/.uv-cache" uv run alembic upgrade head)
+(cd rca-worker && UV_CACHE_DIR="$PWD/.uv-cache" uv run alembic upgrade head)
+
+# Run the full Backend and RCA Worker suites against the migrated database and emulator.
+(cd backend && UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest -v)
+(cd rca-worker && UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest -v)
 ```
 
 production 不設定 `PUBSUB_EMULATOR_HOST`，使用 ADC/Workload Identity，並維持

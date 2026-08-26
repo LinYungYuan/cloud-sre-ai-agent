@@ -109,11 +109,13 @@ class _ResponseAgent(AdkRcaAgent):
         responses: tuple[str, ...],
         *,
         clock: Callable[[], datetime] | None = None,
+        **agent_kwargs: object,
     ) -> None:
         super().__init__(
             model_name="deterministic-test",
             skill_instruction=RCA_SKILL.body,
             clock=clock or (lambda: NOW),
+            **cast(Any, agent_kwargs),
         )
         self.responses = iter(responses)
         self.prompts: list[str] = []
@@ -317,6 +319,25 @@ async def test_root_agent_retries_invalid_citations_once_with_safe_correction() 
     assert correction["validationCorrection"] == "UNKNOWN_EVIDENCE_REFERENCE"
     assert str(unknown.id) not in agent.prompts[1]
     assert invalid not in agent.prompts[1]
+
+
+@pytest.mark.asyncio
+async def test_root_zero_corrective_retries_returns_schema_code_after_one_model_call() -> (
+    None
+):
+    known = _ref()
+    invalid = _complete_report(known).model_copy(update={"hypotheses": ()})
+    agent = _ResponseAgent((invalid.model_dump_json(),), corrective_retries=0)
+
+    with pytest.raises(ValueError, match="REPORT_SCHEMA_INVALID"):
+        await agent.synthesize(
+            alert_issue="CPU high",
+            specialist_analyses=(_analysis(SpecialistKind.METRICS, known),),
+            known_evidence=(known,),
+            deadline=NOW + timedelta(seconds=2),
+        )
+
+    assert len(agent.prompts) == 1
 
 
 def test_active_and_legacy_synthesis_interfaces_are_explicitly_separate() -> None:
