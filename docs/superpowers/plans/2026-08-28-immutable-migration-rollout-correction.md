@@ -28,7 +28,7 @@
 - Backend 不得持有 `MODEL_NAME`、Metrics／Trace／Log MCP URL、MCP manifest、specialist mode、evidence budgets 或 RCA deadline；這些只屬於 RCA Worker。
 - 每個 task 完成後只 commit 該 task 的檔案，不得混入 workspace 內既有或其他 task 的修改。
 - `0001_rca_worker_v1` 與 `0002_adk_specialist_analysis` 已發布且永久不可修改、squash、stamp 或重放。
-- `0003_non_partition_runtime_tables` 是尚未獲 rollout acceptance 的 release-candidate revision：Task 1 是唯一允許在任何實際 database 執行它之前原地修正它的工作；Task 1 commit 後不得再改該 revision。之後的缺陷必須新增 forward revision。
+- `0003_non_partition_runtime_tables` 是尚未獲 staging/production rollout acceptance 的 release-candidate revision：既有 disposable test execution 不構成發布；Task 1 是唯一允許在 staging/production 執行前原地修正它的工作。Task 1 commit 後不得再改該 revision，之後的缺陷必須新增 forward revision。
 - 每個 rollout gate 使用明確 revision；不得使用 `alembic upgrade head` 跨越未驗證 gate，亦不得在 migration environment 以 schema 分支或 stamp 偽造完成狀態。
 - 在 Backend `0003` 與 Worker `0003_validate_ordinary_runtime_tables` 都成功且 postcondition catalog checks 皆通過前，停止 Backend 與 Worker writes，且不得啟動 UUID-only runtime。
 
@@ -83,7 +83,7 @@
 
 - [ ] **Step 2: Run the focused RED case (2–5 minutes)**
 
-  Run: `cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent uv run pytest tests/integration/persistence/test_four_stage_migration.py::test_backend_0003_preserves_worker_0002_evidence_and_lifecycle -v`
+  Run: `cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent uv run pytest tests/integration/persistence/test_four_stage_migration.py::test_backend_0003_preserves_worker_0002_evidence_and_lifecycle -v`
 
   Expected: FAIL while running Backend `0003` because its current copy selects `raw_result_reference`, which Worker `0001` removed; the error names `raw_result_reference` or the post-upgrade exact-byte assertion fails. The database fixture must be dropped in `finally` even on this expected failure.
 
@@ -141,7 +141,7 @@
 
 - [ ] **Step 5: Run the focused GREEN tests (2–5 minutes)**
 
-  Run: `cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent uv run pytest tests/integration/persistence/test_four_stage_migration.py tests/integration/persistence/test_non_partition_migration.py tests/unit/persistence/test_schema_documentation.py -v`
+  Run: `cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent uv run pytest tests/integration/persistence/test_four_stage_migration.py tests/integration/persistence/test_non_partition_migration.py tests/unit/persistence/test_schema_documentation.py -v`
 
   Expected: PASS. The canonical six tables are ordinary relations with one-column UUID primary keys; retained legacy parents are partitioned; exact bytes, metadata, hashes, report status, failure codes, and analysis columns match the seeded Worker 0002 rows.
 
@@ -180,7 +180,7 @@
 
 - [ ] **Step 2: Run the RED cases (2–5 minutes)**
 
-  Run: `cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent uv run pytest tests/integration/persistence/test_four_stage_conversion.py -v`
+  Run: `cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent uv run pytest tests/integration/persistence/test_four_stage_conversion.py -v`
 
   Expected: FAIL because revision `0003_validate_ordinary_runtime_tables` does not exist.
 
@@ -222,9 +222,9 @@
 
 - [ ] **Step 5: Run all migration acceptance evidence (2–5 minutes)**
 
-  Run: `cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent uv run pytest tests/integration/persistence/test_four_stage_migration.py -v`
+  Run: `cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent uv run pytest tests/integration/persistence/test_four_stage_migration.py -v`
 
-  Run: `cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent uv run pytest tests/integration/persistence/test_four_stage_conversion.py tests/integration/persistence/test_schema.py -v`
+  Run: `cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent uv run pytest tests/integration/persistence/test_four_stage_conversion.py tests/integration/persistence/test_schema.py -v`
 
   Expected: PASS. Every disposable test database is closed and dropped with bounded cleanup; wrong gates leave no partial replacement tables.
 
@@ -250,7 +250,7 @@
 **Interfaces:**
 
 - Consumes: `EvidenceReference(id: UUID)` from `domain/evidence/models.py`; this model remains unchanged.
-- Produces: `PersistedEvidence` with `raw_result: bytes`, `metadata: dict[str, Any]`, and `content_hash: str`; list/get ownership queries remain `id`, `rca_run_id`, and `specialist_run_id` only.
+- Produces: evidence inserts that persist `raw_result: bytes`, provenance `metadata: dict[str, Any]`, and `content_hash: str`. `PersistedEvidence` keeps its existing structured-data-only application shape so exact raw payloads are not pulled into agent context; list/get ownership queries remain UUID-only (`id`, `rca_run_id`, and `specialist_run_id`).
 - Produces: report persistence that inserts `result_status: Literal["COMPLETE", "PARTIAL", "FAILED"]` computed from `RcaReportDraft` terminal state.
 
 **Reviewer gate:** Reject if any partition helper returns, raw bytes are transformed or replaced by a pointer, provenance is omitted, report result status is not stored, UUID-only report/agent contracts change, or the disposable canonical smoke does not read back exact values.
@@ -269,7 +269,7 @@
 
 - [ ] **Step 2: Run focused RED tests (2–5 minutes)**
 
-  Run: `cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent uv run pytest tests/integration/application/test_persist_evidence.py tests/integration/application/test_persist_report.py -v`
+  Run: `cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent uv run pytest tests/integration/application/test_persist_evidence.py tests/integration/application/test_persist_report.py -v`
 
   Expected: FAIL because `60229b5` selects/writes `raw_result_reference` and its `INSERT INTO rca_reports` omits `result_status`.
 
@@ -300,13 +300,13 @@
   ) RETURNING id
   ```
 
-  Add `raw_result`, `metadata`, and `content_hash` to `PersistedEvidence`; validate `metadata` is a `dict` and `raw_result` is bytes. In `_persist_report`, set `result_status=report.status` and add the column to the existing aggregate `INSERT`.
+  Keep `PersistedEvidence` and evidence-tool receipts unchanged: list/get continue selecting only the ownership fields, `structured_data`, and fields already required for chunking. Exact bytes and metadata are durability/audit fields verified directly in persistence tests, not content returned to the AI. In `_persist_report`, set `result_status=report.status` and add the column to an aggregate `INSERT` that also creates version 1 when no prior report exists.
 
   ```sql
   INSERT INTO rca_reports(rca_run_id, version, summary, report, result_status)
-  SELECT :run, COALESCE(max(version), 0) + 1, :summary,
-         CAST(:report AS JSONB), :result_status
-  FROM rca_reports WHERE rca_run_id = :run
+  SELECT :run,
+         COALESCE((SELECT max(version) FROM rca_reports WHERE rca_run_id = :run), 0) + 1,
+         :summary, CAST(:report AS JSONB), :result_status
   ```
 
 - [ ] **Step 4: Prove audit, agent, and UUID-only behavior together (2–5 minutes)**
@@ -319,9 +319,9 @@
 
 - [ ] **Step 5: Run focused GREEN plus disposable canonical smoke (2–5 minutes)**
 
-  Run: `cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent uv run pytest tests/integration/application/test_persist_evidence.py tests/integration/application/test_persist_report.py tests/integration/application/test_production_processor.py tests/eval/test_rca_reports.py tests/unit/application/test_processor_retry.py -v`
+  Run: `cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent uv run pytest tests/integration/application/test_persist_evidence.py tests/integration/application/test_persist_report.py tests/integration/application/test_production_processor.py tests/eval/test_rca_reports.py tests/unit/application/test_processor_retry.py -v`
 
-  Run: `cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent uv run pytest tests/integration/persistence/test_four_stage_migration.py::test_clean_four_gate_database_runs_uuid_only_worker_smoke -v`
+  Run: `cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent uv run pytest tests/integration/persistence/test_four_stage_migration.py::test_clean_four_gate_database_runs_uuid_only_worker_smoke -v`
 
   Expected: PASS. The smoke starts from four explicit migration targets, persists exact bytes and metadata through Worker runtime, verifies `result_status`, and never invokes a migration `head` target.
 
@@ -473,10 +473,10 @@
   Document these four commands in this order, with writes stopped before the first and runtimes still stopped until the fourth postcondition passes:
 
   ```bash
-  cd backend && BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration uv run alembic upgrade 0002_grafana_normalization_v2
-  cd rca-worker && RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration uv run alembic upgrade 0002_adk_specialist_analysis
-  cd backend && BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration uv run alembic upgrade 0003_non_partition_runtime_tables
-  cd rca-worker && RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration uv run alembic upgrade 0003_validate_ordinary_runtime_tables
+  (cd backend && BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration uv run alembic upgrade 0002_grafana_normalization_v2)
+  (cd rca-worker && RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration uv run alembic upgrade 0002_adk_specialist_analysis)
+  (cd backend && BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration uv run alembic upgrade 0003_non_partition_runtime_tables)
+  (cd rca-worker && RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration uv run alembic upgrade 0003_validate_ordinary_runtime_tables)
   ```
 
   Include two read-only checks after each command:
@@ -513,27 +513,33 @@
 - Consumes: commits from Tasks 1–6 and existing request-scoped publish/recovery implementation.
 - Produces: release acceptance evidence for schema conversion, isolated configuration, Backend/Worker runtime behavior, deployment rendering, and static/type checks.
 
-**Reviewer gate:** Reject release if any four-gate command is replaced with `head`, any full test/type failure is waived without an explicitly approved existing baseline, the canonical smoke skips exact evidence provenance, or retained legacy table verification is absent.
+**Reviewer gate:** Reject release if any four-gate command is replaced with `head`, any full test/type failure is waived, the acceptance/test database names are not isolated from `sre_agent`, the canonical smoke skips exact evidence provenance, or retained legacy table verification is absent.
 
 - [ ] **Step 1: Establish a fresh disposable acceptance database with explicit revisions (2–5 minutes)**
 
-  Run each command separately; inspect both version tables after each command before continuing.
+  Run each command separately. The two fixed names below are test-only targets; `createdb` must fail and the release gate must stop if either already exists. Never reuse, truncate, migrate, or drop the shared `sre_agent` database.
 
   ```bash
   docker compose --env-file .env.compose.example up -d postgres pubsub-emulator
-  cd backend && BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0002_grafana_normalization_v2
-  cd rca-worker && RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0002_adk_specialist_analysis
-  cd backend && BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0003_non_partition_runtime_tables
-  cd rca-worker && RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0003_validate_ordinary_runtime_tables
+  docker compose --env-file .env.compose.example exec -T postgres createdb -U postgres sre_agent_release_acceptance
+  docker compose --env-file .env.compose.example exec -T postgres createdb -U postgres sre_agent_release_tests
+  (cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_acceptance BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0002_grafana_normalization_v2)
+  (cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_acceptance RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0002_adk_specialist_analysis)
+  (cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_acceptance BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0003_non_partition_runtime_tables)
+  (cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_acceptance RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0003_validate_ordinary_runtime_tables)
   ```
 
-  Expected: all commands succeed; never replace a command with `upgrade head`.
+  After every migration command, query both version tables in `sre_agent_release_acceptance` and compare them with the expected current gate before continuing. Expected: all commands succeed; never replace a command with `upgrade head`.
 
 - [ ] **Step 2: Run migration, Backend, Worker, and contract suites (2–5 minutes each command)**
 
   ```bash
-  cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent uv run pytest tests/integration/persistence/test_four_stage_migration.py tests/integration/persistence/test_non_partition_migration.py tests/integration/application tests/integration/api -v
-  cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent uv run pytest tests/integration/persistence/test_four_stage_conversion.py tests/integration/application tests/integration/workers -v
+  (cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0002_grafana_normalization_v2)
+  (cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0002_adk_specialist_analysis)
+  (cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0003_non_partition_runtime_tables)
+  (cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0003_validate_ordinary_runtime_tables)
+  (cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests uv run pytest tests -v)
+  (cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests uv run pytest tests -v)
   uv run --project backend pytest contracts/compatibility-tests -v
   ```
 
@@ -542,16 +548,40 @@
 - [ ] **Step 3: Run full static checks (2–5 minutes each command)**
 
   ```bash
-  cd backend && uv run ruff check . && uv run pyright
-  cd rca-worker && uv run ruff check . && uv run pyright
+  (cd backend && uv run ruff check . && uv run pyright)
+  (cd rca-worker && uv run ruff check . && uv run pyright)
   git diff --check
   ```
 
-  Expected: zero Ruff and Pyright errors in changed scope; any pre-existing global Pyright issue is recorded with file, diagnostic, commit ancestry, and a maintainer-approved baseline before release acceptance.
+  Expected: zero Ruff and Pyright errors for both complete projects. A pre-existing error is not waived at this gate: route it to the owning task (or add a narrowly scoped defect task), fix it with RED/GREEN evidence, and restart the release gate.
 
-- [ ] **Step 4: Run request/recovery and evidence end-to-end smoke (2–5 minutes)**
+- [ ] **Step 4: Run request/recovery and evidence end-to-end smoke (2–5 minutes per phase)**
 
-  Start Backend and Worker using their separate env files. Submit one Grafana webhook and verify HTTP `202`, one committed request event publish attempt, Worker durable claim, and report persistence. Force one publisher failure, verify event `FAILED` and unchanged backlog after Backend restart, then use global-access `/retry-failed` and verify at-least-once-safe worker processing. Persist evidence containing non-UTF-8 bytes, retrieve exact `raw_result` and `metadata`, verify UUID-only `hypothesis_evidence`, and verify report `result_status`.
+  Start the processes in separate terminals with OS `DATABASE_URL` overriding only their own example file:
+
+  ```bash
+  (cd backend && DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_acceptance BACKEND_ENV_FILE=../.env.backend-api.example uv run uvicorn sre_agent.api.main:app --host 127.0.0.1 --port 8000)
+  (cd rca-worker && DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_acceptance RCA_WORKER_ENV_FILE=../.env.rca-worker.example uv run sre-agent-rca-worker)
+  ```
+
+  Submit the first example and record the HTTP status/body:
+
+  ```bash
+  curl -fsS -X POST 'http://127.0.0.1:8000/webhooks/v1/grafana/50000000-0000-0000-0000-000000000001' -H 'Authorization: Bearer replace-me' -H 'Content-Type: application/json' --data-binary @contracts/examples/grafana-firing.json
+  ```
+
+  Expected: HTTP `202`; exactly one outbox event reaches `PUBLISHED`; Worker claims its job and persists a report with non-null `result_status`. Query `outbox_events`, `worker_jobs`, `rca_reports`, `evidence_records`, and `hypothesis_evidence` in `sre_agent_release_acceptance` for the returned delivery/run IDs, including byte-for-byte `raw_result`, provenance `metadata`, and UUID-only evidence links.
+
+  Stop only `pubsub-emulator`, submit `contracts/examples/grafana-firing-aws.json`, and verify another HTTP `202` plus one `FAILED` outbox event. Stop Backend, restart the emulator and Worker (so local topic/subscription bootstrap runs), then restart Backend with the same command. Before recovery, query that the failed event is still `FAILED`; startup must not publish it. Invoke manual recovery:
+
+  ```bash
+  docker compose --env-file .env.compose.example stop pubsub-emulator
+  curl -fsS -X POST 'http://127.0.0.1:8000/webhooks/v1/grafana/50000000-0000-0000-0000-000000000001' -H 'Authorization: Bearer replace-me' -H 'Content-Type: application/json' --data-binary @contracts/examples/grafana-firing-aws.json
+  docker compose --env-file .env.compose.example up -d pubsub-emulator
+  curl -fsS -X POST 'http://127.0.0.1:8000/api/v1/operations/outbox-events/retry-failed?limit=100' -H 'Authorization: Bearer local-operator'
+  ```
+
+  Expected: recovery returns a non-zero `selected`/`published` count without payload overrides; at-least-once processing produces no duplicate RCA run/job for an already accepted delivery.
 
 - [ ] **Step 5: Capture catalog and rollback-policy evidence (2–5 minutes)**
 
@@ -572,7 +602,15 @@
 
   Expected: six canonical `relkind='r'`/`relispartition=false` relations and six retained legacy partition parents. Record that no automatic downgrade or legacy cleanup has been executed.
 
-- [ ] **Step 6: Commit only task-owned defect fixes, then tag release evidence (2–5 minutes)**
+- [ ] **Step 6: Clean disposable databases and commit only task-owned defect fixes (2–5 minutes)**
+
+  First list the exact two test databases and confirm neither name is `sre_agent`, then remove only those two explicit targets:
+
+  ```bash
+  docker compose --env-file .env.compose.example exec -T postgres psql -U postgres -d postgres -c "SELECT datname FROM pg_database WHERE datname IN ('sre_agent_release_acceptance','sre_agent_release_tests') ORDER BY datname"
+  docker compose --env-file .env.compose.example exec -T postgres dropdb -U postgres --force sre_agent_release_acceptance
+  docker compose --env-file .env.compose.example exec -T postgres dropdb -U postgres --force sre_agent_release_tests
+  ```
 
   If no defect files changed, do not create a verification-only source commit. If a defect is found, return it to its owning Task 1–6 file list, commit with that task’s message family, rerun its focused suite, then restart this release gate from Step 1. Store non-secret command output with release evidence outside the repository.
 
@@ -580,7 +618,7 @@
 
 - **Spec coverage:** Task 1 implements true Worker 0002 preservation and fail-closed Backend conversion. Task 2 implements the new Worker validation revision and clean/existing four-gate coverage. Task 3 corrects the `60229b5` raw bytes/provenance/report status regression while preserving UUID-only identity. Tasks 4–6 supersede original Tasks 10–12. Task 7 supersedes the original Task 13 release gate.
 - **Placeholder scan:** Every implementation step includes concrete files, interfaces, commands, expected outcomes, and code or SQL where a change is required; no deferred-work marker remains.
-- **Type consistency:** `EvidenceReference(id: UUID)` is unchanged across Tasks 2, 3, and 7; `PersistedEvidence.raw_result: bytes`, `PersistedEvidence.metadata: dict[str, Any]`, and `result_status: Literal["COMPLETE", "PARTIAL", "FAILED"]` are introduced in Task 3 before their smoke assertions. Worker revision name is consistently `0003_validate_ordinary_runtime_tables`.
+- **Type consistency:** `EvidenceReference(id: UUID)` and the structured-data-only `PersistedEvidence` application shape are unchanged across Tasks 2, 3, and 7. Task 3 persists exact `raw_result: bytes` and provenance `metadata: dict[str, Any]` at the repository boundary without returning them to agent context; `result_status: Literal["COMPLETE", "PARTIAL", "FAILED"]` is stored before its smoke assertions. Worker revision name is consistently `0003_validate_ordinary_runtime_tables`.
 
 ## Execution Handoff
 
