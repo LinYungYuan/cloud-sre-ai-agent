@@ -217,27 +217,100 @@ application service；Backend request 與 recovery API 共用相同 persistence/
 
 ### 8.2 Forward migration
 
-Backend migration 必須在受控 maintenance window 執行：
+已發布的 Backend 與 RCA Worker migration history 保持 immutable。唯一支援的 schema rollout
+順序固定為下列四個 revision gate：
 
-1. 確認 migration 前備份可用，停止所有會寫入相關 tables 的 runtime。
-2. 建立具目標普通 schema 的 replacement tables。
-3. 依 dependency order 複製所有 parent partitions 的資料。
-4. 驗證每張表 row count、UUID uniqueness、非空欄位、foreign keys 與關鍵 aggregate counts。
-5. 重建 indexes、constraints、sequences/defaults 與 grants。
-6. 在短 transaction 內重新命名舊 parent/replacement tables，切換 canonical names。
-7. 再次驗證 schema、資料筆數、foreign keys 與代表性 read/write queries。
-8. 驗證期內保留 renamed legacy partition tables；正式驗收與備份確認後，才由明確的後續
+1. Backend 到 `0002_grafana_normalization_v2`。
+2. RCA Worker 到 `0002_adk_specialist_analysis`。
+3. Backend 到 `0003_non_partition_runtime_tables`。
+4. RCA Worker 到新的 `0003` post-conversion revision。
+
+每個命令都必須指定明確 revision；禁止在任何階段用 `upgrade head` 越過尚未驗證的中間 gate。
+兩個 Alembic version tables 必須在每階段前後分別驗證，且不得以 stamp 或 migration environment
+內的條件分支偽造已執行的 revision。production 四階段 transition 必須位於同一個受控
+maintenance window：在第一個尚未完成的 gate 前停止所有 writes，直到第四個 gate 與最終 schema
+驗證完成後才可切換 runtime。clean database 雖無既有 writes，仍必須通過相同 preconditions 與
+postconditions。
+
+#### 8.2.1 前兩個 immutable gates
+
+Backend `0002` 先建立既有 partitioned baseline，Worker `0001`、`0002` 再依其已發布內容接管
+Worker-owned tables，加入 durable lifecycle、exact evidence 與 specialist analysis schema。第二個
+gate 完成時，conversion 的來源必須是完整 Worker `0002_adk_specialist_analysis` schema，而不是
+僅有 Backend `0002` 的 legacy baseline。
+
+全新 database 與已存在且達 Worker `0002` head 的 database 使用同一組四階段契約。全新 database
+依序執行四個明確 target；既有 Worker-head database 必須驗證前兩個 target 與 schema 已完整達成，
+然後只執行第三、第四階段，不重演 migration、重新 stamp 或採用另一條捷徑。每一階段重跑時，
+version table 已在該 target 且 postcondition schema 仍通過驗證，才可成為 Alembic no-op；
+revision/schema 不一致必須 fail closed。
+
+#### 8.2.2 Backend `0003` ordinary-table conversion
+
+Backend `0003_non_partition_runtime_tables` 必須在受控 maintenance window 內，並以 Worker `0002`
+schema 為唯一合法來源執行：
+
+1. 確認 migration 前備份可用，停止 Backend、RCA Worker 與所有會寫入相關 tables 的 runtime。
+2. 驗證 Backend version 為 `0002_grafana_normalization_v2`、Worker version 為
+   `0002_adk_specialist_analysis`，並驗證 Worker-owned columns/constraints 符合來源契約。
+3. 建立具目標普通 schema 的 replacement tables。
+4. 依 dependency order 複製所有 parent partitions 的資料。
+5. 驗證每張表 row count、UUID uniqueness、非空欄位、foreign keys 與關鍵 aggregate counts。
+6. 重建 indexes、constraints、sequences/defaults 與 grants。
+7. 在短 transaction 內重新命名舊 parent/replacement tables，切換 canonical names。
+8. 再次驗證 schema、資料筆數、foreign keys 與代表性 read/write queries。
+9. 驗證期內保留 renamed legacy partition tables；正式驗收與備份確認後，才由明確的後續
    cleanup migration 移除，不在第一次轉換中直接刪除。
 
-migration 不得以 truncate/recreate 空表取代資料搬移，也不得在未驗證 row counts 前刪除任何
-legacy partition 或 child table。
+replacement schema 與 copy 必須完整保存 Worker `0002` 已擁有的資料與欄位，包含
+`evidence_records.raw_result BYTEA`、`metadata JSONB`、`content_hash`，以及
+`rca_reports.result_status` 和所有 Worker lifecycle/specialist analysis 欄位。除將六張 canonical
+tables 改為 UUID-only ordinary tables 所必須移除的 `partition_timestamp` 與
+`*_partition_timestamp` helpers 外，不得刪除、降級或重新解釋 Worker schema。exact MCP bytes 與
+provenance metadata 不得轉成 synthetic hash pointer 或其他不可還原的 `raw_result_reference`。
+Backend `0003` 未 replacement 的 Worker-owned tables 及其 lifecycle/analysis columns 必須原樣
+保留；若 replacement 或 FK rebuild 觸及 Worker-owned table，copy/constraint contract 也必須以
+Worker `0002` schema 為準。
+
+Backend `0003` 不得以 truncate/recreate 空表取代資料搬移，也不得在未驗證 row counts 前刪除
+任何 legacy partition 或 child table。
+
+#### 8.2.3 Worker `0003` post-conversion gate
+
+新的 Worker `0003` 是 Backend conversion 後的 validation/ownership gate。它必須要求 Backend
+version 已為 `0003_non_partition_runtime_tables`、Worker version 正好為
+`0002_adk_specialist_analysis`，驗證 ordinary UUID-only schema 與 Worker `0002` 資料仍完整，
+並只建立必要的 UUID-only Worker constraints/indexes。它不得重演、改寫或複製 Worker `0001`、
+`0002` 的 lifecycle、raw evidence、report status 或 analysis migration。
+
+Backend 與 RCA Worker runtime 只有在 Backend version 為
+`0003_non_partition_runtime_tables` 且 Worker version 為新 `0003`，且兩個 post-migration schema
+checks 均成功後，才可在同一 maintenance window 切換為 UUID-only runtime。不得在兩個 migration
+targets 之間啟動任一新 runtime，也不得讓 composite-reference 舊 runtime 對 ordinary tables
+恢復寫入。
 
 ### 8.3 Rollback
 
-這是 forward schema conversion，不提供可在有新 writes 後無損自動 downgrade 的 Alembic
-rollback。若切換後驗證失敗，在尚未接受新 writes 的 maintenance window 內可交換回 legacy
-tables；若已接受新 writes，必須停止流量、搬移 delta 或由已驗證備份恢復，不得直接執行
-破壞性 downgrade。
+四個階段各自在執行前驗證兩個 revision tables 與 schema preconditions；任何 revision 跳躍、
+unexpected column/constraint、copy mismatch 或 validation failure 都必須 fail closed，保持 runtimes
+停止並由 operator 判斷，不得自動 stamp、略過或繼續下一階段。
+
+Backend `0003` 是 forward schema conversion，不提供可在有新 writes 後無損自動 downgrade 的
+Alembic rollback。renamed legacy partition tables 必須保留。若切換後驗證失敗，在尚未接受新
+writes 的 maintenance window 內可依已驗證 procedure 交換回 legacy tables；若已接受新 writes，
+必須停止流量、搬移 delta 或由已驗證備份恢復，不得直接執行破壞性 downgrade。Worker 新
+`0003` 的 validation/constraint 失敗也不得嘗試重寫 Worker `0001`、`0002` history。
+
+### 8.4 明確拒絕的 migration 方案
+
+- 不修改、squash 或重建已發布的 Worker `0001_rca_worker_v1` 或
+  `0002_adk_specialist_analysis`。
+- 不在 migration environment 依目前 schema 做 conditional stamp、跳過 revision body，或讓
+  `upgrade head` 隱式跨越中間 gate。
+- 不因 ordinary-table conversion 丟棄 `raw_result`、`metadata`、`result_status`、lifecycle 或
+  analysis data，也不以 synthetic pointer 取代 exact raw bytes/provenance。
+- 不為 clean database 與 existing Worker-head database 維護兩套 migration history 或不同最終
+  schema。
 
 ## 9. Partition 元件移除
 
@@ -399,10 +472,22 @@ schema 與 authorization errors。Runbook 必須說明如何先查詢 backlog，
 
 ### 14.2 Schema conversion
 
-- 在 PostgreSQL integration test 建立跨多個月份的 parent/child fixtures。
+- PostgreSQL integration test 必須從 clean database 真實依序執行 Backend `0002`、Worker `0002`、
+  Backend `0003`、Worker 新 `0003`；不得直接 stamp、只執行單一 stream 或以預建 final schema
+  取代四階段 migration。
+- 另以已達 Backend `0002`／Worker `0002` 的 existing Worker-head fixture 執行相同 gate contract，
+  證明第三、第四階段得到與 clean database 相同的 version tables 與 schema。
+- 在 conversion 前建立跨多個月份的 parent/child fixtures，包含 exact non-UTF-8/非 canonical JSON
+  raw bytes、provenance metadata、`result_status` 與 specialist `analysis_result` 代表資料。
 - upgrade 後六張 canonical tables 均不是 partitioned relations。
-- 所有 row counts、UUIDs、business timestamps、foreign keys 與 representative reads 保持一致。
+- 所有 row counts、UUIDs、business timestamps、foreign keys、exact raw bytes、metadata、content hash、
+  report result status、Worker lifecycle 與 specialist analysis 欄位及 representative reads 保持一致。
 - upgrade 後可寫入任意月份資料，不需先建立 partition。
+- migration acceptance 必須以新 UUID-only Worker runtime 執行 evidence persistence 與 report
+  persistence smoke test，證明 exact bytes/provenance 可讀回、hypothesis evidence UUID FK 生效，
+  且 report `result_status` 正確保存。
+- 每個中間 gate 都測試 wrong revision/schema 時 fail closed；重跑已完成 target 只允許 version-table
+  一致的 Alembic no-op。
 - legacy tables 在首次 migration 後仍保留且不再接收 writes。
 - cleanup migration 只在顯式驗收 gate 後測試/執行。
 
@@ -430,9 +515,18 @@ schema 與 authorization errors。Runbook 必須說明如何先查詢 backlog，
 1. 先完成 environment isolation 與 Backend AI/MCP setting cleanup。
 2. 將 Outbox publish primitive 改成 request-scoped/manual-scoped，再整合 Backend commit 後流程。
 3. 完成人工 recovery REST API、authorization、OpenAPI contract 與 audit/observability。
-4. 在 PostgreSQL integration coverage 下完成普通表 forward migration。
-5. 移除 Partition runtime/CronJob 與 Outbox Deployment。
-6. 更新 Compose、Kubernetes、README/runbook，最後做完整驗證與 rollout gate。
+4. 建立真實四階段 PostgreSQL integration coverage，並使 Backend `0003` 以 Worker `0002` schema
+   保存全部資料完成 ordinary-table conversion。
+5. 新增只負責 post-conversion validation 與必要 UUID-only constraints/indexes 的 Worker `0003`；
+   不修改既有 migration history。
+6. 完成 Backend 與 RCA Worker UUID-only runtime，但在兩個 migration streams 都到達第 8.2 節目標
+   前不得部署或啟動。
+7. 移除 Partition runtime/CronJob 與 Outbox Deployment。
+8. 更新 Compose、Kubernetes、README/runbook，最後依第 8.2 節的四個明確 revision targets 執行
+   maintenance-window rollout；禁止以 `upgrade head` 取代 gate commands。
 
 不得在普通表 migration 通過資料保存驗證前移除 Partition Worker，也不得在 Backend
-request-scoped publish 與 manual recovery 都可用前移除獨立 Outbox Worker deployment。
+request-scoped publish 與 manual recovery 都可用前移除獨立 Outbox Worker deployment。正式 rollout
+固定為 `Backend 0002` → `Worker 0002_adk_specialist_analysis` →
+`Backend 0003_non_partition_runtime_tables` → `Worker 新 0003`；只有最後 gate 完成後，才同時切換
+Backend/Worker UUID-only runtimes。
