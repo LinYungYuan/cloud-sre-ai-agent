@@ -70,33 +70,37 @@ class ResourceFactory(Protocol):
 @asynccontextmanager
 async def production_resources(settings: Settings) -> AsyncIterator[RuntimeResources]:
     engine = create_async_engine(settings.database_url.get_secret_value())
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    publisher_client = create_publisher_client(settings.pubsub_emulator_host)
-    topic = publisher_client.topic_path(settings.pubsub_project_id, settings.rca_topic_id)
-
-    async def readiness_check() -> None:
-        async with engine.connect() as connection:
-            await connection.execute(text("SELECT 1"))
-
     try:
-        async with engine.connect() as connection:
-            rules = await load_normalization_rule_provider(connection)
-            folders = await load_folder_scope_provider(connection)
-        _validate_configured_sources(settings, rules)
-        yield RuntimeResources(
-            uow_factory=lambda: SqlAlchemyUnitOfWork(session_factory),
-            normalization_rule_provider=rules,
-            folder_scope_provider=folders,
-            readiness_check=readiness_check,
-            operator_reads=SqlAlchemyOperatorReadRepository(session_factory),
-            outbox_publish_service=OutboxPublishService(
-                session_factory,
-                GooglePubSubPublisher(publisher_client),
-                topic,
-            ),
-        )
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        publisher_client = create_publisher_client(settings.pubsub_emulator_host)
+        try:
+            topic = publisher_client.topic_path(
+                settings.pubsub_project_id, settings.rca_topic_id
+            )
+
+            async def readiness_check() -> None:
+                async with engine.connect() as connection:
+                    await connection.execute(text("SELECT 1"))
+
+            async with engine.connect() as connection:
+                rules = await load_normalization_rule_provider(connection)
+                folders = await load_folder_scope_provider(connection)
+            _validate_configured_sources(settings, rules)
+            yield RuntimeResources(
+                uow_factory=lambda: SqlAlchemyUnitOfWork(session_factory),
+                normalization_rule_provider=rules,
+                folder_scope_provider=folders,
+                readiness_check=readiness_check,
+                operator_reads=SqlAlchemyOperatorReadRepository(session_factory),
+                outbox_publish_service=OutboxPublishService(
+                    session_factory,
+                    GooglePubSubPublisher(publisher_client),
+                    topic,
+                ),
+            )
+        finally:
+            publisher_client.stop()
     finally:
-        publisher_client.stop()
         await engine.dispose()
 
 

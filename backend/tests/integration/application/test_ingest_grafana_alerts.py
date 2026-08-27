@@ -3,6 +3,7 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from types import TracebackType
 from uuid import UUID
 
 import pytest
@@ -56,6 +57,30 @@ class RecordingEventPublisher:
         if self.fail:
             raise RuntimeError("publisher unavailable")
         return OutboxPublishResult(event_id, "PENDING", PublishResultCode.PUBLISHED)
+
+
+class CommitThenInterruptUnitOfWork:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        interrupt_state: list[bool],
+    ) -> None:
+        self._inner = SqlAlchemyUnitOfWork(session_factory)
+        self._interrupt_state = interrupt_state
+
+    async def __aenter__(self) -> SqlAlchemyUnitOfWork:
+        return await self._inner.__aenter__()
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self._inner.__aexit__(exc_type, exc_value, traceback)
+        if exc_type is None and self._interrupt_state[0]:
+            self._interrupt_state[0] = False
+            raise RuntimeError("simulated response interruption after commit")
 
 
 @pytest_asyncio.fixture
@@ -443,6 +468,34 @@ async def test_publish_failure_keeps_accepted_ingestion_result(
 
 
 @pytest.mark.asyncio
+async def test_redelivery_after_commit_before_response_does_not_create_second_rca_work(
+    session_factory,
+) -> None:
+    interrupt_state = [True]
+
+    def uow_factory() -> CommitThenInterruptUnitOfWork:
+        return CommitThenInterruptUnitOfWork(session_factory, interrupt_state)
+
+    publisher = RecordingEventPublisher()
+    use_case = _use_case(
+        session_factory,
+        uow_factory=uow_factory,
+        outbox_publisher=publisher,
+    )
+
+    with pytest.raises(RuntimeError, match="after commit"):
+        await use_case.execute(SOURCE_ID, TOKEN_ID, AWS_FIXTURE, RECEIVED_AT)
+
+    result = await use_case.execute(SOURCE_ID, TOKEN_ID, AWS_FIXTURE, RECEIVED_AT)
+
+    assert result.outbox_event_ids == ()
+    assert publisher.event_ids == []
+    assert len(await _rows(session_factory, "SELECT id FROM rca_runs")) == 1
+    assert len(await _rows(session_factory, "SELECT id FROM worker_jobs")) == 1
+    assert len(await _rows(session_factory, "SELECT id FROM outbox_events")) == 1
+
+
+@pytest.mark.asyncio
 async def test_identity_v2_groups_only_same_source_folder_and_alert_name(
     session_factory,
 ) -> None:
@@ -548,9 +601,7 @@ async def test_failure_after_incident_insert_rolls_back_every_artifact(
             session_factory,
             uow_factory=uow_factory,
             outbox_publisher=publisher,
-        ).execute(
-            SOURCE_ID, TOKEN_ID, AWS_FIXTURE, RECEIVED_AT
-        )
+        ).execute(SOURCE_ID, TOKEN_ID, AWS_FIXTURE, RECEIVED_AT)
 
     assert publisher.event_ids == []
 

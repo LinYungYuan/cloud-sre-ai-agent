@@ -1,12 +1,14 @@
 import os
 from pathlib import Path
 from time import perf_counter
+from typing import Self
 from uuid import UUID
 
 import httpx
 import pytest
+from google.api_core.client_options import ClientOptions
 from google.auth.credentials import AnonymousCredentials
-from pydantic import AnyHttpUrl, SecretStr, TypeAdapter
+from pydantic import SecretStr
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -21,7 +23,6 @@ TEAM_ID = UUID("18000000-0000-0000-0000-000000000001")
 PROJECT_ID = UUID("28000000-0000-0000-0000-000000000001")
 ENVIRONMENT_ID = UUID("38000000-0000-0000-0000-000000000001")
 SERVICE_ID = UUID("48000000-0000-0000-0000-000000000001")
-HTTP_URL = TypeAdapter(AnyHttpUrl)
 DATABASE_URL = os.getenv(
     "MIGRATION_TEST_DATABASE_URL",
     "postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent",
@@ -52,6 +53,149 @@ class RecordingPublisherClient:
         self.stopped = True
 
 
+class _LifecycleConnection:
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        del args
+
+    async def execute(self, statement: object) -> None:
+        del statement
+
+
+class _LifecycleEngine:
+    def __init__(self) -> None:
+        self.dispose_calls = 0
+
+    def connect(self) -> _LifecycleConnection:
+        return _LifecycleConnection()
+
+    async def dispose(self) -> None:
+        self.dispose_calls += 1
+
+
+class _LifecyclePublisherClient:
+    def __init__(
+        self,
+        *,
+        topic_error: Exception | None = None,
+        stop_error: Exception | None = None,
+    ) -> None:
+        self.topic_error = topic_error
+        self.stop_error = stop_error
+        self.stop_calls = 0
+
+    def topic_path(self, project_id: str, topic_id: str) -> str:
+        del project_id, topic_id
+        if self.topic_error is not None:
+            raise self.topic_error
+        return "projects/test/topics/rca-jobs"
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+        if self.stop_error is not None:
+            raise self.stop_error
+
+
+def _resource_settings() -> Settings:
+    return Settings(
+        database_url=SecretStr("postgresql+asyncpg://unused"),
+        grafana_tokens={SOURCE_ID: {"token": SecretStr("accepted-token")}},
+        pubsub_project_id="local-project",
+        rca_topic_id="rca-jobs",
+        app_environment="local",
+    )
+
+
+def _stub_resource_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    engine: _LifecycleEngine,
+) -> None:
+    monkeypatch.setattr(composition, "create_async_engine", lambda _: engine)
+    monkeypatch.setattr(
+        composition,
+        "async_sessionmaker",
+        lambda *args, **kwargs: object(),
+    )
+
+    async def load_provider(_: object) -> object:
+        return object()
+
+    monkeypatch.setattr(composition, "load_normalization_rule_provider", load_provider)
+    monkeypatch.setattr(composition, "load_folder_scope_provider", load_provider)
+    monkeypatch.setattr(composition, "_validate_configured_sources", lambda *_: None)
+
+
+@pytest.mark.asyncio
+async def test_production_resources_disposes_engine_when_publisher_creation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _LifecycleEngine()
+    _stub_resource_dependencies(monkeypatch, engine)
+
+    def fail_create(_: str | None) -> _LifecyclePublisherClient:
+        raise RuntimeError("publisher construction failed")
+
+    monkeypatch.setattr(composition, "create_publisher_client", fail_create)
+
+    with pytest.raises(RuntimeError, match="publisher construction failed"):
+        async with composition.production_resources(_resource_settings()):
+            raise AssertionError("resource acquisition should fail")
+
+    assert engine.dispose_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_production_resources_stops_client_and_disposes_engine_when_topic_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _LifecycleEngine()
+    client = _LifecyclePublisherClient(topic_error=RuntimeError("topic failed"))
+    _stub_resource_dependencies(monkeypatch, engine)
+    monkeypatch.setattr(composition, "create_publisher_client", lambda _: client)
+
+    with pytest.raises(RuntimeError, match="topic failed"):
+        async with composition.production_resources(_resource_settings()):
+            raise AssertionError("topic acquisition should fail")
+
+    assert client.stop_calls == 1
+    assert engine.dispose_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_production_resources_disposes_engine_when_client_stop_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _LifecycleEngine()
+    client = _LifecyclePublisherClient(stop_error=RuntimeError("stop failed"))
+    _stub_resource_dependencies(monkeypatch, engine)
+    monkeypatch.setattr(composition, "create_publisher_client", lambda _: client)
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        async with composition.production_resources(_resource_settings()):
+            pass
+
+    assert client.stop_calls == 1
+    assert engine.dispose_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_production_resources_stops_client_and_disposes_engine_on_normal_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _LifecycleEngine()
+    client = _LifecyclePublisherClient()
+    _stub_resource_dependencies(monkeypatch, engine)
+    monkeypatch.setattr(composition, "create_publisher_client", lambda _: client)
+
+    async with composition.production_resources(_resource_settings()):
+        pass
+
+    assert client.stop_calls == 1
+    assert engine.dispose_calls == 1
+
+
 def test_local_emulator_client_uses_explicit_endpoint_and_anonymous_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -68,6 +212,7 @@ def test_local_emulator_client_uses_explicit_endpoint_and_anonymous_credentials(
     pubsub_publisher.create_publisher_client("127.0.0.1:58085")
 
     assert isinstance(constructed["credentials"], AnonymousCredentials)
+    assert isinstance(constructed["client_options"], ClientOptions)
     assert constructed["client_options"].api_endpoint == "127.0.0.1:58085"
 
 
@@ -124,10 +269,6 @@ async def test_production_resources_accept_and_commit_without_dependency_overrid
         rca_topic_id="rca-jobs",
         pubsub_emulator_host="127.0.0.1:58085",
         app_environment="local",
-        model_name="test-model",
-        metrics_mcp_url=HTTP_URL.validate_python("https://gateway/gcp/metrics/mcp"),
-        trace_mcp_url=HTTP_URL.validate_python("https://gateway/gcp/trace/mcp"),
-        log_mcp_url=HTTP_URL.validate_python("https://gateway/gcp/log/mcp"),
     )
     readiness_statements: list[str] = []
     publisher_client = RecordingPublisherClient()
@@ -176,10 +317,14 @@ async def test_production_resources_accept_and_commit_without_dependency_overrid
 
                 async with session_factory() as session:
                     incident_id = await session.scalar(
-                        text("SELECT id FROM incidents ORDER BY created_at DESC LIMIT 1")
+                        text(
+                            "SELECT id FROM incidents ORDER BY created_at DESC LIMIT 1"
+                        )
                     )
                     alert_id = await session.scalar(
-                        text("SELECT id FROM alert_instances ORDER BY last_seen_at DESC LIMIT 1")
+                        text(
+                            "SELECT id FROM alert_instances ORDER BY last_seen_at DESC LIMIT 1"
+                        )
                     )
                     artifact_counts = (
                         await session.execute(
