@@ -19,6 +19,7 @@ from sre_agent.domain.alerts.normalization import (
 )
 from sre_agent.domain.alerts.provider import Provider
 from sre_agent.persistence.repositories.incidents import IncidentScope
+from sre_agent.persistence.repositories.jobs import RcaWorkCreation
 from sre_agent.persistence.repositories.normalization import (
     FolderScopeProvider,
     NormalizationRuleProvider,
@@ -408,7 +409,7 @@ class FailingJobRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def create_rca_work(self, **values) -> UUID:
+    async def create_rca_work(self, **values) -> RcaWorkCreation:
         del values
         raise RuntimeError("injected failure")
 
