@@ -4,10 +4,15 @@ import os
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
-from uuid import UUID
+from unittest.mock import patch
+from urllib.parse import urlsplit, urlunsplit
+from uuid import UUID, uuid4
 
+import asyncpg
 import pytest
 import pytest_asyncio
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -35,6 +40,8 @@ DATABASE_URL = os.getenv(
     "MIGRATION_TEST_DATABASE_URL",
     "postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent",
 )
+USE_DISPOSABLE_DATABASE = os.getenv("TASK8_DISPOSABLE_DATABASE") == "1"
+BACKEND_ROOT = Path(__file__).resolve().parents[3]
 ROOT = Path(__file__).resolve().parents[4]
 AWS_FIXTURE = (ROOT / "contracts/examples/grafana-firing-aws.json").read_bytes()
 GCP_FIXTURE = (ROOT / "contracts/examples/grafana-firing.json").read_bytes()
@@ -83,9 +90,44 @@ class CommitThenInterruptUnitOfWork:
             raise RuntimeError("simulated response interruption after commit")
 
 
+def _with_database(database_url: str, database_name: str) -> str:
+    parsed = urlsplit(database_url)
+    return urlunsplit((parsed.scheme, parsed.netloc, f"/{database_name}", "", ""))
+
+
+def _asyncpg_url(database_url: str) -> str:
+    return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+
+def _upgrade_disposable_database(database_url: str) -> None:
+    config = Config(str(BACKEND_ROOT / "alembic.ini"))
+    with patch.dict(os.environ, {"MIGRATION_TEST_DATABASE_URL": database_url}):
+        command.upgrade(config, "0003_non_partition_runtime_tables")
+
+
+@pytest_asyncio.fixture(scope="module")
+async def isolated_database_url():
+    """Create a post-0003 database instead of mutating a shared test database."""
+    if not USE_DISPOSABLE_DATABASE:
+        pytest.skip("set TASK8_DISPOSABLE_DATABASE=1 for this database suite")
+
+    database_name = f"task8_ingest_{uuid4().hex}"
+    admin = await asyncpg.connect(
+        _asyncpg_url(_with_database(DATABASE_URL, "postgres"))
+    )
+    database_url = _with_database(DATABASE_URL, database_name)
+    try:
+        await admin.execute(f'CREATE DATABASE "{database_name}"')
+        await asyncio.to_thread(_upgrade_disposable_database, database_url)
+        yield database_url
+    finally:
+        await admin.execute(f'DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)')
+        await admin.close()
+
+
 @pytest_asyncio.fixture
-async def session_factory():
-    engine = create_async_engine(DATABASE_URL)
+async def session_factory(isolated_database_url: str):
+    engine = create_async_engine(isolated_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as connection:
         await connection.execute(text("TRUNCATE TABLE outbox_events, teams CASCADE"))

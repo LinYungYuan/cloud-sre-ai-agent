@@ -1,11 +1,18 @@
+import asyncio
 import json
 import os
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from pathlib import Path
+from unittest.mock import patch
+from urllib.parse import urlsplit, urlunsplit
+from uuid import UUID, uuid4
 
+import asyncpg
 import pytest
 import pytest_asyncio
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -22,6 +29,8 @@ DATABASE_URL = os.getenv(
     "MIGRATION_TEST_DATABASE_URL",
     "postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent",
 )
+USE_DISPOSABLE_DATABASE = os.getenv("TASK8_DISPOSABLE_DATABASE") == "1"
+BACKEND_ROOT = Path(__file__).resolve().parents[3]
 TEAM_ID = UUID("91000000-0000-0000-0000-000000000001")
 PROJECT_ID = UUID("92000000-0000-0000-0000-000000000001")
 ENVIRONMENT_ID = UUID("93000000-0000-0000-0000-000000000001")
@@ -114,9 +123,44 @@ TRACE_WATERFALL = {
 }
 
 
+def _with_database(database_url: str, database_name: str) -> str:
+    parsed = urlsplit(database_url)
+    return urlunsplit((parsed.scheme, parsed.netloc, f"/{database_name}", "", ""))
+
+
+def _asyncpg_url(database_url: str) -> str:
+    return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+
+def _upgrade_disposable_database(database_url: str) -> None:
+    config = Config(str(BACKEND_ROOT / "alembic.ini"))
+    with patch.dict(os.environ, {"MIGRATION_TEST_DATABASE_URL": database_url}):
+        command.upgrade(config, "0003_non_partition_runtime_tables")
+
+
+@pytest_asyncio.fixture(scope="module")
+async def isolated_database_url():
+    """Create a post-0003 database instead of mutating a shared test database."""
+    if not USE_DISPOSABLE_DATABASE:
+        pytest.skip("set TASK8_DISPOSABLE_DATABASE=1 for this database suite")
+
+    database_name = f"task8_operator_reads_{uuid4().hex}"
+    admin = await asyncpg.connect(
+        _asyncpg_url(_with_database(DATABASE_URL, "postgres"))
+    )
+    database_url = _with_database(DATABASE_URL, database_name)
+    try:
+        await admin.execute(f'CREATE DATABASE "{database_name}"')
+        await asyncio.to_thread(_upgrade_disposable_database, database_url)
+        yield database_url
+    finally:
+        await admin.execute(f'DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)')
+        await admin.close()
+
+
 @pytest_asyncio.fixture
-async def repository():
-    engine = create_async_engine(DATABASE_URL)
+async def repository(isolated_database_url: str):
+    engine = create_async_engine(isolated_database_url)
     async with engine.connect() as connection:
         transaction = await connection.begin()
         statements = (
@@ -146,21 +190,20 @@ async def repository():
             ),
             (
                 """INSERT INTO webhook_deliveries (
-                    id, partition_timestamp, received_at, source_id, token_id,
+                    id, received_at, source_id, token_id,
                     body_hash, raw_body, raw_payload, status
-                ) VALUES ($1, $2, $2, $3, 'operator-token', 'hash', $4, '{}'::jsonb, 'PROCESSED')""",
+                ) VALUES ($1, $2, $3, 'operator-token', 'hash', $4, '{}'::jsonb, 'PROCESSED')""",
                 (DELIVERY_ID, AT, SOURCE_ID, b"{}"),
             ),
             (
                 """INSERT INTO alert_events (
-                    id, partition_timestamp, observed_at, source_id, delivery_id,
-                    delivery_partition_timestamp, fingerprint, alert_state,
+                    id, observed_at, source_id, delivery_id, fingerprint, alert_state,
                     validation_status, starts_at, labels, annotations, raw_payload,
                     provider, folder_code, alert_name, severity_raw,
                     severity_canonical, issue, normalization_status,
                     normalization_warnings
                 ) VALUES (
-                    $1, $2, $2, $3, $4, $2, 'fingerprint-1', 'FIRING', 'VALID',
+                    $1, $2, $3, $4, 'fingerprint-1', 'FIRING', 'VALID',
                     $2, '{"alertname":"High CPU usage"}'::jsonb,
                     '{"AlertValues":"CPU is high"}'::jsonb,
                     '{"generatorURL":"https://grafana.example.com/alert/1"}'::jsonb,
@@ -172,11 +215,10 @@ async def repository():
             ),
             (
                 """INSERT INTO alert_instances (
-                    id, source_id, fingerprint, latest_event_id,
-                    latest_event_partition_timestamp, state, labels, annotations,
+                    id, source_id, fingerprint, latest_event_id, state, labels, annotations,
                     first_seen_at, last_seen_at
                 ) VALUES (
-                    $1, $2, 'fingerprint-1', $3, $4, 'FIRING', '{}'::jsonb,
+                    $1, $2, 'fingerprint-1', $3, 'FIRING', '{}'::jsonb,
                     '{}'::jsonb, $4, $4
                 )""",
                 (INSTANCE_ID, SOURCE_ID, EVENT_ID, AT),
@@ -213,20 +255,19 @@ async def repository():
             ),
             (
                 """INSERT INTO incident_alerts (
-                    incident_id, alert_event_id, alert_event_partition_timestamp
-                ) VALUES ($1, $2, $3)""",
-                (INCIDENT_ID, EVENT_ID, AT),
+                    incident_id, alert_event_id
+                ) VALUES ($1, $2)""",
+                (INCIDENT_ID, EVENT_ID),
             ),
             (
                 """INSERT INTO alert_events (
-                    id, partition_timestamp, observed_at, source_id, delivery_id,
-                    delivery_partition_timestamp, fingerprint, alert_state,
+                    id, observed_at, source_id, delivery_id, fingerprint, alert_state,
                     validation_status, starts_at, labels, annotations, raw_payload,
                     provider, folder_code, alert_name, severity_raw,
                     severity_canonical, issue, normalization_status,
                     normalization_warnings
                 ) VALUES (
-                    $1, $2, $2, $3, $4, $5, 'fingerprint-1', 'FIRING', 'VALID',
+                    $1, $2, $3, $4, 'fingerprint-1', 'FIRING', 'VALID',
                     $2, '{"alertname":"High CPU usage"}'::jsonb,
                     '{"AlertValues":"CPU remains high"}'::jsonb,
                     '{"generatorURL":"https://grafana.example.com/alert/1"}'::jsonb,
@@ -234,18 +275,11 @@ async def repository():
                     '{"rawText":"CPU remains high","source":"grafana.annotations.AlertValues","contentType":"text/plain","untrusted":true}'::jsonb,
                     'NORMALIZED', '[]'::jsonb
                 )""",
-                (
-                    LATEST_EVENT_ID,
-                    AT + timedelta(seconds=1),
-                    SOURCE_ID,
-                    DELIVERY_ID,
-                    AT,
-                ),
+                (LATEST_EVENT_ID, AT + timedelta(seconds=1), SOURCE_ID, DELIVERY_ID),
             ),
             (
                 """UPDATE alert_instances
                     SET latest_event_id = $1,
-                        latest_event_partition_timestamp = $2,
                         last_seen_at = $2
                     WHERE id = $3""",
                 (LATEST_EVENT_ID, AT + timedelta(seconds=1), INSTANCE_ID),
@@ -270,20 +304,19 @@ async def repository():
             ),
             (
                 """INSERT INTO evidence_records (
-                    partition_timestamp, observed_at, rca_run_id, specialist_run_id,
+                    observed_at, rca_run_id, specialist_run_id,
                     evidence_type, source_agent, source_endpoint, tool_name,
-                    time_window_start, time_window_end, structured_data, raw_result,
-                    metadata, content_hash
+                    time_window_start, time_window_end, structured_data,
+                    raw_result_reference, content_hash
                 ) VALUES (
-                    $1, $1, $2, $3, 'trace.query', 'TRACE', 'trace', 'trace_query',
-                    $1, $1, $4::jsonb, $5, '{}'::jsonb, 'trace-hash'
+                    $1, $2, $3, 'trace.query', 'TRACE', 'trace', 'trace_query',
+                    $1, $1, $4::jsonb, 'trace-result', 'trace-hash'
                 )""",
                 (
                     AT,
                     RUN_ID,
                     TRACE_SPECIALIST_RUN_ID,
                     json.dumps(TRACE_WATERFALL),
-                    b'{"raw":"secret-marker"}',
                 ),
             ),
             (
@@ -318,25 +351,23 @@ async def _insert_trace_evidence(
         await session.execute(
             text(
                 """INSERT INTO evidence_records (
-                    partition_timestamp, observed_at, rca_run_id, specialist_run_id,
+                    observed_at, rca_run_id, specialist_run_id,
                     evidence_type, source_agent, source_endpoint, tool_name,
-                    time_window_start, time_window_end, structured_data, raw_result,
-                    metadata, content_hash
+                    time_window_start, time_window_end, structured_data,
+                    raw_result_reference, content_hash
                 ) VALUES (
-                    :partition_timestamp, :observed_at, :rca_run_id, :specialist_run_id,
+                    :observed_at, :rca_run_id, :specialist_run_id,
                     'trace.query', 'TRACE', 'trace', 'trace_query',
-                    :partition_timestamp, :partition_timestamp,
-                    CAST(:structured_data AS JSONB), :raw_result, '{}'::jsonb,
+                    :observed_at, :observed_at,
+                    CAST(:structured_data AS JSONB), 'newer-trace-result',
                     'newer-trace-hash'
                 )"""
             ),
             {
-                "partition_timestamp": AT,
                 "observed_at": observed_at,
                 "rca_run_id": RUN_ID,
                 "specialist_run_id": TRACE_SPECIALIST_RUN_ID,
                 "structured_data": json.dumps(structured_data),
-                "raw_result": b'{"raw":"newer-secret-marker"}',
             },
         )
 
@@ -573,9 +604,7 @@ async def test_trace_waterfall_preserves_canonical_unscoped_ip_server_addresses(
     server_address: str,
 ) -> None:
     normalized = deepcopy(TRACE_WATERFALL)
-    normalized["spans"][4]["attributes"] = {
-        "server.address": server_address
-    }
+    normalized["spans"][4]["attributes"] = {"server.address": server_address}
     await _insert_trace_evidence(
         repository, normalized, observed_at=AT + timedelta(seconds=1)
     )
@@ -607,9 +636,7 @@ async def test_trace_waterfall_omits_scoped_ips_and_hostnames(
     unsafe_address: str,
 ) -> None:
     normalized = deepcopy(TRACE_WATERFALL)
-    normalized["spans"][4]["attributes"] = {
-        "server.address": unsafe_address
-    }
+    normalized["spans"][4]["attributes"] = {"server.address": unsafe_address}
     await _insert_trace_evidence(
         repository, normalized, observed_at=AT + timedelta(seconds=1)
     )

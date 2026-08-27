@@ -207,8 +207,6 @@ class SqlAlchemyOperatorReadRepository:
                                 FROM incident_alerts link
                                 JOIN alert_events linked_event
                                   ON linked_event.id = link.alert_event_id
-                                 AND linked_event.partition_timestamp =
-                                     link.alert_event_partition_timestamp
                                 JOIN alert_instances instance
                                   ON instance.source_id = linked_event.source_id
                                  AND instance.fingerprint = linked_event.fingerprint
@@ -263,8 +261,6 @@ class SqlAlchemyOperatorReadRepository:
                             FROM alert_instances instance
                             JOIN alert_events event
                               ON event.id = instance.latest_event_id
-                             AND event.partition_timestamp =
-                                 instance.latest_event_partition_timestamp
                             JOIN LATERAL (
                                 SELECT candidate.id, candidate.team_id,
                                        candidate.project_id,
@@ -273,8 +269,6 @@ class SqlAlchemyOperatorReadRepository:
                                 FROM incident_alerts link
                                 JOIN alert_events linked_event
                                   ON linked_event.id = link.alert_event_id
-                                 AND linked_event.partition_timestamp =
-                                     link.alert_event_partition_timestamp
                                 JOIN incidents candidate
                                   ON candidate.id = link.incident_id
                                 WHERE linked_event.source_id = instance.source_id

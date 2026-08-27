@@ -34,7 +34,6 @@ def _utc(value: datetime) -> datetime:
 _INSERT_AUDIT_EVENT = text(
     """
     INSERT INTO audit_events (
-        partition_timestamp,
         occurred_at,
         actor_id,
         action,
@@ -42,7 +41,6 @@ _INSERT_AUDIT_EVENT = text(
         resource_id,
         scope
     ) VALUES (
-        :partition_timestamp,
         :occurred_at,
         :actor_id,
         :action,
@@ -128,8 +126,6 @@ class SqlAlchemyOutboxRecoveryAuditRepository:
             await session.execute(
                 _INSERT_AUDIT_EVENT,
                 {
-                    # Task 8 removes the temporary partition helper column.
-                    "partition_timestamp": occurred_at,
                     "occurred_at": occurred_at,
                     "actor_id": actor_id,
                     "action": action,

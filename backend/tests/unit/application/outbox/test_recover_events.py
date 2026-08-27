@@ -218,9 +218,7 @@ class AuditSessionFactory:
 
 
 @pytest.mark.asyncio
-async def test_audit_repository_uses_same_aware_timestamp_for_0002_partition_column() -> (
-    None
-):
+async def test_audit_repository_writes_only_the_business_occurred_timestamp() -> None:
     subject_id = UUID("10000000-0000-0000-0000-000000000001")
     database = AuditSessionFactory(subject_id)
     occurred_at = datetime(2026, 8, 27, 12, 30, tzinfo=UTC)
@@ -244,9 +242,8 @@ async def test_audit_repository_uses_same_aware_timestamp_for_0002_partition_col
 
     assert "external_id" in database.session.scalar_calls[0][0]
     insert_sql, parameters = database.session.execute_calls[0]
-    assert "partition_timestamp" in insert_sql
+    assert "partition_timestamp" not in insert_sql
     assert parameters["occurred_at"] == occurred_at
-    assert parameters["partition_timestamp"] == occurred_at
     assert parameters["actor_id"] == subject_id
     assert parameters["scope"] == {
         "correlationId": CORRELATION_ID,

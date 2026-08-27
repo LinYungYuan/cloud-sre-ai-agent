@@ -140,7 +140,6 @@ class IngestGrafanaAlerts:
                     source_id=source_id,
                     dedup_key=event.dedup_key,
                     delivery_id=delivery_id,
-                    delivery_partition_timestamp=accepted_at,
                 )
                 if not claimed:
                     continue
@@ -212,7 +211,6 @@ class IngestGrafanaAlerts:
 
             await uow.alerts.finish_delivery(
                 delivery_id=delivery_id,
-                partition_timestamp=accepted_at,
                 status=(
                     "VALIDATION_FAILED"
                     if has_invalid_alert

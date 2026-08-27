@@ -129,7 +129,6 @@ class FakeAlertRepository:
         assert values["validation_status"] == "VALIDATION_FAILED"
         return StoredAlertEvent(
             id=UUID("70000000-0000-0000-0000-000000000001"),
-            partition_timestamp=values["received_at"],
         )
 
     async def upsert_instance(self, **values: Any) -> None:
@@ -200,7 +199,6 @@ class NewIncidentAlertRepository(FakeAlertRepository):
     async def add_event(self, **values: Any) -> StoredAlertEvent:
         return StoredAlertEvent(
             id=UUID("70000000-0000-0000-0000-000000000001"),
-            partition_timestamp=values["received_at"],
         )
 
     async def upsert_instance(self, **values: Any) -> None:
@@ -287,7 +285,6 @@ class CrashWindowAlertRepository:
         self._state.alert_event_count += 1
         return StoredAlertEvent(
             id=UUID("70000000-0000-0000-0000-000000000001"),
-            partition_timestamp=values["received_at"],
         )
 
     async def upsert_instance(self, **values: Any) -> None:
