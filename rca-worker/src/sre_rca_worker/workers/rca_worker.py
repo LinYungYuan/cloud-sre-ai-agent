@@ -4,6 +4,8 @@ import asyncio
 import signal
 from collections.abc import Awaitable, Callable
 
+from google.api_core.client_options import ClientOptions
+from google.auth.credentials import AnonymousCredentials
 from google.cloud import pubsub_v1
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -41,6 +43,25 @@ def _load_settings() -> WorkerSettings:
     if env_file is None:
         return WorkerSettings()  # pyright: ignore[reportCallIssue]
     return WorkerSettings(_env_file=env_file)  # pyright: ignore[reportCallIssue]
+
+
+def _create_pubsub_clients(
+    settings: WorkerSettings,
+) -> tuple[pubsub_v1.PublisherClient, pubsub_v1.SubscriberClient]:
+    if settings.pubsub_emulator_host:
+        client_options = ClientOptions(api_endpoint=settings.pubsub_emulator_host)
+        credentials = AnonymousCredentials()
+        return (
+            pubsub_v1.PublisherClient(
+                client_options=client_options,
+                credentials=credentials,
+            ),
+            pubsub_v1.SubscriberClient(
+                client_options=client_options,
+                credentials=credentials,
+            ),
+        )
+    return pubsub_v1.PublisherClient(), pubsub_v1.SubscriberClient()
 
 
 def main(
@@ -88,8 +109,7 @@ async def run_production(stop_event: asyncio.Event | None = None) -> None:
         worker_id=settings.worker_id,
         deadline_seconds=settings.rca_deadline_seconds,
     )
-    publisher = pubsub_v1.PublisherClient()
-    subscriber = pubsub_v1.SubscriberClient()
+    publisher, subscriber = _create_pubsub_clients(settings)
     try:
         _, subscription = await asyncio.to_thread(
             prepare_topic_and_subscription,

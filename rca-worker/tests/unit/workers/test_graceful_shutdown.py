@@ -10,11 +10,97 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from google.api_core.client_options import ClientOptions
+from google.auth.credentials import AnonymousCredentials
 
 from sre_rca_worker.application.rca.job_lifecycle import JobDisposition
 from sre_rca_worker.config.settings import WorkerSettings
 from sre_rca_worker.integrations.pubsub.messages import RcaJobMessage
 from sre_rca_worker.workers import rca_worker
+
+
+def _worker_settings(
+    *,
+    app_environment: str,
+    pubsub_emulator_host: str | None,
+) -> WorkerSettings:
+    return WorkerSettings.model_validate(
+        {
+            "database_url": "postgresql+asyncpg://app@db/sre",
+            "pubsub_project_id": "project",
+            "rca_topic_id": "topic",
+            "pubsub_subscription_id": "subscription",
+            "app_environment": app_environment,
+            "model_name": "test-model",
+            "pubsub_emulator_host": pubsub_emulator_host,
+        }
+    )
+
+
+def test_pubsub_clients_use_explicit_anonymous_emulator_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _worker_settings(
+        app_environment="local",
+        pubsub_emulator_host="127.0.0.1:58085",
+    )
+    configured_clients: list[tuple[ClientOptions, AnonymousCredentials]] = []
+
+    class FakePublisher:
+        def __init__(
+            self,
+            *,
+            client_options: ClientOptions,
+            credentials: AnonymousCredentials,
+        ) -> None:
+            configured_clients.append((client_options, credentials))
+
+    class FakeSubscriber(FakePublisher):
+        pass
+
+    monkeypatch.setenv("PUBSUB_EMULATOR_HOST", "external-value-must-not-change")
+    monkeypatch.setattr(rca_worker.pubsub_v1, "PublisherClient", FakePublisher)
+    monkeypatch.setattr(rca_worker.pubsub_v1, "SubscriberClient", FakeSubscriber)
+
+    publisher, subscriber = rca_worker._create_pubsub_clients(settings)
+
+    assert isinstance(publisher, FakePublisher)
+    assert isinstance(subscriber, FakeSubscriber)
+    assert [options.api_endpoint for options, _ in configured_clients] == [
+        "127.0.0.1:58085",
+        "127.0.0.1:58085",
+    ]
+    assert all(
+        isinstance(credentials, AnonymousCredentials)
+        for _, credentials in configured_clients
+    )
+    assert os.environ["PUBSUB_EMULATOR_HOST"] == "external-value-must-not-change"
+
+
+def test_pubsub_clients_use_adc_defaults_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _worker_settings(
+        app_environment="production",
+        pubsub_emulator_host=None,
+    )
+    constructor_arguments: list[dict[str, object]] = []
+
+    class FakePublisher:
+        def __init__(self, **kwargs: object) -> None:
+            constructor_arguments.append(kwargs)
+
+    class FakeSubscriber(FakePublisher):
+        pass
+
+    monkeypatch.setattr(rca_worker.pubsub_v1, "PublisherClient", FakePublisher)
+    monkeypatch.setattr(rca_worker.pubsub_v1, "SubscriberClient", FakeSubscriber)
+
+    publisher, subscriber = rca_worker._create_pubsub_clients(settings)
+
+    assert isinstance(publisher, FakePublisher)
+    assert isinstance(subscriber, FakeSubscriber)
+    assert constructor_arguments == [{}, {}]
 
 
 def test_sigterm_waits_for_inflight_coroutine_before_clean_exit(
