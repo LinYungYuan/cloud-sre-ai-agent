@@ -570,7 +570,7 @@
   curl -fsS -X POST 'http://127.0.0.1:8000/webhooks/v1/grafana/50000000-0000-0000-0000-000000000001' -H 'Authorization: Bearer replace-me' -H 'Content-Type: application/json' --data-binary @contracts/examples/grafana-firing.json
   ```
 
-  Expected: HTTP `202`; exactly one outbox event reaches `PUBLISHED`; Worker claims its job and persists a report with non-null `result_status`. Query `outbox_events`, `worker_jobs`, `rca_reports`, `evidence_records`, and `hypothesis_evidence` in `sre_agent_release_acceptance` for the returned delivery/run IDs, including byte-for-byte `raw_result`, provenance `metadata`, and UUID-only evidence links.
+  Expected: HTTP `202`; exactly one outbox event reaches `PUBLISHED`; Worker claims its job and persists a report with non-null `result_status`. Query `outbox_events`, `worker_jobs`, and `rca_reports` in `sre_agent_release_acceptance` for the returned delivery/run IDs. The example Worker env intentionally sets `SPECIALIST_ANALYSIS_MODE=DISABLED`, so this live phase does not assert that evidence exists; exact non-UTF-8 `raw_result`, provenance `metadata`, content hash, and UUID-only `hypothesis_evidence` are proven by the canonical four-gate persistence smoke executed in Step 2 and its output must be included in release evidence.
 
   Stop only `pubsub-emulator`, submit `contracts/examples/grafana-firing-aws.json`, and verify another HTTP `202` plus one `FAILED` outbox event. Stop Backend, restart the emulator and Worker (so local topic/subscription bootstrap runs), then restart Backend with the same command. Before recovery, query that the failed event is still `FAILED`; startup must not publish it. Invoke manual recovery:
 
