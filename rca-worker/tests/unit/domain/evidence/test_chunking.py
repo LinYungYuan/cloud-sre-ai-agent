@@ -1,4 +1,3 @@
-from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
@@ -8,11 +7,9 @@ from sre_rca_worker.domain.evidence.models import EvidenceReference
 
 REFERENCE_A = EvidenceReference(
     id=UUID("00000000-0000-0000-0000-000000000001"),
-    partition_timestamp=datetime(2026, 8, 24, 0, 0, tzinfo=UTC),
 )
 REFERENCE_B = EvidenceReference(
     id=UUID("00000000-0000-0000-0000-000000000002"),
-    partition_timestamp=datetime(2026, 8, 24, 0, 1, tzinfo=UTC),
 )
 
 
@@ -35,7 +32,7 @@ def test_chunks_canonical_json_by_unicode_code_points() -> None:
     assert all(not chunk.truncated for chunk in chunks)
 
 
-def test_chunks_are_repeatable_and_preserve_list_order_and_timestamp() -> None:
+def test_chunks_are_repeatable_and_preserve_list_order() -> None:
     structured = [
         {"timestamp": "2026-08-24T00:01:00Z", "service": "checkout"},
         {"timestamp": "2026-08-24T00:00:00Z", "service": "payments"},

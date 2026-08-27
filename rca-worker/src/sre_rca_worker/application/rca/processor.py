@@ -358,12 +358,11 @@ class ProductionRcaProcessor:
         results: tuple[SpecialistAnalysisResult, ...],
     ) -> tuple[EvidenceReference, ...]:
         references: list[EvidenceReference] = []
-        seen: set[tuple[UUID, datetime]] = set()
+        seen: set[UUID] = set()
         for result in results:
             for reference in result.known_evidence:
-                key = (reference.id, reference.partition_timestamp)
-                if key not in seen:
-                    seen.add(key)
+                if reference.id not in seen:
+                    seen.add(reference.id)
                     references.append(reference)
         return tuple(references)
 
@@ -573,7 +572,6 @@ class ProductionRcaProcessor:
                            FROM rca_runs run
                            JOIN incident_alerts link ON link.incident_id=run.incident_id
                            JOIN alert_events event ON event.id=link.alert_event_id
-                             AND event.partition_timestamp=link.alert_event_partition_timestamp
                            WHERE run.id=:run_id AND run.incident_id=:incident_id
                            ORDER BY event.observed_at DESC LIMIT 1"""
                         ),
@@ -698,9 +696,6 @@ class ProductionRcaProcessor:
                 "evidence": [
                     {
                         "evidenceId": str(reference.id),
-                        "partitionTimestamp": reference.partition_timestamp.isoformat().replace(
-                            "+00:00", "Z"
-                        ),
                         "relation": claim_item.relation,
                     }
                     for reference in claim_item.evidence
@@ -756,29 +751,26 @@ class ProductionRcaProcessor:
                         await session.execute(
                             text(
                                 """INSERT INTO hypothesis_evidence(
-                                      hypothesis_id,evidence_id,
-                                      evidence_partition_timestamp,relation)
-                                   VALUES (:hypothesis,:evidence,:partition,:relation)
+                                      hypothesis_id,evidence_id,relation)
+                                   VALUES (:hypothesis,:evidence,:relation)
                                    ON CONFLICT DO NOTHING"""
                             ),
                             {
                                 "hypothesis": hypothesis_id,
                                 "evidence": reference.id,
-                                "partition": reference.partition_timestamp,
                                 "relation": claim_item.relation,
                             },
                         )
             await session.execute(
                 text(
-                    """INSERT INTO rca_reports(rca_run_id,version,summary,report,result_status)
+                    """INSERT INTO rca_reports(rca_run_id,version,summary,report)
                        SELECT :run, COALESCE(max(version),0)+1, :summary,
-                              CAST(:report AS JSONB), :status
+                              CAST(:report AS JSONB)
                        FROM rca_reports WHERE rca_run_id=:run"""
                 ),
                 {
                     "run": claim.rca_run_id,
                     "summary": report.summary_zh_tw,
                     "report": json.dumps(body, ensure_ascii=False),
-                    "status": report.status,
                 },
             )

@@ -98,7 +98,6 @@ def _reference(case: dict[str, Any], index: int = 0) -> EvidenceReference:
         ids = [case["referenceId"]]
     return EvidenceReference(
         id=UUID(ids[index]),
-        partition_timestamp=_window(case, "windowEnd"),
     )
 
 
@@ -268,7 +267,6 @@ class _MemoryPersistEvidence:
             raise AssertionError("specialist evidence must have an owner")
         reference = EvidenceReference(
             id=self._session.factory.reference_id or uuid4(),
-            partition_timestamp=draft.observed_at,
         )
         self._session.pending.append(
             PersistedEvidence(
@@ -279,10 +277,6 @@ class _MemoryPersistEvidence:
                 source_endpoint=draft.endpoint_identity,
                 tool_name=draft.tool,
                 structured_data=draft.structured_json,
-                metadata={
-                    "contentType": draft.content_type,
-                    "inputSha256": draft.input_sha256,
-                },
             )
         )
         return reference
@@ -590,7 +584,7 @@ def test_route_and_partial_report_safety_dataset(name: str) -> None:
         assert report.status == "PARTIAL"
         assert case["requiredPhrase"] in report.summary_zh_tw
     else:
-        reference = EvidenceReference(id=uuid4(), partition_timestamp=NOW)
+        reference = EvidenceReference(id=uuid4())
         report = RcaSynthesizer().validate(
             RcaReportDraft(
                 status="COMPLETE",

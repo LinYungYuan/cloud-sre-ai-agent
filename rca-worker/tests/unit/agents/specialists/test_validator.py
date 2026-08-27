@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
@@ -16,14 +15,11 @@ from sre_rca_worker.domain.evidence.analysis import (
 from sre_rca_worker.domain.evidence.models import EvidenceReference
 from sre_rca_worker.integrations.mcp.models import SpecialistKind
 
-PARTITION = datetime(2026, 8, 24, 8, 0, tzinfo=UTC)
 OWNED = EvidenceReference(
     id=UUID("00000000-0000-0000-0000-000000000001"),
-    partition_timestamp=PARTITION,
 )
 OTHER_SPECIALIST = EvidenceReference(
     id=UUID("00000000-0000-0000-0000-000000000002"),
-    partition_timestamp=PARTITION,
 )
 
 
@@ -68,25 +64,12 @@ def test_validator_rejects_a_draft_for_another_specialist_with_safe_code() -> No
 @pytest.mark.parametrize(
     ("citation", "owned_evidence"),
     [
-        (
-            EvidenceReference(
-                id=UUID("00000000-0000-0000-0000-000000000099"),
-                partition_timestamp=PARTITION,
-            ),
-            (OWNED,),
-        ),
-        (
-            EvidenceReference(
-                id=OWNED.id,
-                partition_timestamp=PARTITION + timedelta(seconds=1),
-            ),
-            (OWNED,),
-        ),
+        (EvidenceReference(id=UUID("00000000-0000-0000-0000-000000000099")), (OWNED,)),
         (OTHER_SPECIALIST, (OWNED,)),
     ],
-    ids=["unknown-uuid", "wrong-partition", "other-specialist-owner"],
+    ids=["unknown-uuid", "other-specialist-owner"],
 )
-def test_validator_requires_exact_owned_evidence_pairs(
+def test_validator_requires_owned_evidence_ids(
     citation: EvidenceReference,
     owned_evidence: tuple[EvidenceReference, ...],
 ) -> None:

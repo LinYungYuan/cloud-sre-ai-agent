@@ -26,9 +26,6 @@ class EvidenceReference(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: UUID
-    partition_timestamp: datetime
-
-    _partition_aware = field_validator("partition_timestamp")(_aware)
 
 
 class EvidenceDraft(BaseModel):

@@ -219,7 +219,6 @@ class AdkSpecialistAgent:
             },
             "allowedEvidenceReferenceFormat": {
                 "id": "UUID",
-                "partitionTimestamp": "RFC3339",
             },
             "allowedEvidenceReferences": [
                 reference.model_dump(mode="json") for reference in allowed_evidence

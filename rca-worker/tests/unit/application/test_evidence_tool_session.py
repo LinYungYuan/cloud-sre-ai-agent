@@ -186,7 +186,7 @@ class _FakePersistEvidence:
         draft: EvidenceDraft,
     ) -> EvidenceReference:
         self._session.factory.save_calls += 1
-        reference = EvidenceReference(id=uuid4(), partition_timestamp=draft.observed_at)
+        reference = EvidenceReference(id=uuid4())
         self._session.pending.append(
             _StoredEvidence(
                 reference=reference,
@@ -279,7 +279,7 @@ def _stored(
     content: dict[str, object] | None = None,
 ) -> _StoredEvidence:
     return _StoredEvidence(
-        reference=EvidenceReference(id=uuid4(), partition_timestamp=NOW),
+        reference=EvidenceReference(id=uuid4()),
         rca_run_id=request.rca_run_id,
         specialist_run_id=specialist_run_id,
         evidence_type="metrics.query",
@@ -669,7 +669,7 @@ async def test_chunk_reads_rebuild_persisted_json_without_invoking_collector(
     collector = _Collector()
     specialist_run_id = uuid4()
     request = _request()
-    reference = EvidenceReference(id=uuid4(), partition_timestamp=NOW)
+    reference = EvidenceReference(id=uuid4())
     sessions.rows.append(
         _StoredEvidence(
             reference=reference,

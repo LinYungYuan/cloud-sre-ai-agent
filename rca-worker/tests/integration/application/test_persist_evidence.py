@@ -18,7 +18,7 @@ DATABASE_URL = os.getenv(
 
 
 @pytest.mark.asyncio
-async def test_persist_evidence_round_trips_exact_bytes_and_metadata() -> None:
+async def test_persist_evidence_uses_uuid_reference_and_safe_raw_result_reference() -> None:
     engine = create_async_engine(DATABASE_URL)
     now = datetime(2026, 8, 13, 6, 30, tzinfo=UTC)
     raw = b'{ "b": 1.00, "a": "\\u0061", "a": "duplicate" }\n'
@@ -90,17 +90,18 @@ async def test_persist_evidence_round_trips_exact_bytes_and_metadata() -> None:
         row = (
             (
                 await session.execute(
-                    text("""SELECT raw_result, structured_data, metadata, content_hash
-            FROM evidence_records WHERE id=:id AND partition_timestamp=:ts"""),
-                    {"id": reference.id, "ts": reference.partition_timestamp},
+                    text("""SELECT raw_result_reference, structured_data, content_hash
+            FROM evidence_records WHERE id=:id"""),
+                    {"id": reference.id},
                 )
             )
             .mappings()
             .one()
         )
-        assert bytes(row["raw_result"]) == raw
+        assert row["raw_result_reference"] == (
+            f"worker:sha256:{hashlib.sha256(raw).hexdigest()}"
+        )
         assert row["structured_data"] == {"a": "duplicate", "b": 1.0}
-        assert row["metadata"]["scope"] == {"provider": "GCP", "scopeId": "project-a"}
         assert row["content_hash"] == hashlib.sha256(raw).hexdigest()
         await session.rollback()
     await engine.dispose()

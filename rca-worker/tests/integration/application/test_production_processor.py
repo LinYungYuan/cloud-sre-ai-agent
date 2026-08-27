@@ -87,13 +87,13 @@ async def test_aws_without_mcp_persists_honest_partial_report_without_copying_is
                 },
             ),
             (
-                """INSERT INTO webhook_deliveries(id,partition_timestamp,received_at,source_id,body_hash,raw_body,raw_payload,status)
-                VALUES (:delivery,:now,:now,:source,'hash','{}','{}','PROCESSED')""",
+                """INSERT INTO webhook_deliveries(id,received_at,source_id,body_hash,raw_body,raw_payload,status)
+                VALUES (:delivery,:now,:source,'hash','{}','{}','PROCESSED')""",
                 {"delivery": delivery, "now": now, "source": source},
             ),
             (
-                """INSERT INTO alert_events(id,partition_timestamp,observed_at,source_id,delivery_id,delivery_partition_timestamp,fingerprint,alert_state,starts_at,ends_at,labels,annotations,raw_payload,provider,folder_code,alert_name,severity_raw,severity_canonical,issue,resource,normalization_status)
-                VALUES (:event,:now,:now,:source,:delivery,:now,'fp','FIRING',:start,:now,'{}','{}','{}','AWS','COM-LX-BOA-01','High CPU','ERROR','SEV1',CAST(:issue AS JSONB),NULL,'UNCLASSIFIED')""",
+                """INSERT INTO alert_events(id,observed_at,source_id,delivery_id,fingerprint,alert_state,starts_at,ends_at,labels,annotations,raw_payload,provider,folder_code,alert_name,severity_raw,severity_canonical,issue,resource,normalization_status)
+                VALUES (:event,:now,:source,:delivery,'fp','FIRING',:start,:now,'{}','{}','{}','AWS','COM-LX-BOA-01','High CPU','ERROR','SEV1',CAST(:issue AS JSONB),NULL,'UNCLASSIFIED')""",
                 {
                     "event": event,
                     "now": now,
@@ -116,7 +116,7 @@ async def test_aws_without_mcp_persists_honest_partial_report_without_copying_is
                 },
             ),
             (
-                "INSERT INTO incident_alerts(incident_id,alert_event_id,alert_event_partition_timestamp) VALUES (:incident,:event,:now)",
+                "INSERT INTO incident_alerts(incident_id,alert_event_id) VALUES (:incident,:event)",
                 {"incident": incident, "event": event, "now": now},
             ),
             (
@@ -193,19 +193,19 @@ async def _seed_gcp_processor_run(
             ),
             (
                 """INSERT INTO webhook_deliveries(
-                       id,partition_timestamp,received_at,source_id,body_hash,
+                       id,received_at,source_id,body_hash,
                        raw_body,raw_payload,status)
-                   VALUES (:delivery,:now,:now,:source,'hash','{}','{}','PROCESSED')""",
+                   VALUES (:delivery,:now,:source,'hash','{}','{}','PROCESSED')""",
                 {"delivery": delivery, "now": now, "source": source},
             ),
             (
                 """INSERT INTO alert_events(
-                       id,partition_timestamp,observed_at,source_id,delivery_id,
-                       delivery_partition_timestamp,fingerprint,alert_state,starts_at,
+                       id,observed_at,source_id,delivery_id,
+                       fingerprint,alert_state,starts_at,
                        ends_at,labels,annotations,raw_payload,provider,folder_code,
                        alert_name,severity_raw,severity_canonical,issue,resource,
                        normalization_status)
-                   VALUES (:event,:now,:now,:source,:delivery,:now,'fp','FIRING',
+                   VALUES (:event,:now,:source,:delivery,'fp','FIRING',
                            :start,:now,'{}','{}','{}','GCP','COM-LX-BOA-01',
                            'High CPU','ERROR','SEV1',CAST(:issue AS JSONB),
                            CAST(:resource AS JSONB),'NORMALIZED')""",
@@ -237,7 +237,7 @@ async def _seed_gcp_processor_run(
                 },
             ),
             (
-                "INSERT INTO incident_alerts(incident_id,alert_event_id,alert_event_partition_timestamp) VALUES (:incident,:event,:now)",
+                "INSERT INTO incident_alerts(incident_id,alert_event_id) VALUES (:incident,:event)",
                 {"incident": incident, "event": event, "now": now},
             ),
             (

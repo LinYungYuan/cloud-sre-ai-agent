@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Literal, cast
 from uuid import UUID
 
@@ -14,10 +13,8 @@ from sre_rca_worker.domain.evidence.analysis import (
 from sre_rca_worker.domain.evidence.models import EvidenceReference
 from sre_rca_worker.integrations.mcp.models import SpecialistKind
 
-_PARTITION_TIMESTAMP = datetime(2026, 8, 24, 8, 0, tzinfo=UTC)
 _EVIDENCE_REFERENCE = EvidenceReference(
     id=UUID("00000000-0000-0000-0000-000000000001"),
-    partition_timestamp=_PARTITION_TIMESTAMP,
 )
 _STABLE_CODES = (
     "NO_SAFE_MCP_CAPABILITY",
@@ -187,3 +184,15 @@ def test_analysis_models_are_frozen() -> None:
         draft.status = "PARTIAL"
     with pytest.raises(ValidationError):
         observation.statement = "changed"
+
+
+def test_evidence_reference_is_uuid_only_and_rejects_partition_helpers() -> None:
+    assert _EVIDENCE_REFERENCE.model_dump() == {"id": _EVIDENCE_REFERENCE.id}
+
+    with pytest.raises(ValidationError, match="partition_timestamp"):
+        EvidenceReference.model_validate(
+            {
+                "id": str(_EVIDENCE_REFERENCE.id),
+                "partition_timestamp": "2026-08-24T08:00:00Z",
+            }
+        )

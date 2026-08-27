@@ -1,6 +1,6 @@
 import json
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -100,13 +100,13 @@ async def _seed_analysis_owner(
         await session.execute(
             text(
                 """INSERT INTO evidence_records(
-                       id,partition_timestamp,observed_at,rca_run_id,specialist_run_id,
+                       id,observed_at,rca_run_id,specialist_run_id,
                        evidence_type,source_agent,source_endpoint,tool_name,
                        time_window_start,time_window_end,structured_data,content_hash,
-                       raw_result,metadata)
-                   VALUES (:id,:now,:now,:run,:specialist,:evidence_type,:source_agent,
+                       raw_result_reference)
+                   VALUES (:id,:now,:run,:specialist,:evidence_type,:source_agent,
                            :endpoint,:tool,:now,:now,CAST(:structured AS JSONB),'hash',
-                           CAST(:raw AS BYTEA),'{}')"""
+                           'worker:fixture')"""
             ),
             {
                 "id": evidence,
@@ -118,10 +118,9 @@ async def _seed_analysis_owner(
                 "endpoint": endpoint,
                 "tool": f"{endpoint}_query",
                 "structured": json.dumps({"unsafe": "raw-fixture-secret"}),
-                "raw": b"raw-fixture-secret",
             },
         )
-    return run, specialist, EvidenceReference(id=evidence, partition_timestamp=now)
+    return run, specialist, EvidenceReference(id=evidence)
 
 
 async def _seed_additional_specialist_evidence(
@@ -145,13 +144,13 @@ async def _seed_additional_specialist_evidence(
         await session.execute(
             text(
                 """INSERT INTO evidence_records(
-                       id,partition_timestamp,observed_at,rca_run_id,specialist_run_id,
+                       id,observed_at,rca_run_id,specialist_run_id,
                        evidence_type,source_agent,source_endpoint,tool_name,
                        time_window_start,time_window_end,structured_data,content_hash,
-                       raw_result,metadata)
-                   VALUES (:id,:now,:now,:run,:specialist,:evidence_type,:source_agent,
+                       raw_result_reference)
+                   VALUES (:id,:now,:run,:specialist,:evidence_type,:source_agent,
                            :endpoint,:tool,:now,:now,'{}','hash',
-                           CAST('cross-specialist-secret' AS BYTEA),'{}')"""
+                           'worker:fixture')"""
             ),
             {
                 "id": evidence_id,
@@ -164,7 +163,7 @@ async def _seed_additional_specialist_evidence(
                 "tool": f"{endpoint}_query",
             },
         )
-    return EvidenceReference(id=evidence_id, partition_timestamp=now)
+    return EvidenceReference(id=evidence_id)
 
 
 def _analysis(
@@ -341,7 +340,7 @@ async def test_analysis_audit_empty_partial_is_persisted_as_failed() -> None:
 async def test_analysis_audit_ownership_mismatch_never_partially_updates() -> None:
     engine = create_async_engine(DATABASE_URL)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    owner_run, _, owner_reference = await _seed_analysis_owner(sessions)
+    owner_run, _, _owner_reference = await _seed_analysis_owner(sessions)
     trace_reference = await _seed_additional_specialist_evidence(
         sessions,
         run_id=owner_run,
@@ -351,12 +350,6 @@ async def test_analysis_audit_ownership_mismatch_never_partially_updates() -> No
     invalid_references = (
         EvidenceReference(
             id=uuid4(),
-            partition_timestamp=owner_reference.partition_timestamp,
-        ),
-        EvidenceReference(
-            id=owner_reference.id,
-            partition_timestamp=owner_reference.partition_timestamp
-            + timedelta(microseconds=1),
         ),
         trace_reference,
         other_run_reference,
@@ -451,18 +444,18 @@ async def test_report_persists_hypothesis_confidence_and_evidence_relations() ->
         await session.execute(
             text(
                 """INSERT INTO evidence_records(
-                       id,partition_timestamp,observed_at,rca_run_id,specialist_run_id,
+                       id,observed_at,rca_run_id,specialist_run_id,
                        evidence_type,source_agent,source_endpoint,tool_name,
                        time_window_start,time_window_end,structured_data,content_hash,
-                       raw_result,metadata)
-                   VALUES (:id,:now,:now,:run,:specialist,'METRIC','metrics',
+                       raw_result_reference)
+                   VALUES (:id,:now,:run,:specialist,'METRIC','metrics',
                            'metrics','metrics_query',:now,:now,'{}','hash',
-                           CAST('raw' AS BYTEA),'{}')"""
+                           'worker:fixture')"""
             ),
             {"id": evidence, "now": now, "run": run, "specialist": specialist},
         )
 
-    reference = EvidenceReference(id=evidence, partition_timestamp=now)
+    reference = EvidenceReference(id=evidence)
     report = RcaReportDraft(
         status="COMPLETE",
         summary_zh_tw="CPU 異常由資料庫負載造成。",

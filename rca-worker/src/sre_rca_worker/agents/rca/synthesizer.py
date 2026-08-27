@@ -12,9 +12,9 @@ class RcaSynthesizer:
         *,
         known_evidence: tuple[EvidenceReference, ...],
     ) -> RcaReportDraft:
-        known = {(item.id, item.partition_timestamp) for item in known_evidence}
+        known = {item.id for item in known_evidence}
         cited = {
-            (reference.id, reference.partition_timestamp)
+            reference.id
             for hypothesis in draft.hypotheses
             for claim in hypothesis.claims
             for reference in claim.evidence

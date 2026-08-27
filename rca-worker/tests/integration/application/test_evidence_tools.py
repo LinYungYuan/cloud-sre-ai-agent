@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import event, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -23,10 +24,7 @@ from sre_rca_worker.application.rca.evidence_tools import (
 )
 from sre_rca_worker.domain.evidence.models import EvidenceDraft
 from sre_rca_worker.integrations.mcp.models import AllowedTool, CloudScope
-from sre_rca_worker.persistence.repositories.rca import (
-    AmbiguousEvidenceError,
-    RcaRepository,
-)
+from sre_rca_worker.persistence.repositories.rca import RcaRepository
 
 DATABASE_URL = os.getenv(
     "MIGRATION_TEST_DATABASE_URL",
@@ -439,7 +437,7 @@ async def test_repository_reads_require_run_specialist_and_evidence_ownership() 
 
 
 @pytest.mark.asyncio
-async def test_duplicate_partitioned_evidence_id_fails_closed() -> None:
+async def test_duplicate_evidence_uuid_is_rejected_by_the_database() -> None:
     engine = create_async_engine(DATABASE_URL)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     run_id, specialist_id = uuid4(), uuid4()
@@ -448,59 +446,29 @@ async def test_duplicate_partitioned_evidence_id_fails_closed() -> None:
     )
     evidence_id = uuid4()
     now = datetime.now(UTC)
-    async with sessions() as session, session.begin():
-        for offset, marker in enumerate(("first", "second")):
-            observed_at = now + timedelta(microseconds=offset)
-            await session.execute(
-                text(
-                    """INSERT INTO evidence_records(
-                           id,partition_timestamp,observed_at,rca_run_id,
-                           specialist_run_id,evidence_type,source_agent,
-                           source_endpoint,tool_name,time_window_start,
-                           time_window_end,structured_data,content_hash,
-                           raw_result,metadata)
-                       VALUES (:id,:observed,:observed,:run,:specialist,
-                               'metrics.query','METRICS','metrics',
-                               'metrics_query_0',:observed,:observed,
-                               CAST(:structured AS JSONB),:hash,:raw,
-                               CAST('{}' AS JSONB))"""
-                ),
-                {
-                    "id": evidence_id,
-                    "observed": observed_at,
-                    "run": run_id,
-                    "specialist": specialist_id,
-                    "structured": json.dumps({"marker": marker}),
-                    "hash": marker,
-                    "raw": marker.encode(),
-                },
-            )
-    client = CountingClient()
-    request = _request(run_id)
+    statement = text(
+        """INSERT INTO evidence_records(
+               id,observed_at,rca_run_id,specialist_run_id,evidence_type,
+               source_agent,source_endpoint,tool_name,time_window_start,
+               time_window_end,structured_data,raw_result_reference,content_hash)
+           VALUES (:id,:observed,:run,:specialist,'metrics.query','METRICS',
+                   'metrics','metrics_query_0',:observed,:observed,
+                   CAST(:structured AS JSONB),'worker:fixture',:hash)"""
+    )
+    values = {
+        "id": evidence_id,
+        "observed": now,
+        "run": run_id,
+        "specialist": specialist_id,
+        "structured": json.dumps({"marker": "first"}),
+        "hash": "first",
+    }
     try:
-        tools = _tools(
-            request=request,
-            specialist_run_id=specialist_id,
-            collector=MetricsSpecialist(lambda: client),
-            sessions=sessions,
-        )
-
-        with pytest.raises(EvidenceToolError) as read_error:
-            await tools.read_evidence_chunk(evidence_id, 0)
-        with pytest.raises(EvidenceToolError) as collect_error:
-            await tools.collect_evidence()
-
-        assert read_error.value.code == "ANALYSIS_UNKNOWN_EVIDENCE"
-        assert collect_error.value.code == "ANALYSIS_UNKNOWN_EVIDENCE"
-        async with sessions() as session:
-            repository = RcaRepository(session)
-            with pytest.raises(AmbiguousEvidenceError):
-                await repository.get_specialist_evidence(
-                    run_id, specialist_id, evidence_id
-                )
-            with pytest.raises(AmbiguousEvidenceError):
-                await repository.list_specialist_evidence(run_id, specialist_id)
-        assert client.calls == 0
+        async with sessions() as session, session.begin():
+            await session.execute(statement, values)
+            with pytest.raises(IntegrityError):
+                async with session.begin_nested():
+                    await session.execute(statement, values)
     finally:
         await _cleanup_run(
             sessions,

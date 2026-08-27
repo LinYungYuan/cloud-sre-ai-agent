@@ -47,7 +47,6 @@ ORDER = (SpecialistKind.METRICS, SpecialistKind.TRACE, SpecialistKind.LOG)
 REFERENCES = {
     kind: EvidenceReference(
         id=UUID(f"00000000-0000-0000-0000-{index:012d}"),
-        partition_timestamp=NOW,
     )
     for index, kind in enumerate(ORDER, start=1)
 }
