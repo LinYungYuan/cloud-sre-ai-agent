@@ -1,22 +1,17 @@
 import asyncio
 import json
-import logging
 import os
-import sys
-from collections.abc import AsyncGenerator, Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
-from typing import cast
-from urllib.parse import urlsplit, urlunsplit
-from uuid import UUID, uuid4
+from uuid import UUID
 
-import asyncpg
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from integration._disposable_database import disposable_database_url
 from sre_agent.application.alerts.ingest_grafana_alerts import IngestGrafanaAlerts
 from sre_agent.application.outbox.publish_events import (
     OutboxPublishResult,
@@ -42,13 +37,6 @@ DATABASE_URL = os.getenv(
     "postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent",
 )
 BACKEND_ROOT = Path(__file__).resolve().parents[3]
-LOGGER = logging.getLogger(__name__)
-CONNECT_TIMEOUT_SECONDS = 10
-ADMIN_STATEMENT_TIMEOUT_SECONDS = 10.0
-MIGRATION_LOCK_TIMEOUT_MILLISECONDS = 5_000
-MIGRATION_STATEMENT_TIMEOUT_MILLISECONDS = 45_000
-MIGRATION_OVERALL_TIMEOUT_SECONDS = 60.0
-PROCESS_TERMINATION_TIMEOUT_SECONDS = 5.0
 ROOT = Path(__file__).resolve().parents[4]
 AWS_FIXTURE = (ROOT / "contracts/examples/grafana-firing-aws.json").read_bytes()
 GCP_FIXTURE = (ROOT / "contracts/examples/grafana-firing.json").read_bytes()
@@ -97,244 +85,13 @@ class CommitThenInterruptUnitOfWork:
             raise RuntimeError("simulated response interruption after commit")
 
 
-class _RecordingDisposableDatabaseAdmin:
-    def __init__(self) -> None:
-        self.statements: list[str] = []
-        self.closed = False
-
-    async def execute(self, statement: str) -> None:
-        self.statements.append(statement)
-
-    async def close(self) -> None:
-        self.closed = True
-
-
-class _UnresponsiveMigrationProcess:
-    def __init__(self) -> None:
-        self.returncode: int | None = None
-        self.terminated = False
-        self.killed = False
-        self.wait_calls = 0
-
-    async def communicate(self) -> tuple[bytes, bytes]:
-        await asyncio.Event().wait()
-        raise AssertionError("unreachable")
-
-    def terminate(self) -> None:
-        self.terminated = True
-
-    def kill(self) -> None:
-        self.killed = True
-
-    async def wait(self) -> int:
-        self.wait_calls += 1
-        if self.wait_calls == 1:
-            await asyncio.Event().wait()
-        self.returncode = -9
-        return self.returncode
-
-
-def _with_database(database_url: str, database_name: str) -> str:
-    parsed = urlsplit(database_url)
-    return urlunsplit((parsed.scheme, parsed.netloc, f"/{database_name}", "", ""))
-
-
-def _asyncpg_url(database_url: str) -> str:
-    return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
-
-
-def _phase_error(phase: str, error: Exception) -> RuntimeError:
-    return RuntimeError(
-        "Task 8 disposable database setup failed "
-        f"at phase={phase}: {error}. "
-        "Verify PostgreSQL is reachable and the test role can create databases."
-    )
-
-
-async def _connect_admin_database() -> asyncpg.Connection:
-    phase = "admin-connect"
-    LOGGER.info("Task 8 disposable database phase=%s", phase)
-    try:
-        return await asyncio.wait_for(
-            asyncpg.connect(
-                _asyncpg_url(_with_database(DATABASE_URL, "postgres")),
-                timeout=CONNECT_TIMEOUT_SECONDS,
-            ),
-            timeout=CONNECT_TIMEOUT_SECONDS,
-        )
-    except (TimeoutError, OSError, asyncpg.PostgresError) as error:
-        raise _phase_error(phase, error) from error
-
-
-async def _execute_admin_statement(
-    admin: asyncpg.Connection,
-    statement: str,
-    *,
-    phase: str,
-) -> None:
-    LOGGER.info("Task 8 disposable database phase=%s", phase)
-    try:
-        await asyncio.wait_for(
-            admin.execute(statement), timeout=ADMIN_STATEMENT_TIMEOUT_SECONDS
-        )
-    except (TimeoutError, asyncpg.PostgresError) as error:
-        raise _phase_error(phase, error) from error
-
-
-async def _terminate_and_reap_migration(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is not None:
-        return
-
-    process.terminate()
-    try:
-        await asyncio.wait_for(
-            process.wait(), timeout=PROCESS_TERMINATION_TIMEOUT_SECONDS
-        )
-    except TimeoutError:
-        process.kill()
-        await process.wait()
-
-
-async def _run_migration_subprocess(
-    database_url: str,
-    *,
-    timeout: float = MIGRATION_OVERALL_TIMEOUT_SECONDS,
-) -> None:
-    phase = "migration"
-    LOGGER.info("Task 8 disposable database phase=%s", phase)
-    environment = os.environ.copy()
-    environment["MIGRATION_TEST_DATABASE_URL"] = database_url
-    try:
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "alembic",
-            "-c",
-            str(BACKEND_ROOT / "alembic.ini"),
-            "upgrade",
-            "0003_non_partition_runtime_tables",
-            cwd=BACKEND_ROOT,
-            env=environment,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except OSError as error:
-        raise _phase_error("migration-start", error) from error
-
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-    except TimeoutError as error:
-        await _terminate_and_reap_migration(process)
-        raise RuntimeError(
-            "Task 8 disposable database setup failed at phase=migration timeout "
-            f"after {timeout:.1f}s; subprocess was terminated and reaped."
-        ) from error
-
-    if process.returncode != 0:
-        output = (stdout + stderr).decode(errors="replace")[-2_000:]
-        raise RuntimeError(
-            "Task 8 disposable database setup failed at phase=migration "
-            f"with exit code {process.returncode}: {output}"
-        )
-
-
 @pytest_asyncio.fixture(scope="module")
 async def isolated_database_url():
     """Create a post-0003 database instead of mutating a shared test database."""
-    database_name = f"task8_ingest_{uuid4().hex}"
-    admin = await _connect_admin_database()
-    database_url = _with_database(DATABASE_URL, database_name)
-    database_created = False
-    try:
-        await _execute_admin_statement(
-            admin,
-            f'CREATE DATABASE "{database_name}"',
-            phase="create-database",
-        )
-        database_created = True
-        await _execute_admin_statement(
-            admin,
-            f"ALTER DATABASE \"{database_name}\" SET lock_timeout TO "
-            f"'{MIGRATION_LOCK_TIMEOUT_MILLISECONDS}ms'",
-            phase="configure-lock-timeout",
-        )
-        await _execute_admin_statement(
-            admin,
-            f"ALTER DATABASE \"{database_name}\" SET statement_timeout TO "
-            f"'{MIGRATION_STATEMENT_TIMEOUT_MILLISECONDS}ms'",
-            phase="configure-statement-timeout",
-        )
-        await _run_migration_subprocess(database_url)
+    async with disposable_database_url(
+        DATABASE_URL, prefix="task8_ingest", backend_root=BACKEND_ROOT
+    ) as database_url:
         yield database_url
-    finally:
-        if database_created:
-            await _execute_admin_statement(
-                admin,
-                f'DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)',
-                phase="drop-database",
-            )
-        await admin.close()
-
-
-@pytest.mark.asyncio
-async def test_disposable_database_fixture_runs_without_an_opt_in(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("TASK8_DISPOSABLE_DATABASE", raising=False)
-    admin = _RecordingDisposableDatabaseAdmin()
-    migrated_urls: list[str] = []
-
-    async def connect(*_args, **_kwargs) -> _RecordingDisposableDatabaseAdmin:
-        return admin
-
-    async def migrate(database_url: str, **_kwargs) -> None:
-        migrated_urls.append(database_url)
-
-    monkeypatch.setattr(asyncpg, "connect", connect)
-    monkeypatch.setattr(
-        sys.modules[__name__], "_run_migration_subprocess", migrate, raising=False
-    )
-    wrapped_fixture = cast(
-        Callable[[], AsyncGenerator[str]],
-        isolated_database_url.__wrapped__,  # pyright: ignore[reportFunctionMemberAccess]
-    )
-    generator = wrapped_fixture()
-    try:
-        try:
-            database_url = await anext(generator)
-        except pytest.skip.Exception as error:
-            pytest.fail(f"the Task 8 disposable database fixture skipped: {error}")
-        assert database_url.rsplit("/", 1)[-1].startswith("task8_ingest_")
-        assert migrated_urls == [database_url]
-    finally:
-        await generator.aclose()
-
-    assert admin.closed
-    assert any(statement.startswith("CREATE DATABASE") for statement in admin.statements)
-    assert any(statement.startswith("DROP DATABASE") for statement in admin.statements)
-
-
-@pytest.mark.asyncio
-async def test_migration_timeout_terminates_kills_and_reaps_the_subprocess(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runner = cast(
-        Callable[..., Awaitable[None]], globals().get("_run_migration_subprocess")
-    )
-    assert callable(runner), "migration subprocess lifecycle helper is required"
-    process = _UnresponsiveMigrationProcess()
-
-    async def create_process(*_args, **_kwargs) -> _UnresponsiveMigrationProcess:
-        return process
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
-
-    with pytest.raises(RuntimeError, match="phase=migration timeout"):
-        await runner("postgresql+asyncpg://postgres@localhost/task8_timeout", timeout=0.01)
-
-    assert process.terminated
-    assert process.killed
-    assert process.wait_calls == 2
 
 
 @pytest_asyncio.fixture
