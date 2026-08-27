@@ -288,7 +288,7 @@ async def _upgrade_to_0003(database: MigrationDatabase) -> asyncpg.Connection:
 
 
 @pytest.mark.asyncio
-async def test_0003_replaces_partitioned_runtime_tables_with_uuid_relations(
+async def test_0003_replaces_runtime_tables_and_retains_partitioned_legacy_parents(
     migration_database: MigrationDatabase,
 ) -> None:
     ids = await _seed_0002_fixture(migration_database.connection)
@@ -308,7 +308,29 @@ async def test_0003_replaces_partitioned_runtime_tables_with_uuid_relations(
         for row in relations
         if row["relname"] in CANONICAL_TABLES
     } == {table_name: (b"r", False) for table_name in CANONICAL_TABLES}
-    assert set(LEGACY_TABLES.values()) <= {row["relname"] for row in relations}
+    assert {
+        row["relname"]: (row["relkind"], row["relispartition"])
+        for row in relations
+        if row["relname"] in LEGACY_TABLES.values()
+    } == {legacy_name: (b"p", False) for legacy_name in LEGACY_TABLES.values()}
+
+    partition_parents = await connection.fetch(
+        """
+        SELECT parent.relname, partition_metadata.partstrat,
+               count(child.oid) AS child_count
+        FROM pg_partitioned_table AS partition_metadata
+        JOIN pg_class AS parent ON parent.oid = partition_metadata.partrelid
+        LEFT JOIN pg_inherits AS inheritance ON inheritance.inhparent = parent.oid
+        LEFT JOIN pg_class AS child ON child.oid = inheritance.inhrelid
+        WHERE parent.relname = ANY($1::text[])
+        GROUP BY parent.relname, partition_metadata.partstrat
+        """,
+        list(LEGACY_TABLES.values()),
+    )
+    assert {
+        row["relname"]: (row["partstrat"], row["child_count"])
+        for row in partition_parents
+    } == {legacy_name: (b"r", 2) for legacy_name in LEGACY_TABLES.values()}
 
     primary_keys = await connection.fetch(
         """

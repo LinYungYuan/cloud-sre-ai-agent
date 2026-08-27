@@ -1,14 +1,25 @@
+import asyncio
 import os
-from uuid import UUID
+from pathlib import Path
+from unittest.mock import patch
+from urllib.parse import urlsplit, urlunsplit
+from uuid import UUID, uuid4
 
 import asyncpg
 import pytest
 import pytest_asyncio
+from alembic import command
+from alembic.config import Config
 
-DATABASE_URL = os.getenv(
+BACKEND_ROOT = Path(__file__).resolve().parents[3]
+MIGRATION_DATABASE_URL = os.getenv(
     "MIGRATION_TEST_DATABASE_URL",
-    "postgresql://postgres@127.0.0.1:55432/sre_agent",
-).replace("postgresql+asyncpg://", "postgresql://", 1)
+    "postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent",
+)
+DATABASE_URL = MIGRATION_DATABASE_URL.replace(
+    "postgresql+asyncpg://", "postgresql://", 1
+)
+USE_DISPOSABLE_DATABASE = os.getenv("TASK7_DISPOSABLE_SCHEMA_DATABASE") == "1"
 
 RUNTIME_TABLES = {
     "webhook_deliveries",
@@ -62,9 +73,39 @@ SERVICE_A = UUID("94000000-0000-0000-0000-000000000001")
 SERVICE_B = UUID("94000000-0000-0000-0000-000000000002")
 
 
+def _with_database(database_url: str, database_name: str) -> str:
+    parsed = urlsplit(database_url)
+    return urlunsplit((parsed.scheme, parsed.netloc, f"/{database_name}", "", ""))
+
+
+def _upgrade_disposable_database(database_url: str) -> None:
+    config = Config(str(BACKEND_ROOT / "alembic.ini"))
+    with patch.dict(os.environ, {"MIGRATION_TEST_DATABASE_URL": database_url}):
+        command.upgrade(config, "0003_non_partition_runtime_tables")
+
+
+@pytest_asyncio.fixture(scope="module")
+async def schema_database_url():
+    """Optionally run this legacy suite against a disposable post-0003 database."""
+    if not USE_DISPOSABLE_DATABASE:
+        yield DATABASE_URL
+        return
+
+    database_name = f"task7_schema_{uuid4().hex}"
+    admin = await asyncpg.connect(_with_database(DATABASE_URL, "postgres"))
+    test_migration_url = _with_database(MIGRATION_DATABASE_URL, database_name)
+    try:
+        await admin.execute(f'CREATE DATABASE "{database_name}"')
+        await asyncio.to_thread(_upgrade_disposable_database, test_migration_url)
+        yield _with_database(DATABASE_URL, database_name)
+    finally:
+        await admin.execute(f'DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)')
+        await admin.close()
+
+
 @pytest_asyncio.fixture
-async def connection():
-    connection = await asyncpg.connect(DATABASE_URL)
+async def connection(schema_database_url: str):
+    connection = await asyncpg.connect(schema_database_url)
     try:
         yield connection
     finally:
