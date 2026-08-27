@@ -311,8 +311,8 @@ def test_outbox_recovery_openapi_has_stable_schemas_and_error_responses() -> Non
         "/api/v1/operations/outbox-events/retry-pending"
     ]["post"]
 
-    assert {"401", "403", "404"} <= set(event_operation["responses"])
-    assert {"401", "403", "404"} <= set(batch_operation["responses"])
+    assert {"401", "403", "404", "503"} <= set(event_operation["responses"])
+    assert {"401", "403", "404", "503"} <= set(batch_operation["responses"])
     schemas = openapi["components"]["schemas"]
     assert set(schemas["OutboxRetryEventResponse"]["properties"]) == {
         "eventId",

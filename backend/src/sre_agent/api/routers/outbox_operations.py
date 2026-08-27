@@ -30,6 +30,7 @@ _RECOVERY_ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     403: {"description": "Global operator access is required."},
     404: {"description": "The outbox event does not exist."},
     500: {"description": "An internal or dependency failure occurred."},
+    503: {"description": "Operator identity integration is unavailable."},
 }
 
 

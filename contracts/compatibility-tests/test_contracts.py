@@ -464,7 +464,7 @@ def test_operator_contract_locks_global_outbox_recovery_operations() -> None:
 
     event_operation = paths[event_path]["post"]
     assert "requestBody" not in event_operation
-    assert {"401", "403", "404"} <= set(event_operation["responses"])
+    assert {"401", "403", "404", "503"} <= set(event_operation["responses"])
     assert event_operation["responses"]["200"] == {
         "description": "Stable recovery result without persisted event contents.",
         "content": {
@@ -476,6 +476,7 @@ def test_operator_contract_locks_global_outbox_recovery_operations() -> None:
     for path in (pending_path, failed_path):
         operation = paths[path]["post"]
         assert "requestBody" not in operation
+        assert {"401", "403", "404", "503"} <= set(operation["responses"])
         assert operation["parameters"] == [
             {"$ref": "#/components/parameters/OutboxRecoveryLimit"}
         ]

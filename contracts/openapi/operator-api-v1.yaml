@@ -538,6 +538,8 @@ paths:
         - $ref: '#/components/parameters/OutboxRecoveryLimit'
       responses:
         <<: *commonErrorResponses
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
         '200':
           description: Stable aggregate recovery result without persisted event contents.
           content:
@@ -553,6 +555,8 @@ paths:
         - $ref: '#/components/parameters/OutboxRecoveryLimit'
       responses:
         <<: *commonErrorResponses
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
         '200':
           description: Stable aggregate recovery result without persisted event contents.
           content:
@@ -573,6 +577,8 @@ paths:
       summary: Publish one durable outbox event without overriding its contents.
       responses:
         <<: *commonErrorResponses
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
         '200':
           description: Stable recovery result without persisted event contents.
           content:
@@ -700,6 +706,12 @@ components:
             $ref: '#/components/schemas/Problem'
     InternalError:
       description: An internal or dependency failure occurred.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    ServiceUnavailable:
+      description: Operator identity integration is unavailable.
       content:
         application/problem+json:
           schema:
