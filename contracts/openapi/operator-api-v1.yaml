@@ -530,6 +530,56 @@ paths:
               schema:
                 $ref: '#/components/schemas/CursorPageHypotheses'
 
+  /api/v1/operations/outbox-events/retry-pending:
+    post:
+      operationId: retryPendingOutboxEvents
+      summary: Publish a bounded selection of pending outbox events.
+      parameters:
+        - $ref: '#/components/parameters/OutboxRecoveryLimit'
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          description: Stable aggregate recovery result without persisted event contents.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OutboxRetryBatchResponse'
+
+  /api/v1/operations/outbox-events/retry-failed:
+    post:
+      operationId: retryFailedOutboxEvents
+      summary: Publish a bounded selection of failed outbox events.
+      parameters:
+        - $ref: '#/components/parameters/OutboxRecoveryLimit'
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          description: Stable aggregate recovery result without persisted event contents.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OutboxRetryBatchResponse'
+
+  /api/v1/operations/outbox-events/{eventId}/retry:
+    parameters:
+      - name: eventId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: retryOutboxEvent
+      summary: Publish one durable outbox event without overriding its contents.
+      responses:
+        <<: *commonErrorResponses
+        '200':
+          description: Stable recovery result without persisted event contents.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OutboxRetryEventResponse'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -563,6 +613,15 @@ components:
         minimum: 1
         maximum: 100
         default: 50
+    OutboxRecoveryLimit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 100
     From:
       name: from
       in: query
@@ -728,6 +787,51 @@ components:
           type: string
           format: uuid
           description: Present for RCA_ALREADY_RUNNING conflicts.
+      additionalProperties: false
+
+    OutboxPublishResult:
+      type: string
+      enum: [PUBLISHED, FAILED, NO_OP]
+    OutboxFailureCategory:
+      type: string
+      enum: [INVALID_EVENT, PUBLISH_ERROR]
+    OutboxRetryEventResponse:
+      type: object
+      required: [eventId, previousStatus, result, failureCategory]
+      properties:
+        eventId:
+          type: string
+          format: uuid
+        previousStatus:
+          type: string
+        result:
+          $ref: '#/components/schemas/OutboxPublishResult'
+        failureCategory:
+          oneOf:
+            - $ref: '#/components/schemas/OutboxFailureCategory'
+            - type: 'null'
+      additionalProperties: false
+    OutboxRetryBatchResponse:
+      type: object
+      required: [selected, published, failed, noOp, failureCategories]
+      properties:
+        selected:
+          type: integer
+          minimum: 0
+        published:
+          type: integer
+          minimum: 0
+        failed:
+          type: integer
+          minimum: 0
+        noOp:
+          type: integer
+          minimum: 0
+        failureCategories:
+          type: array
+          items:
+            $ref: '#/components/schemas/OutboxFailureCategory'
+          uniqueItems: true
       additionalProperties: false
 
     Scope:

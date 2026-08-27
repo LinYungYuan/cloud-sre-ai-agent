@@ -17,6 +17,10 @@ from sre_agent.application.operator.read_models import (
     UnavailableOperatorReadService,
 )
 from sre_agent.application.outbox.publish_events import OutboxPublishService
+from sre_agent.application.outbox.recover_events import (
+    OutboxRecoveryService,
+    SqlAlchemyOutboxRecoveryAuditRepository,
+)
 from sre_agent.config.settings import Settings
 from sre_agent.integrations.grafana.authenticator import (
     ConfiguredGrafanaSecretProvider,
@@ -49,6 +53,7 @@ class RuntimeResources:
     readiness_check: ReadinessCheck
     operator_reads: OperatorReadService | None = None
     outbox_publish_service: OutboxPublishService | None = None
+    outbox_recovery_service: OutboxRecoveryService | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +62,7 @@ class ApplicationServices:
     ingestion: IngestGrafanaAlerts
     operator_reads: OperatorReadService
     operator_identity_provider: OperatorIdentityProvider
+    outbox_recovery_service: OutboxRecoveryService | None
     readiness_check: ReadinessCheck
 
 
@@ -86,16 +92,21 @@ async def production_resources(settings: Settings) -> AsyncIterator[RuntimeResou
                 rules = await load_normalization_rule_provider(connection)
                 folders = await load_folder_scope_provider(connection)
             _validate_configured_sources(settings, rules)
+            outbox_publish_service = OutboxPublishService(
+                session_factory,
+                GooglePubSubPublisher(publisher_client),
+                topic,
+            )
             yield RuntimeResources(
                 uow_factory=lambda: SqlAlchemyUnitOfWork(session_factory),
                 normalization_rule_provider=rules,
                 folder_scope_provider=folders,
                 readiness_check=readiness_check,
                 operator_reads=SqlAlchemyOperatorReadRepository(session_factory),
-                outbox_publish_service=OutboxPublishService(
-                    session_factory,
-                    GooglePubSubPublisher(publisher_client),
-                    topic,
+                outbox_publish_service=outbox_publish_service,
+                outbox_recovery_service=OutboxRecoveryService(
+                    outbox_publish_service,
+                    SqlAlchemyOutboxRecoveryAuditRepository(session_factory),
                 ),
             )
         finally:
@@ -130,6 +141,7 @@ def compose_services(
         ),
         operator_reads=operator_reads,
         operator_identity_provider=identity_provider,
+        outbox_recovery_service=resources.outbox_recovery_service,
         readiness_check=resources.readiness_check,
     )
 

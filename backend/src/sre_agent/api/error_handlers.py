@@ -6,8 +6,14 @@ from fastapi.responses import JSONResponse
 
 from sre_agent.application.operator.read_models import (
     OperatorCursorInvalid,
+    OperatorForbidden,
     OperatorIdentityUnavailable,
     OperatorResourceNotFound,
+    OperatorUnauthenticated,
+)
+from sre_agent.application.outbox.publish_events import OutboxEventNotFound
+from sre_agent.application.outbox.recover_events import (
+    OutboxRecoveryRequestBodyForbidden,
 )
 from sre_agent.integrations.grafana.authenticator import GrafanaUnauthorized
 from sre_agent.integrations.grafana.payloads import (
@@ -17,6 +23,62 @@ from sre_agent.integrations.grafana.payloads import (
 
 
 def install_error_handlers(app: FastAPI) -> None:
+    @app.exception_handler(OperatorUnauthenticated)
+    async def handle_operator_unauthenticated(
+        request: Request, error: OperatorUnauthenticated
+    ) -> JSONResponse:
+        del error
+        return _problem(
+            request,
+            status=401,
+            problem_type="urn:sre-agent:problem:operator-unauthenticated",
+            code="UNAUTHENTICATED",
+            title="Unauthorized",
+            detail="A valid operator bearer token is required.",
+        )
+
+    @app.exception_handler(OperatorForbidden)
+    async def handle_operator_forbidden(
+        request: Request, error: OperatorForbidden
+    ) -> JSONResponse:
+        del error
+        return _problem(
+            request,
+            status=403,
+            problem_type="urn:sre-agent:problem:operator-forbidden",
+            code="SCOPE_FORBIDDEN",
+            title="Forbidden",
+            detail="Global operator access is required.",
+        )
+
+    @app.exception_handler(OutboxEventNotFound)
+    async def handle_outbox_event_not_found(
+        request: Request, error: OutboxEventNotFound
+    ) -> JSONResponse:
+        del error
+        return _problem(
+            request,
+            status=404,
+            problem_type="urn:sre-agent:problem:resource-not-found",
+            code="RESOURCE_NOT_FOUND",
+            title="找不到資源",
+            detail="資源不存在或目前的身分無權存取。",
+        )
+
+    @app.exception_handler(OutboxRecoveryRequestBodyForbidden)
+    async def handle_outbox_recovery_body_forbidden(
+        request: Request, error: OutboxRecoveryRequestBodyForbidden
+    ) -> JSONResponse:
+        del error
+        return _problem(
+            request,
+            status=400,
+            problem_type="urn:sre-agent:problem:invalid-outbox-recovery-request",
+            code="INVALID_REQUEST",
+            title="Invalid request",
+            detail="Outbox recovery requests must not include a body.",
+        )
+
     @app.exception_handler(OperatorCursorInvalid)
     async def handle_operator_cursor_invalid(
         request: Request, error: OperatorCursorInvalid

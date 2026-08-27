@@ -276,6 +276,9 @@ def test_operator_contract_declares_every_approved_operation():
         ("/api/v1/rca-runs/{id}/trace-waterfall", "get"),
         ("/api/v1/rca-runs/{id}/evidence", "get"),
         ("/api/v1/rca-runs/{id}/hypotheses", "get"),
+        ("/api/v1/operations/outbox-events/retry-pending", "post"),
+        ("/api/v1/operations/outbox-events/retry-failed", "post"),
+        ("/api/v1/operations/outbox-events/{eventId}/retry", "post"),
     }
     actual_operations = {
         (path, method)
@@ -331,9 +334,17 @@ def test_trace_waterfall_contract_exposes_only_the_safe_trace_projection() -> No
 
 def test_operator_mutations_declare_a_concurrency_or_idempotency_header():
     contract = _operator_contract()
+    recovery_operations = {
+        ("/api/v1/operations/outbox-events/retry-pending", "post"),
+        ("/api/v1/operations/outbox-events/retry-failed", "post"),
+        ("/api/v1/operations/outbox-events/{eventId}/retry", "post"),
+    }
     for path, path_item in contract["paths"].items():
         for method in ("post", "patch", "delete"):
             if operation := path_item.get(method):
+                if (path, method) in recovery_operations:
+                    assert "requestBody" not in operation
+                    continue
                 parameter_names = {
                     _resolve_local_ref(contract, parameter)["name"]
                     for parameter in operation.get("parameters", [])
@@ -439,6 +450,63 @@ def test_operator_contract_locks_public_enums_errors_and_incident_etags():
     for operation in incident_operations:
         success = _resolve_local_ref(contract, operation["responses"]["200"])
         assert "ETag" in success["headers"]
+
+
+def test_operator_contract_locks_global_outbox_recovery_operations() -> None:
+    contract = _operator_contract()
+    paths = contract["paths"]
+    schemas = contract["components"]["schemas"]
+
+    event_path = "/api/v1/operations/outbox-events/{eventId}/retry"
+    pending_path = "/api/v1/operations/outbox-events/retry-pending"
+    failed_path = "/api/v1/operations/outbox-events/retry-failed"
+    assert {event_path, pending_path, failed_path} <= set(paths)
+
+    event_operation = paths[event_path]["post"]
+    assert "requestBody" not in event_operation
+    assert {"401", "403", "404"} <= set(event_operation["responses"])
+    assert event_operation["responses"]["200"] == {
+        "description": "Stable recovery result without persisted event contents.",
+        "content": {
+            "application/json": {
+                "schema": {"$ref": "#/components/schemas/OutboxRetryEventResponse"}
+            }
+        },
+    }
+    for path in (pending_path, failed_path):
+        operation = paths[path]["post"]
+        assert "requestBody" not in operation
+        assert operation["parameters"] == [
+            {"$ref": "#/components/parameters/OutboxRecoveryLimit"}
+        ]
+        assert operation["responses"]["200"] == {
+            "description": "Stable aggregate recovery result without persisted event contents.",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "$ref": "#/components/schemas/OutboxRetryBatchResponse"
+                    }
+                }
+            },
+        }
+
+    assert set(schemas["OutboxRetryEventResponse"]["properties"]) == {
+        "eventId",
+        "previousStatus",
+        "result",
+        "failureCategory",
+    }
+    assert set(schemas["OutboxRetryBatchResponse"]["properties"]) == {
+        "selected",
+        "published",
+        "failed",
+        "noOp",
+        "failureCategories",
+    }
+    assert schemas["OutboxFailureCategory"]["enum"] == [
+        "INVALID_EVENT",
+        "PUBLISH_ERROR",
+    ]
 
 
 def test_operator_errors_are_problem_json_and_timestamps_are_utc_z():
