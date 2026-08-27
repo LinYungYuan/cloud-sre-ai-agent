@@ -6,12 +6,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 MIGRATION_PATH = (
     REPOSITORY_ROOT / "backend/migrations/versions/0001_alert_incident_schema.py"
 )
 MIGRATION_V2_PATH = (
     REPOSITORY_ROOT / "backend/migrations/versions/0002_grafana_normalization_v2.py"
+)
+MIGRATION_V3_PATH = (
+    REPOSITORY_ROOT / "backend/migrations/versions/0003_non_partition_runtime_tables.py"
 )
 DOCUMENTATION_PATH = REPOSITORY_ROOT / "docs/database/postgresql-schema.md"
 PARTITION_EXAMPLES = {
@@ -46,6 +51,17 @@ REQUIRED_COLUMNS = {
 def _load_migration() -> ModuleType:
     specification = importlib.util.spec_from_file_location(
         "alert_incident_schema", MIGRATION_PATH
+    )
+    assert specification is not None
+    assert specification.loader is not None
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+def _load_migration_v3() -> ModuleType:
+    specification = importlib.util.spec_from_file_location(
+        "non_partition_runtime_tables", MIGRATION_V3_PATH
     )
     assert specification is not None
     assert specification.loader is not None
@@ -214,6 +230,7 @@ def _index_manifest(sql: str) -> dict[str, tuple[bool, str, str, str | None]]:
 
 
 def test_schema_reference_canonical_manifest_matches_migration() -> None:
+    """Historical 0001 names remain discoverable in the evolving reference."""
     migration = _load_migration()
     migration_sql = "\n".join(migration.DDL)
     documentation_sql = _document_sql_blocks(
@@ -223,9 +240,6 @@ def test_schema_reference_canonical_manifest_matches_migration() -> None:
     documented_tables = _create_table_statements(documentation_sql)
 
     assert set(migration_tables) <= set(documented_tables)
-    assert {
-        name: _table_manifest(statement) for name, statement in migration_tables.items()
-    } == {name: _table_manifest(documented_tables[name]) for name in migration_tables}
     migration_indexes = _index_manifest(migration_sql)
     documented_indexes = _index_manifest(documentation_sql)
     assert migration_indexes == {
@@ -262,19 +276,46 @@ def test_schema_reference_covers_every_migration_parent_table() -> None:
     assert migration_tables <= documented_tables
 
 
-def test_schema_reference_documents_partitions_and_required_indexes() -> None:
-    """Removing partition syntax or an operational index must be detected."""
+def test_non_partition_migration_declares_replacement_contract() -> None:
+    """The maintenance migration must own the post-cutover table contract."""
+    migration = _load_migration_v3()
+    migration_source = MIGRATION_V3_PATH.read_text(encoding="utf-8")
+
+    assert migration.revision == "0003_non_partition_runtime_tables"
+    assert migration.down_revision == "0002_grafana_normalization_v2"
+    assert migration.CANONICAL_TABLES == (
+        "webhook_deliveries",
+        "alert_events",
+        "evidence_records",
+        "incident_messages",
+        "incident_timeline_events",
+        "audit_events",
+    )
+    assert all(
+        f"{table_name}__partitioned_legacy_0003" in migration.LEGACY_TABLES.values()
+        for table_name in migration.CANONICAL_TABLES
+    )
+    assert "PARTITION BY RANGE" not in "\n".join(migration.REPLACEMENT_DDL)
+    assert all(
+        "id UUID PRIMARY KEY" in statement for statement in migration.REPLACEMENT_DDL
+    )
+    assert "partition_timestamp" not in "\n".join(migration.REPLACEMENT_DDL)
+    assert "lossless downgrade" in migration_source
+
+
+def test_non_partition_migration_refuses_downgrade() -> None:
+    migration = _load_migration_v3()
+
+    with pytest.raises(RuntimeError, match="lossless downgrade"):
+        migration.downgrade()
+
+
+def test_schema_reference_documents_required_indexes() -> None:
+    """Removing an operational index from the historical schema reference is detected."""
     assert DOCUMENTATION_PATH.is_file(), "schema reference document is missing"
 
-    migration = _load_migration()
     documentation = DOCUMENTATION_PATH.read_text(encoding="utf-8")
     sql_blocks = _document_sql_blocks(documentation)
-    table_definitions = _documented_table_definitions(documentation)
-
-    for table_name in migration.PARTITIONED_TABLES:
-        assert "PARTITION BY RANGE (partition_timestamp)" in table_definitions.get(
-            table_name, ""
-        )
 
     documented_indexes = set(re.findall(r"\b(?:UNIQUE )?INDEX ([a-z_]+)", sql_blocks))
     assert REQUIRED_INDEXES <= documented_indexes
@@ -346,7 +387,10 @@ def test_schema_reference_documents_normalization_v2_migration() -> None:
         "alembic_version_backend",
     }
 
-    assert all(fragment in migration for fragment in required_fragments - {"alembic_version_backend"})
+    assert all(
+        fragment in migration
+        for fragment in required_fragments - {"alembic_version_backend"}
+    )
     assert all(fragment in documentation for fragment in required_fragments)
     assert _index_manifest(_document_sql_blocks(documentation))[
         "uq_incidents_active_identity"

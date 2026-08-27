@@ -1,19 +1,16 @@
 import os
-from datetime import UTC, date, datetime
 from uuid import UUID
 
 import asyncpg
 import pytest
 import pytest_asyncio
 
-from sre_agent.persistence.database import ensure_monthly_partitions
-
 DATABASE_URL = os.getenv(
     "MIGRATION_TEST_DATABASE_URL",
     "postgresql://postgres@127.0.0.1:55432/sre_agent",
 ).replace("postgresql+asyncpg://", "postgresql://", 1)
 
-PARTITIONED_TABLES = {
+RUNTIME_TABLES = {
     "webhook_deliveries",
     "alert_events",
     "evidence_records",
@@ -113,7 +110,9 @@ async def _assert_integrity_violation(connection, statement: str, *values) -> No
 
 
 @pytest.mark.asyncio
-async def test_migration_creates_approved_tables_and_range_partitions(connection):
+async def test_migration_creates_approved_tables_and_ordinary_runtime_relations(
+    connection,
+):
     tables = set(
         await connection.fetchval(
             """
@@ -128,48 +127,21 @@ async def test_migration_creates_approved_tables_and_range_partitions(connection
 
     rows = await connection.fetch(
         """
-        SELECT c.relname, p.partstrat
-        FROM pg_partitioned_table AS p
-        JOIN pg_class AS c ON c.oid = p.partrelid
+        SELECT c.relname, c.relkind, c.relispartition
+        FROM pg_class AS c
         JOIN pg_namespace AS n ON n.oid = c.relnamespace
-        WHERE n.nspname = 'public'
-        """
+        WHERE n.nspname = 'public' AND c.relname = ANY($1::text[])
+        """,
+        list(RUNTIME_TABLES),
     )
-    partition_strategies = {row["relname"]: row["partstrat"] for row in rows}
     assert {
-        name: b"r" for name in PARTITIONED_TABLES
-    }.items() <= partition_strategies.items()
+        row["relname"]: (row["relkind"], row["relispartition"]) for row in rows
+    } == {name: (b"r", False) for name in RUNTIME_TABLES}
 
     incident_kind = await connection.fetchval(
         "SELECT relkind FROM pg_class WHERE oid = 'public.incidents'::regclass"
     )
     assert incident_kind == b"r"
-
-    current_month = datetime.now(UTC).date().replace(day=1)
-    next_month = (
-        date(current_month.year + 1, 1, 1)
-        if current_month.month == 12
-        else date(current_month.year, current_month.month + 1, 1)
-    )
-    expected_partitions = {
-        f"{table_name}_{month.year:04d}_{month.month:02d}"
-        for table_name in PARTITIONED_TABLES
-        for month in (current_month, next_month)
-    }
-    actual_partitions = set(
-        await connection.fetchval(
-            """
-            SELECT array_agg(child.relname)
-            FROM pg_inherits
-            JOIN pg_class AS child ON child.oid = inhrelid
-            JOIN pg_class AS parent ON parent.oid = inhparent
-            WHERE parent.relname = ANY($1::text[])
-            """,
-            list(PARTITIONED_TABLES),
-        )
-        or []
-    )
-    assert expected_partitions <= actual_partitions
 
 
 @pytest.mark.asyncio
@@ -181,7 +153,7 @@ async def test_lifecycle_timestamps_are_timezone_aware(connection):
         WHERE table_schema = 'public'
           AND (
             column_name LIKE '%_at'
-            OR column_name IN ('partition_timestamp', 'time_window_start', 'time_window_end')
+            OR column_name IN ('time_window_start', 'time_window_end')
           )
         """
     )
@@ -292,20 +264,32 @@ async def test_normalization_catalog_constraints_and_backend_version_table(conne
         (row["relname"], row["conname"]): (row["contype"], row["definition"])
         for row in definitions
     }
-    assert constraints[("normalization_rules", "uq_normalization_rules_source_name_version")][0] == b"u"
-    assert "NULLS NOT DISTINCT" in constraints[
-        ("normalization_rules", "uq_normalization_rules_source_name_version")
-    ][1]
-    assert constraints[("folder_scope_mappings", "uq_folder_scope_source_folder")][0] == b"u"
-    assert "identity_version = ANY" in constraints[
-        ("incidents", "ck_incidents_identity_version")
-    ][1]
+    assert (
+        constraints[
+            ("normalization_rules", "uq_normalization_rules_source_name_version")
+        ][0]
+        == b"u"
+    )
+    assert (
+        "NULLS NOT DISTINCT"
+        in constraints[
+            ("normalization_rules", "uq_normalization_rules_source_name_version")
+        ][1]
+    )
+    assert (
+        constraints[("folder_scope_mappings", "uq_folder_scope_source_folder")][0]
+        == b"u"
+    )
+    assert (
+        "identity_version = ANY"
+        in constraints[("incidents", "ck_incidents_identity_version")][1]
+    )
     assert "SEV1" in constraints[("incidents", "ck_incidents_severity_v2")][1]
     assert "UNMAPPED" in constraints[("incidents", "ck_incidents_severity_v2")][1]
 
 
 @pytest.mark.asyncio
-async def test_webhook_delivery_status_accepts_validation_failure_and_is_inherited(
+async def test_webhook_delivery_status_accepts_validation_failure(
     connection,
 ):
     constraint_definition = await connection.fetchval(
@@ -332,28 +316,9 @@ async def test_webhook_delivery_status_accepts_validation_failure_and_is_inherit
         "'FAILED'::text])))"
     )
 
-    inherited_status_columns = await connection.fetch(
-        """
-        SELECT child.relname AS partition_name,
-               attribute.attnotnull,
-               attribute.attinhcount
-        FROM pg_inherits
-        JOIN pg_class AS parent ON parent.oid = inhparent
-        JOIN pg_class AS child ON child.oid = inhrelid
-        JOIN pg_attribute AS attribute
-          ON attribute.attrelid = child.oid
-         AND attribute.attname = 'status'
-        WHERE parent.oid = 'public.webhook_deliveries'::regclass
-        ORDER BY child.relname
-        """
-    )
-    assert inherited_status_columns
-    assert all(row["attnotnull"] for row in inherited_status_columns)
-    assert all(row["attinhcount"] == 1 for row in inherited_status_columns)
-
 
 @pytest.mark.asyncio
-async def test_alert_event_validation_columns_are_constrained_and_inherited(connection):
+async def test_alert_event_validation_columns_are_constrained(connection):
     columns = await connection.fetch(
         """
         SELECT column_name, data_type, is_nullable, column_default
@@ -406,61 +371,6 @@ async def test_alert_event_validation_columns_are_constrained_and_inherited(conn
         "(ARRAY['VALID'::text, 'VALIDATION_FAILED'::text])))"
     )
 
-    inherited_columns = await connection.fetch(
-        """
-        SELECT child.relname AS partition_name,
-               attribute.attname AS column_name,
-               format_type(attribute.atttypid, attribute.atttypmod) AS data_type,
-               attribute.attnotnull,
-               attribute.attinhcount
-        FROM pg_inherits
-        JOIN pg_class AS parent ON parent.oid = inhparent
-        JOIN pg_class AS child ON child.oid = inhrelid
-        JOIN pg_attribute AS attribute
-          ON attribute.attrelid = child.oid
-         AND attribute.attname IN ('validation_status', 'validation_errors')
-        WHERE parent.oid = 'public.alert_events'::regclass
-        ORDER BY child.relname, attribute.attname
-        """
-    )
-    assert inherited_columns
-    current_month = datetime.now(UTC).date().replace(day=1)
-    next_month = (
-        date(current_month.year + 1, 1, 1)
-        if current_month.month == 12
-        else date(current_month.year, current_month.month + 1, 1)
-    )
-    current_partition = (
-        f"alert_events_{current_month.year:04d}_{current_month.month:02d}"
-    )
-    next_partition = f"alert_events_{next_month.year:04d}_{next_month.month:02d}"
-    inherited_by_partition = {
-        partition_name: {
-            row["column_name"]: {
-                "data_type": row["data_type"],
-                "not_null": row["attnotnull"],
-                "inheritance_count": row["attinhcount"],
-            }
-            for row in inherited_columns
-            if row["partition_name"] == partition_name
-        }
-        for partition_name in (current_partition, next_partition)
-    }
-    expected_columns = {
-        "validation_errors": {
-            "data_type": "jsonb",
-            "not_null": True,
-            "inheritance_count": 1,
-        },
-        "validation_status": {
-            "data_type": "text",
-            "not_null": True,
-            "inheritance_count": 1,
-        },
-    }
-    assert inherited_by_partition[current_partition] == expected_columns
-    assert inherited_by_partition[next_partition] == expected_columns
-
 
 @pytest.mark.asyncio
 async def test_incident_and_worker_job_identity_indexes_are_exact(connection):
@@ -504,7 +414,7 @@ async def test_incident_and_worker_job_identity_indexes_are_exact(connection):
         "uq_incidents_active_identity": {
             "table_name": "incidents",
             "is_unique": True,
-                "columns": ["identity_version", "identity_key"],
+            "columns": ["identity_version", "identity_key"],
             "predicate": (
                 "(status = ANY (ARRAY['OPEN'::text, 'INVESTIGATING'::text]))"
             ),
@@ -531,7 +441,9 @@ async def test_incident_and_worker_job_identity_indexes_are_exact(connection):
 
 
 @pytest.mark.asyncio
-async def test_partitioned_tables_use_composite_logical_and_partition_key(connection):
+async def test_runtime_tables_use_uuid_primary_keys_and_uuid_only_references(
+    connection,
+):
     rows = await connection.fetch(
         """
         SELECT c.relname, array_agg(a.attname ORDER BY key.ordinality) AS columns
@@ -543,10 +455,57 @@ async def test_partitioned_tables_use_composite_logical_and_partition_key(connec
         WHERE con.contype = 'p' AND c.relname = ANY($1::text[])
         GROUP BY c.relname
         """,
-        list(PARTITIONED_TABLES),
+        list(RUNTIME_TABLES),
     )
     assert {row["relname"]: row["columns"] for row in rows} == {
-        table_name: ["id", "partition_timestamp"] for table_name in PARTITIONED_TABLES
+        table_name: ["id"] for table_name in RUNTIME_TABLES
+    }
+
+    helper_columns = await connection.fetch(
+        """
+        SELECT table_name, column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = ANY($1::text[])
+          AND (column_name = 'partition_timestamp'
+               OR column_name LIKE '%_partition_timestamp')
+        """,
+        [
+            *RUNTIME_TABLES,
+            "ingestion_dedup_keys",
+            "alert_instances",
+            "incident_alerts",
+            "hypothesis_evidence",
+        ],
+    )
+    assert not helper_columns
+
+    foreign_keys = await connection.fetch(
+        """
+        SELECT source.relname AS source_table,
+               target.relname AS target_table,
+               array_length(con.conkey, 1) AS source_key_count,
+               array_length(con.confkey, 1) AS target_key_count
+        FROM pg_constraint AS con
+        JOIN pg_class AS source ON source.oid = con.conrelid
+        JOIN pg_class AS target ON target.oid = con.confrelid
+        WHERE con.contype = 'f'
+        """
+    )
+    assert {
+        ("alert_events", "webhook_deliveries", 1, 1),
+        ("ingestion_dedup_keys", "webhook_deliveries", 1, 1),
+        ("alert_instances", "alert_events", 1, 1),
+        ("incident_alerts", "alert_events", 1, 1),
+        ("hypothesis_evidence", "evidence_records", 1, 1),
+    } <= {
+        (
+            row["source_table"],
+            row["target_table"],
+            row["source_key_count"],
+            row["target_key_count"],
+        )
+        for row in foreign_keys
     }
 
 
@@ -711,82 +670,62 @@ async def test_required_uniqueness_indexes_exist(connection):
 
 
 @pytest.mark.asyncio
-async def test_ensure_monthly_partitions_is_idempotent_with_exclusive_upper_bound(
-    connection,
-):
-    await ensure_monthly_partitions(connection, date(2031, 12, 1))
-    await ensure_monthly_partitions(connection, date(2031, 12, 17))
-
-    for table_name in PARTITIONED_TABLES:
-        partition_name = f"{table_name}_2031_12"
-        bound = await connection.fetchval(
-            """
-            SELECT pg_get_expr(c.relpartbound, c.oid)
-            FROM pg_class AS c
-            JOIN pg_namespace AS n ON n.oid = c.relnamespace
-            WHERE n.nspname = 'public' AND c.relname = $1
-            """,
-            partition_name,
-        )
-        assert bound == (
-            "FOR VALUES FROM ('2031-12-01 00:00:00+00') TO ('2032-01-01 00:00:00+00')"
-        )
-
-
-@pytest.mark.asyncio
-async def test_partition_maintenance_rejects_same_name_ordinary_table(connection):
-    transaction = connection.transaction()
-    await transaction.start()
-    try:
-        await connection.execute(
-            "CREATE TABLE public.alert_events_2035_01 (placeholder integer)"
-        )
-
-        with pytest.raises(RuntimeError, match="partition drift"):
-            await ensure_monthly_partitions(connection, date(2035, 1, 1))
-    finally:
-        await transaction.rollback()
-
-
-@pytest.mark.asyncio
-async def test_partition_maintenance_rejects_partition_attached_to_wrong_parent(
-    connection,
-):
-    transaction = connection.transaction()
-    await transaction.start()
-    try:
-        await connection.execute(
-            """
-            CREATE TABLE public.alert_events_2035_02
-            PARTITION OF public.audit_events
-            FOR VALUES FROM ('2035-02-01 00:00:00+00')
-                         TO ('2035-03-01 00:00:00+00')
-            """
-        )
-
-        with pytest.raises(RuntimeError, match="partition drift"):
-            await ensure_monthly_partitions(connection, date(2035, 2, 1))
-    finally:
-        await transaction.rollback()
-
-
-@pytest.mark.asyncio
-async def test_partition_maintenance_rejects_wrong_bounds_on_expected_parent(
-    connection,
-):
-    transaction = connection.transaction()
-    await transaction.start()
-    try:
-        await connection.execute(
-            """
-            CREATE TABLE public.alert_events_2035_03
-            PARTITION OF public.alert_events
-            FOR VALUES FROM ('2035-03-02 00:00:00+00')
-                         TO ('2035-04-01 00:00:00+00')
-            """
-        )
-
-        with pytest.raises(RuntimeError, match="partition drift"):
-            await ensure_monthly_partitions(connection, date(2035, 3, 1))
-    finally:
-        await transaction.rollback()
+async def test_runtime_table_business_indexes_are_preserved(connection):
+    rows = await connection.fetch(
+        """
+        SELECT index_class.relname AS index_name,
+               table_class.relname AS table_name,
+               array_agg(attribute.attname ORDER BY index_key.ordinality) AS columns
+        FROM pg_index AS index_metadata
+        JOIN pg_class AS index_class ON index_class.oid = index_metadata.indexrelid
+        JOIN pg_class AS table_class ON table_class.oid = index_metadata.indrelid
+        JOIN pg_namespace AS namespace ON namespace.oid = table_class.relnamespace
+        CROSS JOIN LATERAL unnest(index_metadata.indkey)
+            WITH ORDINALITY AS index_key(attnum, ordinality)
+        JOIN pg_attribute AS attribute
+          ON attribute.attrelid = table_class.oid
+         AND attribute.attnum = index_key.attnum
+        WHERE namespace.nspname = 'public'
+          AND index_class.relname = ANY($1::text[])
+        GROUP BY index_class.relname, table_class.relname, index_metadata.indexrelid
+        """,
+        [
+            "ix_webhook_deliveries_source_received",
+            "ix_alert_events_source_fingerprint_observed",
+            "ix_alert_instances_state_last_seen",
+            "ix_evidence_records_run_observed",
+            "ix_incident_messages_incident_created",
+            "ix_incident_timeline_incident_occurred",
+            "ix_audit_events_resource_occurred",
+        ],
+    )
+    assert {row["index_name"]: (row["table_name"], row["columns"]) for row in rows} == {
+        "ix_webhook_deliveries_source_received": (
+            "webhook_deliveries",
+            ["source_id", "received_at"],
+        ),
+        "ix_alert_events_source_fingerprint_observed": (
+            "alert_events",
+            ["source_id", "fingerprint", "observed_at"],
+        ),
+        "ix_alert_instances_state_last_seen": (
+            "alert_instances",
+            ["state", "last_seen_at"],
+        ),
+        "ix_evidence_records_run_observed": (
+            "evidence_records",
+            ["rca_run_id", "observed_at"],
+        ),
+        "ix_incident_messages_incident_created": (
+            "incident_messages",
+            ["incident_id", "created_at"],
+        ),
+        "ix_incident_timeline_incident_occurred": (
+            "incident_timeline_events",
+            ["incident_id", "occurred_at"],
+        ),
+        "ix_audit_events_resource_occurred": (
+            "audit_events",
+            ["resource_type", "resource_id", "occurred_at"],
+        ),
+    }
