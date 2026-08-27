@@ -23,6 +23,10 @@ from sre_agent.application.alerts.ingest_grafana_alerts import (
     IngestionResult,
     StaticClassifierProvider,
 )
+from sre_agent.application.outbox.publish_events import (
+    OutboxPublishResult,
+    PublishResultCode,
+)
 from sre_agent.domain.alerts.classification import ClassificationResult
 from sre_agent.integrations.grafana.authenticator import GrafanaUnauthorized
 from sre_agent.integrations.grafana.payloads import (
@@ -34,8 +38,11 @@ from sre_agent.persistence.repositories.alerts import (
     SourceScope,
     StoredAlertEvent,
 )
-from sre_agent.persistence.repositories.incidents import IncidentRepository
-from sre_agent.persistence.repositories.jobs import JobRepository
+from sre_agent.persistence.repositories.incidents import (
+    IncidentRepository,
+    IncidentSelection,
+)
+from sre_agent.persistence.repositories.jobs import JobRepository, RcaWorkCreation
 
 SOURCE_ID = UUID("50000000-0000-0000-0000-000000000001")
 DELIVERY_ID = UUID("60000000-0000-0000-0000-000000000001")
@@ -43,6 +50,8 @@ ACCEPTED_AT = datetime(2026, 8, 12, 2, 0, 1, tzinfo=UTC)
 TEAM_ID = UUID("10000000-0000-0000-0000-000000000001")
 PROJECT_ID = UUID("20000000-0000-0000-0000-000000000001")
 ENVIRONMENT_ID = UUID("30000000-0000-0000-0000-000000000001")
+INCIDENT_ID = UUID("80000000-0000-0000-0000-000000000001")
+OUTBOX_EVENT_ID = UUID("90000000-0000-0000-0000-000000000001")
 VALID_BODY = json.dumps(
     {
         "status": "firing",
@@ -182,11 +191,78 @@ class NeverClassifier:
         )
 
 
-def _real_ingestion(uow: ObservableFakeUnitOfWork) -> IngestGrafanaAlerts:
+class NewIncidentAlertRepository(FakeAlertRepository):
+    async def claim_dedup_key(self, **values: Any) -> bool:
+        assert values["delivery_id"] == DELIVERY_ID
+        return True
+
+    async def add_event(self, **values: Any) -> StoredAlertEvent:
+        return StoredAlertEvent(
+            id=UUID("70000000-0000-0000-0000-000000000001"),
+            partition_timestamp=values["received_at"],
+        )
+
+    async def upsert_instance(self, **values: Any) -> None:
+        del values
+
+    async def finish_delivery(self, **values: Any) -> None:
+        assert values["status"] == "VALIDATION_FAILED"
+        self.delivery_finished = True
+
+
+class NewIncidentRepository:
+    async def latest_resolved(self, *args: Any, **values: Any) -> None:
+        del args, values
+
+    async def get_or_create_active(self, **values: Any) -> IncidentSelection:
+        assert values["opened_at"].tzinfo is UTC
+        return IncidentSelection(INCIDENT_ID, created=True)
+
+    async def link_alert(self, *args: Any, **values: Any) -> None:
+        del args, values
+
+    async def set_alert_state(self, *args: Any, **values: Any) -> None:
+        del args, values
+
+
+class NewIncidentJobRepository:
+    async def create_rca_work(self, **values: Any) -> RcaWorkCreation:
+        assert values["incident_id"] == INCIDENT_ID
+        return RcaWorkCreation(INCIDENT_ID, OUTBOX_EVENT_ID)
+
+
+class CommitAwareUnitOfWork(ObservableFakeUnitOfWork):
+    def __init__(self, *, fail_commit: bool = False) -> None:
+        super().__init__(fail_commit=fail_commit)
+        self.alert_repository = NewIncidentAlertRepository()
+        self.alerts = cast(AlertRepository, self.alert_repository)
+        self.incidents = cast(IncidentRepository, NewIncidentRepository())
+        self.jobs = cast(JobRepository, NewIncidentJobRepository())
+
+
+class CommitAwarePublisher:
+    def __init__(self, uow: CommitAwareUnitOfWork, *, fail: bool = False) -> None:
+        self._uow = uow
+        self._fail = fail
+        self.event_ids: list[UUID] = []
+
+    async def publish_event(self, event_id: UUID) -> OutboxPublishResult:
+        assert self._uow.commit_completed
+        self.event_ids.append(event_id)
+        if self._fail:
+            raise RuntimeError("publisher unavailable")
+        return OutboxPublishResult(event_id, "PENDING", PublishResultCode.PUBLISHED)
+
+
+def _real_ingestion(
+    uow: ObservableFakeUnitOfWork,
+    publisher: CommitAwarePublisher | None = None,
+) -> IngestGrafanaAlerts:
     return IngestGrafanaAlerts(
         uow_factory=lambda: uow,
         classifier_provider=StaticClassifierProvider(NeverClassifier()),
         max_body_bytes=1_048_576,
+        outbox_publish_service=publisher,
     )
 
 
@@ -545,6 +621,42 @@ async def test_thin_http_boundary_completes_under_two_seconds_with_fakes() -> No
 
 
 @pytest.mark.asyncio
+async def test_webhook_publishes_new_event_only_after_commit() -> None:
+    authenticator = RecordingAuthenticator()
+    uow = CommitAwareUnitOfWork()
+    publisher = CommitAwarePublisher(uow)
+    ingestion = _real_ingestion(uow, publisher)
+
+    async with _client(authenticator, ingestion) as (client, _):
+        response = await client.post(
+            f"/webhooks/v1/grafana/{SOURCE_ID}",
+            content=VALID_BODY,
+            headers=_headers("post-commit-publish"),
+        )
+
+    assert response.status_code == 202
+    assert publisher.event_ids == [OUTBOX_EVENT_ID]
+
+
+@pytest.mark.asyncio
+async def test_publish_failure_still_returns_accepted_response() -> None:
+    authenticator = RecordingAuthenticator()
+    uow = CommitAwareUnitOfWork()
+    publisher = CommitAwarePublisher(uow, fail=True)
+    ingestion = _real_ingestion(uow, publisher)
+
+    async with _client(authenticator, ingestion) as (client, _):
+        response = await client.post(
+            f"/webhooks/v1/grafana/{SOURCE_ID}",
+            content=VALID_BODY,
+            headers=_headers("publish-failure"),
+        )
+
+    assert response.status_code == 202
+    assert publisher.event_ids == [OUTBOX_EVENT_ID]
+
+
+@pytest.mark.asyncio
 async def test_commit_failure_never_returns_an_accepted_response() -> None:
     authenticator = RecordingAuthenticator()
     uow = ObservableFakeUnitOfWork(fail_commit=True)
@@ -562,3 +674,21 @@ async def test_commit_failure_never_returns_an_accepted_response() -> None:
     assert not uow.commit_completed
     assert problem["detail"] == "An unexpected error occurred."
     assert "sensitive state" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_commit_failure_never_attempts_new_event_publish() -> None:
+    authenticator = RecordingAuthenticator()
+    uow = CommitAwareUnitOfWork(fail_commit=True)
+    publisher = CommitAwarePublisher(uow)
+    ingestion = _real_ingestion(uow, publisher)
+
+    async with _client(authenticator, ingestion) as (client, _):
+        response = await client.post(
+            f"/webhooks/v1/grafana/{SOURCE_ID}",
+            content=VALID_BODY,
+            headers=_headers("commit-failure-no-publish"),
+        )
+
+    _assert_problem(response, status=500, title="Internal server error")
+    assert publisher.event_ids == []

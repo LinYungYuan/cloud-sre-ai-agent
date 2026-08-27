@@ -5,6 +5,7 @@ from uuid import UUID
 
 import httpx
 import pytest
+from google.auth.credentials import AnonymousCredentials
 from pydantic import AnyHttpUrl, SecretStr, TypeAdapter
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -12,6 +13,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sre_agent.api import composition
 from sre_agent.api.main import create_app
 from sre_agent.config.settings import Settings
+from sre_agent.integrations.pubsub import publisher as pubsub_publisher
+from sre_agent.integrations.pubsub.messages import RcaJobMessage
 
 SOURCE_ID = UUID("58000000-0000-0000-0000-000000000001")
 TEAM_ID = UUID("18000000-0000-0000-0000-000000000001")
@@ -26,6 +29,46 @@ DATABASE_URL = os.getenv(
 EXAMPLE = (
     Path(__file__).resolve().parents[4] / "contracts/examples/grafana-firing-aws.json"
 ).read_bytes()
+
+
+class _PublishFuture:
+    def result(self) -> str:
+        return "published-message"
+
+
+class RecordingPublisherClient:
+    def __init__(self) -> None:
+        self.messages: list[tuple[str, bytes, dict[str, str]]] = []
+        self.stopped = False
+
+    def topic_path(self, project_id: str, topic_id: str) -> str:
+        return f"projects/{project_id}/topics/{topic_id}"
+
+    def publish(self, topic: str, data: bytes, **attributes: str) -> _PublishFuture:
+        self.messages.append((topic, data, attributes))
+        return _PublishFuture()
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+def test_local_emulator_client_uses_explicit_endpoint_and_anonymous_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    constructed: dict[str, object] = {}
+
+    class FakePublisherClient:
+        def __init__(self, **values: object) -> None:
+            constructed.update(values)
+
+    monkeypatch.setattr(
+        pubsub_publisher.pubsub_v1, "PublisherClient", FakePublisherClient
+    )
+
+    pubsub_publisher.create_publisher_client("127.0.0.1:58085")
+
+    assert isinstance(constructed["credentials"], AnonymousCredentials)
+    assert constructed["client_options"].api_endpoint == "127.0.0.1:58085"
 
 
 @pytest.mark.asyncio
@@ -79,6 +122,7 @@ async def test_production_resources_accept_and_commit_without_dependency_overrid
         grafana_tokens={SOURCE_ID: {"current-2026-08": SecretStr("accepted-token")}},
         pubsub_project_id="local-project",
         rca_topic_id="rca-jobs",
+        pubsub_emulator_host="127.0.0.1:58085",
         app_environment="local",
         model_name="test-model",
         metrics_mcp_url=HTTP_URL.validate_python("https://gateway/gcp/metrics/mcp"),
@@ -86,6 +130,7 @@ async def test_production_resources_accept_and_commit_without_dependency_overrid
         log_mcp_url=HTTP_URL.validate_python("https://gateway/gcp/log/mcp"),
     )
     readiness_statements: list[str] = []
+    publisher_client = RecordingPublisherClient()
 
     def capture_statement(_, __, statement, ___, ____, _____) -> None:
         if statement.strip() == "SELECT 1":
@@ -93,6 +138,16 @@ async def test_production_resources_accept_and_commit_without_dependency_overrid
 
     event.listen(engine.sync_engine, "before_cursor_execute", capture_statement)
     monkeypatch.setattr(composition, "create_async_engine", lambda _: engine)
+
+    def build_publisher_client(host: str | None) -> RecordingPublisherClient:
+        assert host == "127.0.0.1:58085"
+        return publisher_client
+
+    monkeypatch.setattr(
+        composition,
+        "create_publisher_client",
+        build_publisher_client,
+    )
     app = create_app(settings_factory=lambda: settings)
     assert app.dependency_overrides == {}
 
@@ -147,6 +202,11 @@ async def test_production_resources_accept_and_commit_without_dependency_overrid
         assert readiness_statements == ["SELECT 1"]
         assert elapsed < 2
         assert artifact_counts == (1, 1, 1, 1)
+        assert len(publisher_client.messages) == 1
+        topic, payload, attributes = publisher_client.messages[0]
+        message = RcaJobMessage.from_bytes(payload)
+        assert topic == "projects/local-project/topics/rca-jobs"
+        assert attributes == {"idempotencyKey": f"rca-run:{message.rca_run_id}"}
         assert incident_response.status_code == 200
         assert incident_response.json()["provider"] == "AWS"
         assert incident_response.json()["folderCode"] == "COM-LX-BOA-01"
@@ -176,5 +236,6 @@ async def test_production_resources_accept_and_commit_without_dependency_overrid
         assert delivery["raw_body"] == EXAMPLE
         assert delivery["token_id"] == "current-2026-08"
         assert delivery["status"] == "PROCESSED"
+        assert publisher_client.stopped
     finally:
         await engine.dispose()

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from time import perf_counter
 from typing import Protocol
 from uuid import UUID
 
+from sre_agent.application.outbox.publish_events import (
+    OutboxPublishResult,
+    PublishResultCode,
+)
 from sre_agent.domain.alerts.fingerprint import hash_raw_body
 from sre_agent.domain.alerts.identity import make_incident_identity_v2
 from sre_agent.domain.alerts.models import AlertState
@@ -21,6 +27,8 @@ from sre_agent.integrations.grafana.payloads import parse_grafana_body
 from sre_agent.persistence.repositories.incidents import IncidentScope
 from sre_agent.persistence.unit_of_work import UnitOfWork
 
+logger = logging.getLogger(__name__)
+
 
 class NormalizationRuleProvider(Protocol):
     def for_source(self, source_id: UUID) -> SafeRuleEngine: ...
@@ -28,6 +36,10 @@ class NormalizationRuleProvider(Protocol):
 
 class FolderScopeProvider(Protocol):
     def resolve(self, source_id: UUID, folder_code: str | None) -> IncidentScope: ...
+
+
+class OutboxEventPublisher(Protocol):
+    async def publish_event(self, event_id: UUID) -> OutboxPublishResult: ...
 
 
 class StaticClassifierProvider:
@@ -54,6 +66,7 @@ class IngestionResult:
     delivery_id: UUID
     accepted_at: datetime
     incident_ids: tuple[UUID, ...]
+    outbox_event_ids: tuple[UUID, ...] = ()
 
 
 class IngestGrafanaAlerts:
@@ -65,6 +78,7 @@ class IngestGrafanaAlerts:
         normalization_rule_provider: NormalizationRuleProvider | None = None,
         folder_scope_provider: FolderScopeProvider | None = None,
         classifier_provider: object | None = None,
+        outbox_publish_service: OutboxEventPublisher | None = None,
     ) -> None:
         del classifier_provider
         self._uow_factory = uow_factory
@@ -75,6 +89,7 @@ class IngestGrafanaAlerts:
             folder_scope_provider or _EmptyFolderScopeProvider()
         )
         self._max_body_bytes = max_body_bytes
+        self._outbox_publish_service = outbox_publish_service
 
     async def execute(
         self,
@@ -96,6 +111,7 @@ class IngestGrafanaAlerts:
             raise ValueError("Grafana raw alert list does not match normalized events")
 
         incident_ids: list[UUID] = []
+        outbox_event_ids: list[UUID] = []
         async with self._uow_factory() as uow:
             body_hash = hash_raw_body(raw_body)
             delivery_id = await uow.alerts.create_delivery(
@@ -174,11 +190,13 @@ class IngestGrafanaAlerts:
                             incident_id, AlertState.FIRING.value, accepted_at
                         )
                     else:
-                        await uow.jobs.create_rca_work(
+                        rca_work = await uow.jobs.create_rca_work(
                             incident_id=incident_id,
                             run_status="QUEUED",
                             available_at=accepted_at,
                         )
+                        if rca_work.outbox_event_id is not None:
+                            outbox_event_ids.append(rca_work.outbox_event_id)
                 else:
                     incident_id = await uow.incidents.lock_latest(
                         identity.key, identity.version
@@ -203,7 +221,51 @@ class IngestGrafanaAlerts:
                 processed_at=accepted_at,
             )
 
-        return IngestionResult(delivery_id, accepted_at, tuple(incident_ids))
+        result = IngestionResult(
+            delivery_id,
+            accepted_at,
+            tuple(incident_ids),
+            tuple(outbox_event_ids),
+        )
+        await self._publish_new_events(result)
+        return result
+
+    async def _publish_new_events(self, result: IngestionResult) -> None:
+        if self._outbox_publish_service is None:
+            return
+        for event_id in result.outbox_event_ids:
+            started_at = perf_counter()
+            try:
+                publish_result = await self._outbox_publish_service.publish_event(
+                    event_id
+                )
+            except Exception:  # noqa: BLE001 -- webhook success is already durable
+                logger.info(
+                    "ingestion_outbox_publish",
+                    extra={
+                        "delivery_id": str(result.delivery_id),
+                        "event_id": str(event_id),
+                        "attempted": True,
+                        "succeeded": False,
+                        "failed": True,
+                        "failure_category": "PUBLISH_EXCEPTION",
+                        "latency_ms": round((perf_counter() - started_at) * 1000, 3),
+                    },
+                )
+                continue
+            failed = publish_result.result is PublishResultCode.FAILED
+            logger.info(
+                "ingestion_outbox_publish",
+                extra={
+                    "delivery_id": str(result.delivery_id),
+                    "event_id": str(event_id),
+                    "attempted": True,
+                    "succeeded": not failed,
+                    "failed": failed,
+                    "failure_category": publish_result.failure_category,
+                    "latency_ms": round((perf_counter() - started_at) * 1000, 3),
+                },
+            )
 
 
 def _title(event: CanonicalAlertEvent) -> str:

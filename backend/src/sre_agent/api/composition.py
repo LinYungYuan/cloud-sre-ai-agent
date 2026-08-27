@@ -16,10 +16,15 @@ from sre_agent.application.operator.read_models import (
     UnavailableOperatorIdentityProvider,
     UnavailableOperatorReadService,
 )
+from sre_agent.application.outbox.publish_events import OutboxPublishService
 from sre_agent.config.settings import Settings
 from sre_agent.integrations.grafana.authenticator import (
     ConfiguredGrafanaSecretProvider,
     GrafanaTokenAuthenticator,
+)
+from sre_agent.integrations.pubsub.publisher import (
+    GooglePubSubPublisher,
+    create_publisher_client,
 )
 from sre_agent.persistence.repositories.normalization import (
     FolderScopeProvider,
@@ -43,6 +48,7 @@ class RuntimeResources:
     folder_scope_provider: FolderScopeProvider
     readiness_check: ReadinessCheck
     operator_reads: OperatorReadService | None = None
+    outbox_publish_service: OutboxPublishService | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +71,8 @@ class ResourceFactory(Protocol):
 async def production_resources(settings: Settings) -> AsyncIterator[RuntimeResources]:
     engine = create_async_engine(settings.database_url.get_secret_value())
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    publisher_client = create_publisher_client(settings.pubsub_emulator_host)
+    topic = publisher_client.topic_path(settings.pubsub_project_id, settings.rca_topic_id)
 
     async def readiness_check() -> None:
         async with engine.connect() as connection:
@@ -81,8 +89,14 @@ async def production_resources(settings: Settings) -> AsyncIterator[RuntimeResou
             folder_scope_provider=folders,
             readiness_check=readiness_check,
             operator_reads=SqlAlchemyOperatorReadRepository(session_factory),
+            outbox_publish_service=OutboxPublishService(
+                session_factory,
+                GooglePubSubPublisher(publisher_client),
+                topic,
+            ),
         )
     finally:
+        publisher_client.stop()
         await engine.dispose()
 
 
@@ -108,6 +122,7 @@ def compose_services(
             normalization_rule_provider=resources.normalization_rule_provider,
             folder_scope_provider=resources.folder_scope_provider,
             max_body_bytes=settings.webhook_max_body_bytes,
+            outbox_publish_service=resources.outbox_publish_service,
         ),
         operator_reads=operator_reads,
         operator_identity_provider=identity_provider,
