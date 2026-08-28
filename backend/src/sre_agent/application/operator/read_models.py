@@ -15,6 +15,14 @@ class OperatorIdentityUnavailable(RuntimeError):
     """Raised when no production operator identity provider is configured."""
 
 
+class OperatorUnauthenticated(PermissionError):
+    """Raised when an operator bearer credential is missing or rejected."""
+
+
+class OperatorForbidden(PermissionError):
+    """Raised when an authenticated operator lacks global recovery access."""
+
+
 class OperatorResourceNotFound(LookupError):
     """Raised for missing and unauthorized resources alike."""
 

@@ -1,8 +1,11 @@
+from pathlib import Path
+
 import pytest
 from pydantic import SecretStr, ValidationError
 
 import sre_rca_worker.config.settings as settings_module
 from sre_rca_worker.config.settings import WorkerSettings
+from sre_rca_worker.workers import rca_worker
 
 
 def _settings(**overrides):
@@ -24,6 +27,44 @@ def test_local_settings_allow_the_official_emulator_without_credentials() -> Non
 
     assert settings.pubsub_emulator_host == "127.0.0.1:58085"
     assert "app@db" not in repr(settings)
+
+
+def test_worker_retains_ai_mcp_and_budget_settings() -> None:
+    settings = _settings(
+        metrics_mcp_url="https://gateway/metrics",
+        trace_mcp_url="https://gateway/traces",
+        log_mcp_url="https://gateway/logs",
+        rca_deadline_seconds=47,
+    )
+
+    assert settings.model_name == "test-model"
+    assert settings.metrics_mcp_url == "https://gateway/metrics"
+    assert settings.trace_mcp_url == "https://gateway/traces"
+    assert settings.log_mcp_url == "https://gateway/logs"
+    assert settings.rca_deadline_seconds == 47
+
+
+def test_worker_startup_loader_reads_dedicated_env_file_with_os_precedence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = tmp_path / ".env.rca-worker"
+    env_file.write_text(
+        """DATABASE_URL=postgresql+asyncpg://file:file@db/sre
+PUBSUB_PROJECT_ID=file-project
+RCA_TOPIC_ID=file-topic
+PUBSUB_SUBSCRIPTION_ID=file-subscription
+APP_ENVIRONMENT=local
+MODEL_NAME=file-model
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("RCA_WORKER_ENV_FILE", str(env_file))
+    monkeypatch.setenv("MODEL_NAME", "os-model")
+
+    settings = rca_worker._load_settings()
+
+    assert settings.pubsub_project_id == "file-project"
+    assert settings.model_name == "os-model"
 
 
 def test_pubsub_auto_create_defaults_to_false() -> None:

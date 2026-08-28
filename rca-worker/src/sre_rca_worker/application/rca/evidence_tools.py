@@ -23,10 +23,7 @@ from sre_rca_worker.domain.evidence.chunking import (
 from sre_rca_worker.domain.evidence.errors import McpResultInvalidError
 from sre_rca_worker.domain.evidence.models import EvidenceDraft, EvidenceReference
 from sre_rca_worker.integrations.mcp.models import AllowedTool, SpecialistKind
-from sre_rca_worker.persistence.repositories.rca import (
-    AmbiguousEvidenceError,
-    PersistedEvidence,
-)
+from sre_rca_worker.persistence.repositories.rca import PersistedEvidence
 
 _MAX_MCP_CALLS = 5
 _MAX_CHUNK_CHARS = 8_000
@@ -158,9 +155,6 @@ class EvidenceToolSession:
             except McpResultInvalidError:
                 self._terminal_error_code = "MCP_RESULT_INVALID"
                 raise EvidenceToolError("MCP_RESULT_INVALID") from None
-            except AmbiguousEvidenceError:
-                self._terminal_error_code = "ANALYSIS_UNKNOWN_EVIDENCE"
-                raise EvidenceToolError("ANALYSIS_UNKNOWN_EVIDENCE") from None
             except (ConnectionError, OSError):
                 self._terminal_error_code = "MCP_TRANSPORT"
                 raise EvidenceToolError("MCP_TRANSPORT") from None
@@ -202,8 +196,6 @@ class EvidenceToolSession:
                 raise
             except TimeoutError:
                 raise EvidenceToolError("ANALYSIS_TIMEOUT") from None
-            except AmbiguousEvidenceError:
-                raise EvidenceToolError("ANALYSIS_UNKNOWN_EVIDENCE") from None
             except Exception:  # noqa: BLE001 - stable public failure boundary
                 raise EvidenceToolError("ANALYSIS_FAILED") from None
 

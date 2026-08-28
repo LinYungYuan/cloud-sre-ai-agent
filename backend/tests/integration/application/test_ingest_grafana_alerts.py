@@ -3,6 +3,7 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from types import TracebackType
 from uuid import UUID
 
 import pytest
@@ -10,7 +11,12 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from integration._disposable_database import disposable_database_url
 from sre_agent.application.alerts.ingest_grafana_alerts import IngestGrafanaAlerts
+from sre_agent.application.outbox.publish_events import (
+    OutboxPublishResult,
+    PublishResultCode,
+)
 from sre_agent.domain.alerts.normalization import (
     NormalizationRule,
     RuleCondition,
@@ -19,6 +25,7 @@ from sre_agent.domain.alerts.normalization import (
 )
 from sre_agent.domain.alerts.provider import Provider
 from sre_agent.persistence.repositories.incidents import IncidentScope
+from sre_agent.persistence.repositories.jobs import RcaWorkCreation
 from sre_agent.persistence.repositories.normalization import (
     FolderScopeProvider,
     NormalizationRuleProvider,
@@ -27,8 +34,9 @@ from sre_agent.persistence.unit_of_work import SqlAlchemyUnitOfWork
 
 DATABASE_URL = os.getenv(
     "MIGRATION_TEST_DATABASE_URL",
-    "postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent",
+    "postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent",
 )
+BACKEND_ROOT = Path(__file__).resolve().parents[3]
 ROOT = Path(__file__).resolve().parents[4]
 AWS_FIXTURE = (ROOT / "contracts/examples/grafana-firing-aws.json").read_bytes()
 GCP_FIXTURE = (ROOT / "contracts/examples/grafana-firing.json").read_bytes()
@@ -41,9 +49,54 @@ RECEIVED_AT = datetime(2026, 8, 13, 7, tzinfo=UTC)
 TOKEN_ID = "current-2026-08"
 
 
+class RecordingEventPublisher:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.event_ids: list[UUID] = []
+        self.fail = fail
+
+    async def publish_event(self, event_id: UUID) -> OutboxPublishResult:
+        self.event_ids.append(event_id)
+        if self.fail:
+            raise RuntimeError("publisher unavailable")
+        return OutboxPublishResult(event_id, "PENDING", PublishResultCode.PUBLISHED)
+
+
+class CommitThenInterruptUnitOfWork:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        interrupt_state: list[bool],
+    ) -> None:
+        self._inner = SqlAlchemyUnitOfWork(session_factory)
+        self._interrupt_state = interrupt_state
+
+    async def __aenter__(self) -> SqlAlchemyUnitOfWork:
+        return await self._inner.__aenter__()
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self._inner.__aexit__(exc_type, exc_value, traceback)
+        if exc_type is None and self._interrupt_state[0]:
+            self._interrupt_state[0] = False
+            raise RuntimeError("simulated response interruption after commit")
+
+
+@pytest_asyncio.fixture(scope="module")
+async def isolated_database_url():
+    """Create a post-0003 database instead of mutating a shared test database."""
+    async with disposable_database_url(
+        DATABASE_URL, prefix="task8_ingest", backend_root=BACKEND_ROOT
+    ) as database_url:
+        yield database_url
+
+
 @pytest_asyncio.fixture
-async def session_factory():
-    engine = create_async_engine(DATABASE_URL)
+async def session_factory(isolated_database_url: str):
+    engine = create_async_engine(isolated_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as connection:
         await connection.execute(text("TRUNCATE TABLE outbox_events, teams CASCADE"))
@@ -162,12 +215,14 @@ def _use_case(
     *,
     folders: FolderScopeProvider | None = None,
     uow_factory=None,
+    outbox_publisher: RecordingEventPublisher | None = None,
 ) -> IngestGrafanaAlerts:
     return IngestGrafanaAlerts(
         uow_factory=uow_factory or (lambda: SqlAlchemyUnitOfWork(session_factory)),
         normalization_rule_provider=_rule_provider(),
         folder_scope_provider=folders or FolderScopeProvider({}),
         max_body_bytes=1_048_576,
+        outbox_publish_service=outbox_publisher,
     )
 
 
@@ -329,6 +384,129 @@ async def test_duplicate_delivery_keeps_second_delivery_without_repeating_work(
 
 
 @pytest.mark.asyncio
+async def test_new_rca_event_is_published_after_ingestion_commit(
+    session_factory,
+) -> None:
+    publisher = RecordingEventPublisher()
+
+    result = await _use_case(session_factory, outbox_publisher=publisher).execute(
+        SOURCE_ID, TOKEN_ID, AWS_FIXTURE, RECEIVED_AT
+    )
+
+    outbox = await _rows(session_factory, "SELECT id FROM outbox_events")
+    assert result.outbox_event_ids == (outbox[0]["id"],)
+    assert publisher.event_ids == [outbox[0]["id"]]
+
+
+@pytest.mark.asyncio
+async def test_only_new_request_events_are_published_and_history_is_untouched(
+    session_factory,
+) -> None:
+    historical_pending = UUID("90000000-0000-0000-0000-000000000001")
+    historical_failed = UUID("90000000-0000-0000-0000-000000000002")
+    async with session_factory.begin() as session:
+        for event_id, status in (
+            (historical_pending, "PENDING"),
+            (historical_failed, "FAILED"),
+        ):
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO outbox_events (
+                        id, aggregate_type, aggregate_id, event_type, payload,
+                        idempotency_key, status, available_at, created_at
+                    ) VALUES (
+                        :id, 'INCIDENT', :aggregate_id, 'RCA_RUN_REQUESTED',
+                        '{}'::jsonb, :idempotency_key, :status,
+                        :available_at, :available_at
+                    )
+                    """
+                ),
+                {
+                    "id": event_id,
+                    "aggregate_id": UUID("90000000-0000-0000-0000-000000000010"),
+                    "idempotency_key": f"historical:{event_id}",
+                    "status": status,
+                    "available_at": RECEIVED_AT,
+                },
+            )
+    publisher = RecordingEventPublisher()
+
+    result = await _use_case(session_factory, outbox_publisher=publisher).execute(
+        SOURCE_ID, TOKEN_ID, AWS_FIXTURE, RECEIVED_AT
+    )
+
+    assert publisher.event_ids == list(result.outbox_event_ids)
+    assert await _rows(
+        session_factory,
+        "SELECT id, status FROM outbox_events "
+        "WHERE id IN ('90000000-0000-0000-0000-000000000001', "
+        "'90000000-0000-0000-0000-000000000002') ORDER BY id",
+    ) == [
+        {"id": historical_pending, "status": "PENDING"},
+        {"id": historical_failed, "status": "FAILED"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_delivery_does_not_republish_existing_rca_event(
+    session_factory,
+) -> None:
+    publisher = RecordingEventPublisher()
+    use_case = _use_case(session_factory, outbox_publisher=publisher)
+
+    first = await use_case.execute(SOURCE_ID, TOKEN_ID, AWS_FIXTURE, RECEIVED_AT)
+    second = await use_case.execute(SOURCE_ID, TOKEN_ID, AWS_FIXTURE, RECEIVED_AT)
+
+    assert len(first.outbox_event_ids) == 1
+    assert second.outbox_event_ids == ()
+    assert publisher.event_ids == list(first.outbox_event_ids)
+
+
+@pytest.mark.asyncio
+async def test_publish_failure_keeps_accepted_ingestion_result(
+    session_factory,
+) -> None:
+    publisher = RecordingEventPublisher(fail=True)
+
+    result = await _use_case(session_factory, outbox_publisher=publisher).execute(
+        SOURCE_ID, TOKEN_ID, AWS_FIXTURE, RECEIVED_AT
+    )
+
+    assert len(result.outbox_event_ids) == 1
+    assert publisher.event_ids == list(result.outbox_event_ids)
+    assert len(await _rows(session_factory, "SELECT id FROM rca_runs")) == 1
+
+
+@pytest.mark.asyncio
+async def test_redelivery_after_commit_before_response_does_not_create_second_rca_work(
+    session_factory,
+) -> None:
+    interrupt_state = [True]
+
+    def uow_factory() -> CommitThenInterruptUnitOfWork:
+        return CommitThenInterruptUnitOfWork(session_factory, interrupt_state)
+
+    publisher = RecordingEventPublisher()
+    use_case = _use_case(
+        session_factory,
+        uow_factory=uow_factory,
+        outbox_publisher=publisher,
+    )
+
+    with pytest.raises(RuntimeError, match="after commit"):
+        await use_case.execute(SOURCE_ID, TOKEN_ID, AWS_FIXTURE, RECEIVED_AT)
+
+    result = await use_case.execute(SOURCE_ID, TOKEN_ID, AWS_FIXTURE, RECEIVED_AT)
+
+    assert result.outbox_event_ids == ()
+    assert publisher.event_ids == []
+    assert len(await _rows(session_factory, "SELECT id FROM rca_runs")) == 1
+    assert len(await _rows(session_factory, "SELECT id FROM worker_jobs")) == 1
+    assert len(await _rows(session_factory, "SELECT id FROM outbox_events")) == 1
+
+
+@pytest.mark.asyncio
 async def test_identity_v2_groups_only_same_source_folder_and_alert_name(
     session_factory,
 ) -> None:
@@ -339,7 +517,8 @@ async def test_identity_v2_groups_only_same_source_folder_and_alert_name(
     other["alerts"][0]["fingerprint"] = "other-alert"
     other["alerts"][0]["labels"]["alertname"] = "Database connections high"
 
-    use_case = _use_case(session_factory)
+    publisher = RecordingEventPublisher()
+    use_case = _use_case(session_factory, outbox_publisher=publisher)
     await use_case.execute(SOURCE_ID, TOKEN_ID, _encode(first), RECEIVED_AT)
     await use_case.execute(SOURCE_ID, TOKEN_ID, _encode(update), RECEIVED_AT)
     await use_case.execute(SOURCE_ID, TOKEN_ID, _encode(other), RECEIVED_AT)
@@ -353,6 +532,7 @@ async def test_identity_v2_groups_only_same_source_folder_and_alert_name(
         {"alert_name": "High CPU usage", "identity_version": 2},
     ]
     assert len(await _rows(session_factory, "SELECT id FROM rca_runs")) == 2
+    assert len(publisher.event_ids) == 2
 
 
 @pytest.mark.asyncio
@@ -366,7 +546,8 @@ async def test_grouped_webhook_normalizes_each_alert_provider_independently(
     payload = _payload(AWS_FIXTURE)
     payload["alerts"] = [aws, gcp]
 
-    await _use_case(session_factory).execute(
+    publisher = RecordingEventPublisher()
+    result = await _use_case(session_factory, outbox_publisher=publisher).execute(
         SOURCE_ID, TOKEN_ID, _encode(payload), RECEIVED_AT
     )
 
@@ -377,6 +558,8 @@ async def test_grouped_webhook_normalizes_each_alert_provider_independently(
     assert [row["provider"] for row in events] == ["AWS", "GCP"]
     assert all(row["issue"].startswith("Account:") for row in events)
     assert len(await _rows(session_factory, "SELECT id FROM incidents")) == 2
+    assert len(result.outbox_event_ids) == 2
+    assert publisher.event_ids == list(result.outbox_event_ids)
 
 
 @pytest.mark.asyncio
@@ -408,7 +591,7 @@ class FailingJobRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def create_rca_work(self, **values) -> UUID:
+    async def create_rca_work(self, **values) -> RcaWorkCreation:
         del values
         raise RuntimeError("injected failure")
 
@@ -423,10 +606,15 @@ async def test_failure_after_incident_insert_rolls_back_every_artifact(
             jobs_repository_factory=FailingJobRepository,
         )
 
+    publisher = RecordingEventPublisher()
     with pytest.raises(RuntimeError, match="injected failure"):
-        await _use_case(session_factory, uow_factory=uow_factory).execute(
-            SOURCE_ID, TOKEN_ID, AWS_FIXTURE, RECEIVED_AT
-        )
+        await _use_case(
+            session_factory,
+            uow_factory=uow_factory,
+            outbox_publisher=publisher,
+        ).execute(SOURCE_ID, TOKEN_ID, AWS_FIXTURE, RECEIVED_AT)
+
+    assert publisher.event_ids == []
 
     for table in (
         "webhook_deliveries",

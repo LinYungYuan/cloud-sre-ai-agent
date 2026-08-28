@@ -13,6 +13,7 @@ dependencies = [
     "mcp>=2.0.0",
     "pydantic",
     "pydantic-settings",
+    "python-dotenv",
     "pyyaml",
     "sqlalchemy[asyncio]",
 ]

@@ -24,7 +24,6 @@ class SourceScope:
 @dataclass(frozen=True, slots=True)
 class StoredAlertEvent:
     id: UUID
-    partition_timestamp: datetime
 
 
 class AlertRepository(Protocol):
@@ -49,7 +48,6 @@ class AlertRepository(Protocol):
         source_id: UUID,
         dedup_key: str,
         delivery_id: UUID,
-        delivery_partition_timestamp: datetime,
     ) -> bool: ...
 
     async def add_event(
@@ -75,7 +73,6 @@ class AlertRepository(Protocol):
         self,
         *,
         delivery_id: UUID,
-        partition_timestamp: datetime,
         status: str,
         processed_at: datetime,
     ) -> None: ...
@@ -138,11 +135,11 @@ class SqlAlchemyAlertRepository:
             text(
                 """
                 INSERT INTO webhook_deliveries (
-                    id, partition_timestamp, received_at, source_id, token_id,
+                    id, received_at, source_id, token_id,
                     body_hash, raw_body, raw_payload, truncated_alerts,
                     incomplete, status
                 ) VALUES (
-                    :id, :received_at, :received_at, :source_id, :token_id,
+                    :id, :received_at, :source_id, :token_id,
                     :body_hash, :raw_body, CAST(:raw_payload AS jsonb),
                     :truncated_alerts, :incomplete, 'RECEIVED'
                 )
@@ -168,15 +165,14 @@ class SqlAlchemyAlertRepository:
         source_id: UUID,
         dedup_key: str,
         delivery_id: UUID,
-        delivery_partition_timestamp: datetime,
     ) -> bool:
         claimed = await self._session.scalar(
             text(
                 """
                 INSERT INTO ingestion_dedup_keys (
-                    source_id, dedup_key, delivery_id, delivery_partition_timestamp
+                    source_id, dedup_key, delivery_id
                 ) VALUES (
-                    :source_id, :dedup_key, :delivery_id, :partition_timestamp
+                    :source_id, :dedup_key, :delivery_id
                 )
                 ON CONFLICT (source_id, dedup_key) DO NOTHING
                 RETURNING id
@@ -186,7 +182,6 @@ class SqlAlchemyAlertRepository:
                 "source_id": source_id,
                 "dedup_key": dedup_key,
                 "delivery_id": delivery_id,
-                "partition_timestamp": delivery_partition_timestamp,
             },
         )
         return claimed is not None
@@ -206,16 +201,15 @@ class SqlAlchemyAlertRepository:
             text(
                 """
                 INSERT INTO alert_events (
-                    id, partition_timestamp, observed_at, source_id, delivery_id,
-                    delivery_partition_timestamp, fingerprint, alert_state,
+                    id, observed_at, source_id, delivery_id, fingerprint, alert_state,
                     validation_status, validation_errors, starts_at, ends_at,
                     labels, annotations, raw_payload, provider, folder_code,
                     alert_name, severity_raw, severity_canonical, issue,
                     resource, normalization_status, normalization_rule_id,
                     normalization_rule_version, normalization_warnings
                 ) VALUES (
-                    :id, :received_at, :received_at, :source_id, :delivery_id,
-                    :received_at, :fingerprint, :alert_state, :validation_status,
+                    :id, :received_at, :source_id, :delivery_id, :fingerprint,
+                    :alert_state, :validation_status,
                     CAST(:validation_errors AS jsonb), :starts_at, :ends_at,
                     CAST(:labels AS jsonb), CAST(:annotations AS jsonb),
                     CAST(:raw_payload AS jsonb), :provider, :folder_code,
@@ -279,7 +273,7 @@ class SqlAlchemyAlertRepository:
                 "normalization_warnings": _json(event.normalization_warnings),
             },
         )
-        return StoredAlertEvent(event_id, received_at)
+        return StoredAlertEvent(event_id)
 
     async def upsert_instance(
         self,
@@ -293,17 +287,15 @@ class SqlAlchemyAlertRepository:
             text(
                 """
                 INSERT INTO alert_instances (
-                    source_id, fingerprint, latest_event_id,
-                    latest_event_partition_timestamp, state, labels, annotations,
+                    source_id, fingerprint, latest_event_id, state, labels, annotations,
                     first_seen_at, last_seen_at, resolved_at
                 ) VALUES (
-                    :source_id, :fingerprint, :event_id, :partition_timestamp,
-                    :state, CAST(:labels AS jsonb), CAST(:annotations AS jsonb),
+                    :source_id, :fingerprint, :event_id, :state,
+                    CAST(:labels AS jsonb), CAST(:annotations AS jsonb),
                     :received_at, :received_at, :resolved_at
                 )
                 ON CONFLICT (source_id, fingerprint) DO UPDATE SET
                     latest_event_id = EXCLUDED.latest_event_id,
-                    latest_event_partition_timestamp = EXCLUDED.latest_event_partition_timestamp,
                     state = EXCLUDED.state,
                     labels = EXCLUDED.labels,
                     annotations = EXCLUDED.annotations,
@@ -316,7 +308,6 @@ class SqlAlchemyAlertRepository:
                 "source_id": event.source_id,
                 "fingerprint": event.fingerprint,
                 "event_id": stored_event.id,
-                "partition_timestamp": stored_event.partition_timestamp,
                 "state": event.status.value,
                 "labels": _json(_plain_json(event.labels)),
                 "annotations": _json(_plain_json(event.annotations)),
@@ -329,7 +320,6 @@ class SqlAlchemyAlertRepository:
         self,
         *,
         delivery_id: UUID,
-        partition_timestamp: datetime,
         status: str,
         processed_at: datetime,
     ) -> None:
@@ -339,13 +329,11 @@ class SqlAlchemyAlertRepository:
                 UPDATE webhook_deliveries
                 SET status = :status, processed_at = :processed_at
                 WHERE id = :delivery_id
-                  AND partition_timestamp = :partition_timestamp
                 """
             ),
             {
                 "status": status,
                 "processed_at": processed_at,
                 "delivery_id": delivery_id,
-                "partition_timestamp": partition_timestamp,
             },
         )

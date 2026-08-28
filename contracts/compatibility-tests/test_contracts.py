@@ -21,6 +21,9 @@ CONTRACT_PATH = ROOT / "contracts" / "openapi" / "grafana-webhook-v1.yaml"
 OPERATOR_CONTRACT_PATH = ROOT / "contracts" / "openapi" / "operator-api-v1.yaml"
 TABLE_OWNERSHIP_PATH = ROOT / "contracts" / "database" / "table-ownership.yaml"
 LOCAL_COMPOSE_PATH = ROOT / "docker-compose.yml"
+APPROVED_BACKEND_WORKER_TABLE_MIGRATIONS = frozenset(
+    {"0003_non_partition_runtime_tables.py"}
+)
 
 
 def _contract() -> dict:
@@ -53,6 +56,19 @@ def _write_example(root: Path, name: str, payload: dict) -> None:
     (root / "contracts" / "examples" / name).write_text(
         json.dumps(payload), encoding="utf-8"
     )
+
+
+def _assert_backend_migration_ownership(
+    migration_paths: list[Path], worker_owned: set[str]
+) -> None:
+    for migration_path in migration_paths:
+        if migration_path.name in APPROVED_BACKEND_WORKER_TABLE_MIGRATIONS:
+            continue
+        migration = migration_path.read_text(encoding="utf-8")
+        assert not any(
+            f'"{table_name}"' in migration or f"'{table_name}'" in migration
+            for table_name in worker_owned
+        ), f"{migration_path.name} touches an RCA Worker-owned table"
 
 
 def test_all_contracts_and_examples_are_valid():
@@ -276,6 +292,9 @@ def test_operator_contract_declares_every_approved_operation():
         ("/api/v1/rca-runs/{id}/trace-waterfall", "get"),
         ("/api/v1/rca-runs/{id}/evidence", "get"),
         ("/api/v1/rca-runs/{id}/hypotheses", "get"),
+        ("/api/v1/operations/outbox-events/retry-pending", "post"),
+        ("/api/v1/operations/outbox-events/retry-failed", "post"),
+        ("/api/v1/operations/outbox-events/{eventId}/retry", "post"),
     }
     actual_operations = {
         (path, method)
@@ -331,9 +350,17 @@ def test_trace_waterfall_contract_exposes_only_the_safe_trace_projection() -> No
 
 def test_operator_mutations_declare_a_concurrency_or_idempotency_header():
     contract = _operator_contract()
+    recovery_operations = {
+        ("/api/v1/operations/outbox-events/retry-pending", "post"),
+        ("/api/v1/operations/outbox-events/retry-failed", "post"),
+        ("/api/v1/operations/outbox-events/{eventId}/retry", "post"),
+    }
     for path, path_item in contract["paths"].items():
         for method in ("post", "patch", "delete"):
             if operation := path_item.get(method):
+                if (path, method) in recovery_operations:
+                    assert "requestBody" not in operation
+                    continue
                 parameter_names = {
                     _resolve_local_ref(contract, parameter)["name"]
                     for parameter in operation.get("parameters", [])
@@ -439,6 +466,64 @@ def test_operator_contract_locks_public_enums_errors_and_incident_etags():
     for operation in incident_operations:
         success = _resolve_local_ref(contract, operation["responses"]["200"])
         assert "ETag" in success["headers"]
+
+
+def test_operator_contract_locks_global_outbox_recovery_operations() -> None:
+    contract = _operator_contract()
+    paths = contract["paths"]
+    schemas = contract["components"]["schemas"]
+
+    event_path = "/api/v1/operations/outbox-events/{eventId}/retry"
+    pending_path = "/api/v1/operations/outbox-events/retry-pending"
+    failed_path = "/api/v1/operations/outbox-events/retry-failed"
+    assert {event_path, pending_path, failed_path} <= set(paths)
+
+    event_operation = paths[event_path]["post"]
+    assert "requestBody" not in event_operation
+    assert {"401", "403", "404", "503"} <= set(event_operation["responses"])
+    assert event_operation["responses"]["200"] == {
+        "description": "Stable recovery result without persisted event contents.",
+        "content": {
+            "application/json": {
+                "schema": {"$ref": "#/components/schemas/OutboxRetryEventResponse"}
+            }
+        },
+    }
+    for path in (pending_path, failed_path):
+        operation = paths[path]["post"]
+        assert "requestBody" not in operation
+        assert {"401", "403", "404", "503"} <= set(operation["responses"])
+        assert operation["parameters"] == [
+            {"$ref": "#/components/parameters/OutboxRecoveryLimit"}
+        ]
+        assert operation["responses"]["200"] == {
+            "description": "Stable aggregate recovery result without persisted event contents.",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "$ref": "#/components/schemas/OutboxRetryBatchResponse"
+                    }
+                }
+            },
+        }
+
+    assert set(schemas["OutboxRetryEventResponse"]["properties"]) == {
+        "eventId",
+        "previousStatus",
+        "result",
+        "failureCategory",
+    }
+    assert set(schemas["OutboxRetryBatchResponse"]["properties"]) == {
+        "selected",
+        "published",
+        "failed",
+        "noOp",
+        "failureCategories",
+    }
+    assert schemas["OutboxFailureCategory"]["enum"] == [
+        "INVALID_EVENT",
+        "PUBLISH_ERROR",
+    ]
 
 
 def test_operator_errors_are_problem_json_and_timestamps_are_utc_z():
@@ -577,12 +662,38 @@ def test_every_existing_table_has_one_migration_owner() -> None:
         for path in (ROOT / "backend" / "migrations" / "versions").glob("*.py")
         if not path.name.startswith("0001_")
     ]
-    for migration_path in future_backend_migrations:
-        migration = migration_path.read_text(encoding="utf-8")
-        assert not any(
-            f'"{table_name}"' in migration or f"'{table_name}'" in migration
-            for table_name in worker_owned
-        ), f"{migration_path.name} touches an RCA Worker-owned table"
+    assert APPROVED_BACKEND_WORKER_TABLE_MIGRATIONS == frozenset(
+        {"0003_non_partition_runtime_tables.py"}
+    )
+    _assert_backend_migration_ownership(future_backend_migrations, worker_owned)
+
+
+@pytest.mark.parametrize(
+    "migration_name",
+    [
+        "0004_future_backend_change.py",
+        "0003_non_partition_runtime_tables_copy.py",
+    ],
+)
+def test_migration_owner_rejects_every_other_backend_worker_table_change(
+    tmp_path: Path,
+    migration_name: str,
+) -> None:
+    migration_path = tmp_path / migration_name
+    migration_path.write_text(
+        'WORKER_TABLE = "evidence_records"\n'
+        'op.execute(f"ALTER TABLE {WORKER_TABLE} ADD COLUMN unsafe TEXT")',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match=f"{migration_name} touches an RCA Worker-owned table",
+    ):
+        _assert_backend_migration_ownership(
+            [migration_path],
+            {"evidence_records"},
+        )
 
 
 def test_dashboard_contract_covers_approved_operator_summary():

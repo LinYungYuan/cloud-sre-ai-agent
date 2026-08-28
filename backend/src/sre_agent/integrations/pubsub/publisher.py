@@ -4,6 +4,10 @@ import threading
 from collections.abc import Mapping
 from typing import Protocol
 
+from google.api_core.client_options import ClientOptions
+from google.auth.credentials import AnonymousCredentials
+from google.cloud import pubsub_v1
+
 
 class MessagePublisher(Protocol):
     def publish(
@@ -19,6 +23,18 @@ class PubSubClient(Protocol):
     def publish(
         self, topic: str, data: bytes, **attributes: str
     ) -> PublishFuture: ...
+
+
+def create_publisher_client(
+    pubsub_emulator_host: str | None,
+) -> pubsub_v1.PublisherClient:
+    """Create an explicit emulator client without mutating process environment."""
+    if pubsub_emulator_host is None:
+        return pubsub_v1.PublisherClient()
+    return pubsub_v1.PublisherClient(
+        credentials=AnonymousCredentials(),
+        client_options=ClientOptions(api_endpoint=pubsub_emulator_host),
+    )
 
 
 class GooglePubSubPublisher:

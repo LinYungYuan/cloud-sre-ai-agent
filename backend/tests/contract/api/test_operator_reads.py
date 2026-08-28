@@ -158,7 +158,9 @@ class FakeReads:
             "created_at": NOW,
         }
 
-    async def get_trace_waterfall(self, identity, rca_run_id):
+    async def get_trace_waterfall(
+        self, identity, rca_run_id
+    ) -> dict[str, Any]:
         assert identity.global_access
         self.trace_waterfall_run_ids.append(rca_run_id)
         return {
@@ -372,7 +374,9 @@ async def test_trace_waterfall_route_serializes_the_safe_camel_case_projection()
 @pytest.mark.asyncio
 async def test_trace_waterfall_route_serializes_an_absent_trace_as_null() -> None:
     class NoTraceReads(FakeReads):
-        async def get_trace_waterfall(self, identity, rca_run_id):
+        async def get_trace_waterfall(
+            self, identity, rca_run_id
+        ) -> dict[str, Any]:
             assert identity.global_access
             self.trace_waterfall_run_ids.append(rca_run_id)
             return {"trace": None}

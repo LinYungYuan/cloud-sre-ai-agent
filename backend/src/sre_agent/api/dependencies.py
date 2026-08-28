@@ -4,8 +4,10 @@ from sre_agent.api.composition import ApplicationServices, ReadinessCheck
 from sre_agent.application.alerts.ingest_grafana_alerts import IngestGrafanaAlerts
 from sre_agent.application.operator.read_models import (
     OperatorIdentityProvider,
+    OperatorIdentityUnavailable,
     OperatorReadService,
 )
+from sre_agent.application.outbox.recover_events import OutboxRecoveryService
 from sre_agent.integrations.grafana.authenticator import GrafanaTokenAuthenticator
 
 
@@ -30,6 +32,13 @@ def get_operator_identity_provider(request: Request) -> OperatorIdentityProvider
 
 def get_operator_read_service(request: Request) -> OperatorReadService:
     return _services(request).operator_reads
+
+
+def get_outbox_recovery_service(request: Request) -> OutboxRecoveryService:
+    service = _services(request).outbox_recovery_service
+    if service is None:
+        raise OperatorIdentityUnavailable("outbox recovery service is unavailable")
+    return service
 
 
 def get_readiness_check(request: Request) -> ReadinessCheck:

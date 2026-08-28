@@ -63,7 +63,6 @@ def _analysis_result(
 ) -> SpecialistAnalysisResult:
     reference = EvidenceReference(
         id=UUID(f"00000000-0000-0000-0000-{index:012d}"),
-        partition_timestamp=datetime(2026, 8, 25, 8, index, tzinfo=UTC),
     )
     return SpecialistAnalysisResult(
         analysis=SpecialistAnalysisDraft(
@@ -931,7 +930,7 @@ async def test_each_transport_attempt_builds_fresh_session_and_reuses_committed_
     now = datetime(2026, 8, 25, 10, 0, tzinfo=UTC)
     run_id = uuid4()
     specialist_run_id = uuid4()
-    reference = EvidenceReference(id=uuid4(), partition_timestamp=now)
+    reference = EvidenceReference(id=uuid4())
     request = SpecialistRequest(
         incident_id=uuid4(),
         rca_run_id=run_id,
@@ -1040,7 +1039,6 @@ async def test_evidence_bearing_legacy_processor_calls_only_explicit_legacy_root
     )
     reference = EvidenceReference(
         id=evidence_id,
-        partition_timestamp=now,
     )
     summaries: tuple[dict[str, object], ...] = (
         {

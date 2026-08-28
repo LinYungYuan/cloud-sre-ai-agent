@@ -3,14 +3,32 @@ from __future__ import annotations
 import asyncio
 import os
 from logging.config import fileConfig
+from pathlib import Path
 
 from alembic import context
+from dotenv import load_dotenv
 from sqlalchemy import MetaData, pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+
+def _load_migration_environment() -> None:
+    override_file = os.getenv("RCA_WORKER_MIGRATION_ENV_FILE")
+    environment_file = (
+        Path(override_file)
+        if override_file
+        else Path.cwd() / ".env.rca-worker-migration"
+    )
+    if override_file and not environment_file.is_file():
+        raise RuntimeError("Worker migration environment file is unavailable")
+    if environment_file.is_file():
+        load_dotenv(environment_file, override=False)
+
+
+_load_migration_environment()
 
 database_url = os.getenv("MIGRATION_TEST_DATABASE_URL") or os.getenv("DATABASE_URL")
 if database_url:

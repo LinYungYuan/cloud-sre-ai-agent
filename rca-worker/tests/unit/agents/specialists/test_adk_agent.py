@@ -45,11 +45,9 @@ from sre_rca_worker.integrations.mcp.models import (
 NOW = datetime(2026, 8, 24, 8, 0, tzinfo=UTC)
 OWNED = EvidenceReference(
     id=UUID("00000000-0000-0000-0000-000000000001"),
-    partition_timestamp=NOW,
 )
 UNKNOWN = EvidenceReference(
     id=UUID("00000000-0000-0000-0000-000000000099"),
-    partition_timestamp=NOW,
 )
 DEFINITIONS = (
     Path(__file__).resolve().parents[4] / "src/sre_rca_worker/agents/skills/definitions"
@@ -246,7 +244,6 @@ async def test_unknown_citation_gets_exactly_one_safe_correction() -> None:
     }
     assert first["allowedEvidenceReferenceFormat"] == {
         "id": "UUID",
-        "partitionTimestamp": "RFC3339",
     }
     assert first["outputLanguage"] == "zh-TW"
     assert first["constraints"] == {

@@ -4,6 +4,8 @@ import asyncio
 import signal
 from collections.abc import Awaitable, Callable
 
+from google.api_core.client_options import ClientOptions
+from google.auth.credentials import AnonymousCredentials
 from google.cloud import pubsub_v1
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -13,6 +15,7 @@ from sre_rca_worker.application.rca.job_lifecycle import (
     RcaJobHandler,
 )
 from sre_rca_worker.application.rca.processor import ProductionRcaProcessor
+from sre_rca_worker.config.env_files import resolve_worker_env_file
 from sre_rca_worker.config.settings import WorkerSettings
 from sre_rca_worker.integrations.pubsub.bootstrap import prepare_topic_and_subscription
 from sre_rca_worker.integrations.pubsub.messages import RcaJobMessage
@@ -33,6 +36,32 @@ async def settle_delivery(
         delivery.ack()
     else:
         delivery.nack()
+
+
+def _load_settings() -> WorkerSettings:
+    env_file = resolve_worker_env_file()
+    if env_file is None:
+        return WorkerSettings()  # pyright: ignore[reportCallIssue]
+    return WorkerSettings(_env_file=env_file)  # pyright: ignore[reportCallIssue]
+
+
+def _create_pubsub_clients(
+    settings: WorkerSettings,
+) -> tuple[pubsub_v1.PublisherClient, pubsub_v1.SubscriberClient]:
+    if settings.pubsub_emulator_host:
+        client_options = ClientOptions(api_endpoint=settings.pubsub_emulator_host)
+        credentials = AnonymousCredentials()
+        return (
+            pubsub_v1.PublisherClient(
+                client_options=client_options,
+                credentials=credentials,
+            ),
+            pubsub_v1.SubscriberClient(
+                client_options=client_options,
+                credentials=credentials,
+            ),
+        )
+    return pubsub_v1.PublisherClient(), pubsub_v1.SubscriberClient()
 
 
 def main(
@@ -70,7 +99,7 @@ def main(
 
 async def run_production(stop_event: asyncio.Event | None = None) -> None:
     shutdown = stop_event or asyncio.Event()
-    settings = WorkerSettings()  # pyright: ignore[reportCallIssue]
+    settings = _load_settings()
     engine = create_async_engine(settings.database_url.get_secret_value())
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     processor = ProductionRcaProcessor(sessions, settings)
@@ -80,8 +109,7 @@ async def run_production(stop_event: asyncio.Event | None = None) -> None:
         worker_id=settings.worker_id,
         deadline_seconds=settings.rca_deadline_seconds,
     )
-    publisher = pubsub_v1.PublisherClient()
-    subscriber = pubsub_v1.SubscriberClient()
+    publisher, subscriber = _create_pubsub_clients(settings)
     try:
         _, subscription = await asyncio.to_thread(
             prepare_topic_and_subscription,

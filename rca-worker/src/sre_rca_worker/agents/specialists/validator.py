@@ -53,12 +53,9 @@ class SpecialistAnalysisValidator:
         if len(validated.observations) > self._max_observations:
             raise SpecialistAnalysisValidationError("ANALYSIS_SCHEMA_INVALID")
 
-        owned = {
-            (reference.id, reference.partition_timestamp)
-            for reference in owned_evidence
-        }
+        owned = {reference.id for reference in owned_evidence}
         if any(
-            (reference.id, reference.partition_timestamp) not in owned
+            reference.id not in owned
             for observation in validated.observations
             for reference in observation.evidence
         ):

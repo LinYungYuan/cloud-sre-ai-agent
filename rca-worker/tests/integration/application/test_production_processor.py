@@ -87,13 +87,13 @@ async def test_aws_without_mcp_persists_honest_partial_report_without_copying_is
                 },
             ),
             (
-                """INSERT INTO webhook_deliveries(id,partition_timestamp,received_at,source_id,body_hash,raw_body,raw_payload,status)
-                VALUES (:delivery,:now,:now,:source,'hash','{}','{}','PROCESSED')""",
+                """INSERT INTO webhook_deliveries(id,received_at,source_id,body_hash,raw_body,raw_payload,status)
+                VALUES (:delivery,:now,:source,'hash','{}','{}','PROCESSED')""",
                 {"delivery": delivery, "now": now, "source": source},
             ),
             (
-                """INSERT INTO alert_events(id,partition_timestamp,observed_at,source_id,delivery_id,delivery_partition_timestamp,fingerprint,alert_state,starts_at,ends_at,labels,annotations,raw_payload,provider,folder_code,alert_name,severity_raw,severity_canonical,issue,resource,normalization_status)
-                VALUES (:event,:now,:now,:source,:delivery,:now,'fp','FIRING',:start,:now,'{}','{}','{}','AWS','COM-LX-BOA-01','High CPU','ERROR','SEV1',CAST(:issue AS JSONB),NULL,'UNCLASSIFIED')""",
+                """INSERT INTO alert_events(id,observed_at,source_id,delivery_id,fingerprint,alert_state,starts_at,ends_at,labels,annotations,raw_payload,provider,folder_code,alert_name,severity_raw,severity_canonical,issue,resource,normalization_status)
+                VALUES (:event,:now,:source,:delivery,'fp','FIRING',:start,:now,'{}','{}','{}','AWS','COM-LX-BOA-01','High CPU','ERROR','SEV1',CAST(:issue AS JSONB),NULL,'UNCLASSIFIED')""",
                 {
                     "event": event,
                     "now": now,
@@ -116,7 +116,7 @@ async def test_aws_without_mcp_persists_honest_partial_report_without_copying_is
                 },
             ),
             (
-                "INSERT INTO incident_alerts(incident_id,alert_event_id,alert_event_partition_timestamp) VALUES (:incident,:event,:now)",
+                "INSERT INTO incident_alerts(incident_id,alert_event_id) VALUES (:incident,:event)",
                 {"incident": incident, "event": event, "now": now},
             ),
             (
@@ -193,19 +193,19 @@ async def _seed_gcp_processor_run(
             ),
             (
                 """INSERT INTO webhook_deliveries(
-                       id,partition_timestamp,received_at,source_id,body_hash,
+                       id,received_at,source_id,body_hash,
                        raw_body,raw_payload,status)
-                   VALUES (:delivery,:now,:now,:source,'hash','{}','{}','PROCESSED')""",
+                   VALUES (:delivery,:now,:source,'hash','{}','{}','PROCESSED')""",
                 {"delivery": delivery, "now": now, "source": source},
             ),
             (
                 """INSERT INTO alert_events(
-                       id,partition_timestamp,observed_at,source_id,delivery_id,
-                       delivery_partition_timestamp,fingerprint,alert_state,starts_at,
+                       id,observed_at,source_id,delivery_id,
+                       fingerprint,alert_state,starts_at,
                        ends_at,labels,annotations,raw_payload,provider,folder_code,
                        alert_name,severity_raw,severity_canonical,issue,resource,
                        normalization_status)
-                   VALUES (:event,:now,:now,:source,:delivery,:now,'fp','FIRING',
+                   VALUES (:event,:now,:source,:delivery,'fp','FIRING',
                            :start,:now,'{}','{}','{}','GCP','COM-LX-BOA-01',
                            'High CPU','ERROR','SEV1',CAST(:issue AS JSONB),
                            CAST(:resource AS JSONB),'NORMALIZED')""",
@@ -237,7 +237,7 @@ async def _seed_gcp_processor_run(
                 },
             ),
             (
-                "INSERT INTO incident_alerts(incident_id,alert_event_id,alert_event_partition_timestamp) VALUES (:incident,:event,:now)",
+                "INSERT INTO incident_alerts(incident_id,alert_event_id) VALUES (:incident,:event)",
                 {"incident": incident, "event": event, "now": now},
             ),
             (
@@ -637,3 +637,214 @@ async def test_overlapping_specialist_branches_reserve_one_collection_until_anal
         tasks = (first,) if second is None else (first, second)
         await asyncio.gather(*tasks, return_exceptions=True)
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_uuid_only_evidence_round_trips_through_get_and_report() -> None:
+    """驗證 evidence 可透過 get_specialist_evidence 讀回，
+    EvidenceReference payload 只含 UUID-only 欄位，
+    hypothesis_evidence 正確建立，rca_reports 儲存 result_status。
+    """
+    from pydantic import SecretStr
+
+    engine = create_async_engine(DATABASE_URL)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    incident_id, run_id, now = await _seed_gcp_processor_run(sessions)
+    capabilities = CapabilitySet(
+        by_specialist={SpecialistKind.METRICS: (_integration_tool(SpecialistKind.METRICS),)}
+    )
+
+    collected_receipt: list[object] = []
+
+    class FakeClient:
+        async def call(
+            self, tool_name: str, arguments: object, deadline: datetime
+        ) -> bytes:
+            return b'{"value":42}'
+
+    class FakeSpecialistAgent:
+        async def analyze(self, **kwargs: object) -> SpecialistAnalysisDraft:
+            from typing import Any, cast
+
+            receipt = await cast(Any, kwargs["evidence_tools"]).collect_evidence()
+            collected_receipt.append(receipt)
+            # evidence reference payload 必須只含 id（UUID-only）
+            assert receipt.references, "evidence receipt 必須有至少一筆 reference"
+            for ref in receipt.references:
+                assert ref.model_dump(mode="json") == {"id": str(ref.id)}, (
+                    "EvidenceReference payload 不得含 partition helper 欄位"
+                )
+            return SpecialistAnalysisDraft(
+                specialist=SpecialistKind.METRICS,
+                status="COMPLETE",
+                observations=(
+                    SpecialistObservation(
+                        statement="metrics value elevated",
+                        confidence=0.85,
+                        relation="SUPPORTS",
+                        evidence=(receipt.references[0],),
+                    ),
+                ),
+            )
+
+    async def fake_discover(*args: object, **kwargs: object):
+        return capabilities, {SpecialistKind.METRICS: FakeClient()}
+
+    class FakeRootAgent:
+        async def synthesize(self, **kwargs: object) -> RcaReportDraft:
+            from typing import cast
+
+            references = cast(tuple[EvidenceReference, ...], kwargs["known_evidence"])
+            return RcaReportDraft(
+                status="COMPLETE",
+                summary_zh_tw="假根因：指標值升高。",
+                hypotheses=(
+                    RcaHypothesis(
+                        statement="metrics spike",
+                        confidence=0.85,
+                        claims=(
+                            EvidenceClaim(
+                                statement="value elevated",
+                                relation="SUPPORTS",
+                                evidence=(references[0],),
+                            ),
+                        ),
+                    ),
+                ),
+                missing_evidence=(),
+                remediation=("降低負載",),
+                verification_steps=("確認指標恢復",),
+            )
+
+    settings = WorkerSettings(
+        database_url=SecretStr(DATABASE_URL),
+        pubsub_project_id="local",
+        rca_topic_id="rca",
+        pubsub_subscription_id="worker",
+        app_environment="test",
+        model_name="test-uuid-model",
+        specialist_analysis_mode=SpecialistAnalysisMode.ACTIVE,
+    )
+    processor = ProductionRcaProcessor(
+        sessions,
+        settings,
+        root_agent_factory=lambda **kwargs: FakeRootAgent(),
+        specialist_agent_factory=lambda **kwargs: FakeSpecialistAgent(),
+    )
+
+    import sre_rca_worker.application.rca.processor as processor_module_local
+
+    original_discover = processor_module_local.discover_capabilities
+
+    async def patched_discover(*args: object, **kwargs: object):
+        return capabilities, {SpecialistKind.METRICS: FakeClient()}
+
+    processor_module_local.discover_capabilities = patched_discover  # type: ignore[assignment]
+    try:
+        claim = RcaJobClaim(
+            worker_job_id=uuid4(),
+            rca_run_id=run_id,
+            incident_id=incident_id,
+            attempt_number=1,
+            deadline_at=now + timedelta(minutes=5),
+            lease_owner="test",
+        )
+        result = await processor(claim)
+    finally:
+        processor_module_local.discover_capabilities = original_discover  # type: ignore[assignment]
+
+    assert result.status == "COMPLETE", f"processor 回傳非預期狀態：{result.status}"
+    assert collected_receipt, "FakeSpecialistAgent.analyze 未被呼叫"
+
+    # 驗證 DB 中的 evidence 可透過 get_specialist_evidence 讀回，且無 partition helper column
+    async with sessions() as session:
+        specialist_run_id_row = (
+            await session.execute(
+                text(
+                    "SELECT id FROM specialist_runs "
+                    "WHERE rca_run_id=:run AND specialist_type='METRICS'"
+                ),
+                {"run": run_id},
+            )
+        ).one_or_none()
+        assert specialist_run_id_row is not None, "specialist_run 必須存在"
+        specialist_run_id: UUID = specialist_run_id_row[0]
+
+        evidence_rows = (
+            await session.execute(
+                text(
+                    "SELECT id, raw_result, metadata, content_hash "
+                    "FROM evidence_records WHERE rca_run_id=:run"
+                ),
+                {"run": run_id},
+            )
+        ).mappings().all()
+        assert len(evidence_rows) == 1, "應有 1 筆 evidence_records"
+
+        ev_row = evidence_rows[0]
+        evidence_id: UUID = ev_row["id"]
+
+        # 確認 raw_result 是真實 bytes，不是 pointer 字串
+        assert isinstance(bytes(ev_row["raw_result"]), bytes), (
+            "raw_result 必須是 bytes，不能是 pointer 字串"
+        )
+        assert b'{"value":42}' == bytes(ev_row["raw_result"]), (
+            "raw_result 應完整保存原始 bytes"
+        )
+
+        # 確認無 partition helper column（透過 SELECT 不含這些欄位驗證）
+        column_names = [
+            col
+            for col in (
+                await session.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name='evidence_records'"
+                    )
+                )
+            ).scalars().all()
+        ]
+        for forbidden in (
+            "partition_timestamp",
+            "alert_event_partition_timestamp",
+            "evidence_partition_timestamp",
+            "raw_result_reference",
+        ):
+            assert forbidden not in column_names, (
+                f"evidence_records 不應含 partition helper column: {forbidden}"
+            )
+
+        # 驗證 get_specialist_evidence 可讀回
+        from sre_rca_worker.persistence.repositories.rca import RcaRepository
+
+        repo = RcaRepository(session)
+        persisted = await repo.get_specialist_evidence(
+            rca_run_id=run_id,
+            specialist_run_id=specialist_run_id,
+            evidence_id=evidence_id,
+        )
+        assert persisted is not None, "get_specialist_evidence 必須能讀回已存 evidence"
+        assert persisted.reference.id == evidence_id, "evidence reference id 不符"
+        # EvidenceReference payload 只含 id（UUID-only），不含 partition helper
+        dumped = persisted.reference.model_dump(mode="json")
+        assert dumped == {"id": str(evidence_id)}, (
+            f"EvidenceReference payload 應只含 {{id}}, 但得到 {dumped}"
+        )
+
+        # 驗證 rca_reports 有 result_status
+        report_row = (
+            await session.execute(
+                text(
+                    "SELECT result_status, version FROM rca_reports "
+                    "WHERE rca_run_id=:run"
+                ),
+                {"run": run_id},
+            )
+        ).one_or_none()
+        assert report_row is not None, "rca_reports 必須有一筆 report"
+        assert report_row[0] == "COMPLETE", (
+            f"rca_reports.result_status 應為 COMPLETE，但得到 {report_row[0]}"
+        )
+        assert report_row[1] == 1, "第一次 persist report，version 應為 1"
+
+    await engine.dispose()

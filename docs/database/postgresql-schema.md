@@ -55,19 +55,29 @@ Backend、RCA Worker 與兩套 Alembic migrations 共用同一個 application ro
 在 repository 根目錄以本機開發設定啟動 PostgreSQL 18：
 
 ```sh
-docker compose up -d postgres
-docker compose exec postgres pg_isready -U postgres -d sre_agent
-cd backend
-UV_CACHE_DIR=.uv-cache uv run alembic upgrade head
+docker compose --env-file .env.compose.example up -d postgres
+docker compose --env-file .env.compose.example exec -T postgres pg_isready -U postgres -d sre_agent
 ```
 
-`docker-compose.yml` 的本機資料庫是 `sre_agent`、使用者 `postgres`，透過 passwordless 的 `postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent` 連線。Compose 僅將 PostgreSQL 綁定在 loopback，且 `trust` 驗證僅限本機開發；不得複製到正式環境。若要在本機重建至 migration 前狀態，執行下列指令。**警告：`alembic downgrade base` 會刪除本 schema 的資料表與其中所有資料，只能用於可丟棄的本機資料庫。**
+`docker-compose.yml` 的本機資料庫是 `sre_agent`、使用者 `postgres`，透過 passwordless 的 `postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent` 連線。Compose 僅將 PostgreSQL 綁定在 loopback，且 `trust` 驗證僅限本機開發；不得複製到正式環境。
+
+套用 migration 時必須依序執行四個明確 revision 命令；每個命令完成後以唯讀查詢確認版本列，才能繼續執行下一步：
 
 ```sh
-cd backend
-UV_CACHE_DIR=.uv-cache uv run alembic downgrade base
-UV_CACHE_DIR=.uv-cache uv run alembic upgrade head
+(cd backend && BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0002_grafana_normalization_v2)
+(cd rca-worker && RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0002_adk_specialist_analysis)
+(cd backend && BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0003_non_partition_runtime_tables)
+(cd rca-worker && RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0003_validate_ordinary_runtime_tables)
 ```
+
+每個命令完成後可確認版本：
+
+```sql
+SELECT version_num FROM alembic_version_backend;
+SELECT version_num FROM alembic_version_rca_worker;
+```
+
+**警告**：Alembic downgrade 可能破壞資料或使兩條 migration stream 不一致；正式環境不得以 downgrade 取代備份復原。
 
 ## 共同規則
 
@@ -478,9 +488,10 @@ CREATE TABLE alert_events (
         REFERENCES webhook_deliveries(id, partition_timestamp)
 ) PARTITION BY RANGE (partition_timestamp)
 
+-- Backend 0003 轉換後的普通表（UUID-only primary key）
+-- 原分割母表保留為 evidence_records__partitioned_legacy_0003
 CREATE TABLE evidence_records (
-    id UUID NOT NULL DEFAULT gen_random_uuid(),
-    partition_timestamp TIMESTAMPTZ NOT NULL,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     observed_at TIMESTAMPTZ NOT NULL,
     rca_run_id UUID NOT NULL REFERENCES rca_runs(id),
     specialist_run_id UUID REFERENCES specialist_runs(id),
@@ -495,10 +506,11 @@ CREATE TABLE evidence_records (
     time_window_start TIMESTAMPTZ NOT NULL,
     time_window_end TIMESTAMPTZ NOT NULL,
     structured_data JSONB NOT NULL,
-    raw_result_reference TEXT NOT NULL,
+    raw_result BYTEA NOT NULL,
+    metadata JSONB NOT NULL,
     content_hash TEXT NOT NULL,
-    PRIMARY KEY (id, partition_timestamp),
     CHECK (time_window_end >= time_window_start),
+    CHECK (jsonb_typeof(metadata) = 'object'),
     CHECK (team_id IS NULL OR environment_id IS NULL OR project_id IS NOT NULL),
     CHECK (project_id IS NULL OR service_id IS NULL OR environment_id IS NOT NULL),
     CHECK (team_id IS NULL OR service_id IS NULL OR
@@ -508,7 +520,7 @@ CREATE TABLE evidence_records (
         REFERENCES environments(project_id, id),
     FOREIGN KEY (environment_id, service_id)
         REFERENCES services(environment_id, id)
-) PARTITION BY RANGE (partition_timestamp)
+)
 
 CREATE TABLE incident_messages (
     id UUID NOT NULL DEFAULT gen_random_uuid(),
@@ -714,20 +726,25 @@ metadata 分開保存；`rca_reports.result_status` 只能是 `COMPLETE`、`PART
 version table 與 table ownership 各自獨立。Worker downgrade 會失去 exact raw bytes，
 正式環境不得把它當作一般 rollback。
 
-## Partition 維護
+## Legacy Partition 資料表保留
 
-allowlist 僅包含：`webhook_deliveries`、`alert_events`、`evidence_records`、`incident_messages`、`incident_timeline_events` 與 `audit_events`。migration upgrade 會建立當月與下個月的六張分區。執行期的 `ensure_monthly_partitions(connection, month)` 使用明確的 `public` schema 建立月分區，建立後逐一驗證 `relispartition`、正確 parent 與精確 bounds；同名 ordinary table、掛錯 parent 或錯誤 bounds 都會以 partition drift 失敗，不會被 `IF NOT EXISTS` 靜默略過。
+Backend `0003_non_partition_runtime_tables` 將六張分割母表轉換為普通表（UUID-only primary key），
+並保留以下六張原分割母表（prefix `__partitioned_legacy_0003`）供稽核與資料驗證；
+**不得在同一 release 或後續任何自動化流程中刪除這些 legacy 資料表**：
 
-獨立維護命令 `sre-agent-ensure-partitions`（亦可執行 `python -m sre_agent.workers.partition_worker`）在啟動時才讀取 `DATABASE_URL`，建立本月、下月與下下月的安全 runway，失敗時回傳非零 exit code；排程與 infrastructure provisioning 不屬於此命令。`DATABASE_URL` 格式為 `postgresql://user:password@host:port/database` 或 SQLAlchemy 的 `postgresql+asyncpg://...`，設定使用 secret type 且命令不輸出 URL 或其中 credential。
-
-每個月的上界是 exclusive，12 月的範例如下，資料時間剛好等於 `2032-01-01 00:00:00+00` 屬於下一個分區而非本分區：
-
-```sql
-CREATE TABLE webhook_deliveries_2031_12
-PARTITION OF webhook_deliveries
-FOR VALUES FROM ('2031-12-01 00:00:00+00')
-TO ('2032-01-01 00:00:00+00');
 ```
+webhook_deliveries__partitioned_legacy_0003
+alert_events__partitioned_legacy_0003
+evidence_records__partitioned_legacy_0003
+incident_messages__partitioned_legacy_0003
+incident_timeline_events__partitioned_legacy_0003
+autevents__partitioned_legacy_0003
+```
+
+`audit_events__partitioned_legacy_0003` 的實際名稱為 `audit_events__partitioned_legacy_0003`。
+若要刪除 legacy partition 資料表，必須取得明確的維護視窗核准，並先確認新表資料完整性後，
+才能以獨立的 forward migration 執行。partition 月分區的歷史行不會自動遷移至新普通表；
+如有需要，請以通過 review 的資料遷移腳本在低峰期執行。
 
 ## 驗證與故障排查
 

@@ -18,10 +18,10 @@ DATABASE_URL = os.getenv(
 
 
 @pytest.mark.asyncio
-async def test_persist_evidence_round_trips_exact_bytes_and_metadata() -> None:
+async def test_persist_evidence_round_trips_exact_bytes_and_provenance() -> None:
     engine = create_async_engine(DATABASE_URL)
     now = datetime(2026, 8, 13, 6, 30, tzinfo=UTC)
-    raw = b'{ "b": 1.00, "a": "\\u0061", "a": "duplicate" }\n'
+    raw = b'\x00\xffnon-utf8\n{ "b": 1.00, "a": "\\u0061", "a": "duplicate" }\n'
     team_id, project_id, environment_id, incident_id, run_id = [
         uuid4() for _ in range(5)
     ]
@@ -91,8 +91,8 @@ async def test_persist_evidence_round_trips_exact_bytes_and_metadata() -> None:
             (
                 await session.execute(
                     text("""SELECT raw_result, structured_data, metadata, content_hash
-            FROM evidence_records WHERE id=:id AND partition_timestamp=:ts"""),
-                    {"id": reference.id, "ts": reference.partition_timestamp},
+            FROM evidence_records WHERE id=:id"""),
+                    {"id": reference.id},
                 )
             )
             .mappings()
@@ -100,7 +100,23 @@ async def test_persist_evidence_round_trips_exact_bytes_and_metadata() -> None:
         )
         assert bytes(row["raw_result"]) == raw
         assert row["structured_data"] == {"a": "duplicate", "b": 1.0}
-        assert row["metadata"]["scope"] == {"provider": "GCP", "scopeId": "project-a"}
+        assert row["metadata"] == {
+            "contentType": "application/json",
+            "inputSha256": "a" * 64,
+            "inputScope": {
+                "provider": "GCP",
+                "scope_id": "project-a",
+                "safe": True,
+            },
+            "normalizedScope": {
+                "provider": "GCP",
+                "scope_id": "project-a",
+                "safe": True,
+            },
+            "requestWindowStart": "2026-08-13T06:15:00+00:00",
+            "requestWindowEnd": "2026-08-13T06:30:00+00:00",
+        }
         assert row["content_hash"] == hashlib.sha256(raw).hexdigest()
+        assert reference.model_dump(mode="json") == {"id": str(reference.id)}
         await session.rollback()
     await engine.dispose()

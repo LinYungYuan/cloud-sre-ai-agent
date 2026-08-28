@@ -30,16 +30,13 @@ kubectl get secret sre-agent-secrets
 
 既有的 `sre-agent-secrets` 必須包含以下 key；不得列印或提交其值：
 
-- `DATABASE_URL`：兩條 migration、Backend、Outbox Publisher、Worker 與 Partition
-  Maintenance 共用的 PostgreSQL connection URL。
+- `DATABASE_URL`：兩條 migration、Backend 與 Worker 共用的 PostgreSQL connection URL。
 - `GRAFANA_TOKENS`：Backend 使用的 Grafana Bearer Token catalog。
 
 KSA-to-GSA 綁定與 IAM role 由環境負責。請分離以下預期職責：
 
 - `sre-agent-backend`：供 Backend 與 Backend migration 使用的 Cloud SQL 連線能力，
-  以及 `DATABASE_URL` 所代表的資料庫權限。
-- `sre-agent-outbox`：RCA Pub/Sub topic 的發布權限。其資料庫存取仍由
-  `DATABASE_URL` 與環境的資料庫／網路控制提供。
+  以及 `DATABASE_URL` 所代表的資料庫權限，以及 RCA Pub/Sub topic 的發布權限。
 - `sre-agent-rca-worker`：RCA subscription 的訂閱權限，以及正式環境整合所核准的
   model／MCP 存取權。Worker migration 會使用此 KSA，因此環境也必須允許該
   one-shot Job 存取 `DATABASE_URL` 所代表的資料庫。
@@ -60,11 +57,9 @@ kubectl wait --for=condition=complete --timeout=15m "job/${WORKER_JOB}"
 kubectl apply -k deploy/k8s/base
 kubectl rollout restart deployment/sre-agent-backend
 kubectl rollout restart deployment/sre-agent-frontend
-kubectl rollout restart deployment/sre-agent-outbox
 kubectl rollout restart deployment/sre-agent-rca-worker
 kubectl rollout status deployment/sre-agent-backend --timeout=5m
 kubectl rollout status deployment/sre-agent-frontend --timeout=5m
-kubectl rollout status deployment/sre-agent-outbox --timeout=5m
 kubectl rollout status deployment/sre-agent-rca-worker --timeout=5m
 ```
 

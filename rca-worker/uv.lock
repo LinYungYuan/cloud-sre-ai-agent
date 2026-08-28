@@ -2179,6 +2179,7 @@ dependencies = [
     { name = "mcp" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "sqlalchemy", extra = ["asyncio"] },
 ]
@@ -2202,6 +2203,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=2.0.0" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "sqlalchemy", extras = ["asyncio"] },
 ]

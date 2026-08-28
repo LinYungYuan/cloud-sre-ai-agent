@@ -191,17 +191,14 @@ class SqlAlchemyIncidentRepository:
             text(
                 """
                 INSERT INTO incident_alerts (
-                    incident_id, alert_event_id, alert_event_partition_timestamp
-                ) VALUES (:incident_id, :event_id, :partition_timestamp)
-                ON CONFLICT (
-                    incident_id, alert_event_id, alert_event_partition_timestamp
-                ) DO NOTHING
+                    incident_id, alert_event_id
+                ) VALUES (:incident_id, :event_id)
+                ON CONFLICT (incident_id, alert_event_id) DO NOTHING
                 """
             ),
             {
                 "incident_id": incident_id,
                 "event_id": stored_event.id,
-                "partition_timestamp": stored_event.partition_timestamp,
             },
         )
 

@@ -51,7 +51,6 @@ from sre_rca_worker.integrations.mcp.models import (
 NOW = datetime(2026, 8, 25, 8, 0, tzinfo=UTC)
 REFERENCE = EvidenceReference(
     id=UUID("00000000-0000-0000-0000-000000000011"),
-    partition_timestamp=NOW,
 )
 DEFINITIONS = (
     Path(__file__).resolve().parents[2] / "src/sre_rca_worker/agents/skills/definitions"

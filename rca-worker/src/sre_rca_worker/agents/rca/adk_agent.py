@@ -31,7 +31,7 @@ _ANALYSIS_FIELDS = frozenset(
     {"specialist", "status", "observations", "missing_evidence"}
 )
 _OBSERVATION_FIELDS = frozenset({"statement", "confidence", "relation", "evidence"})
-_REFERENCE_FIELDS = frozenset({"id", "partition_timestamp"})
+_REFERENCE_FIELDS = frozenset({"id"})
 RootFailureCode = Literal[
     "DEADLINE_EXCEEDED",
     "VALIDATION_FAILED",
@@ -83,14 +83,10 @@ def _canonical_reference(value: object) -> EvidenceReference:
         expected_fields=_REFERENCE_FIELDS,
     )
     identifier = values["id"]
-    partition_timestamp = values["partition_timestamp"]
-    if type(identifier) is not UUID or type(partition_timestamp) is not datetime:
+    if type(identifier) is not UUID:
         _reject_boundary()
     try:
-        return EvidenceReference(
-            id=identifier,
-            partition_timestamp=partition_timestamp,
-        )
+        return EvidenceReference(id=identifier)
     except (TypeError, ValidationError, ValueError):
         _reject_boundary()
 
@@ -182,28 +178,20 @@ def _canonical_active_inputs(
         _canonical_analysis(analysis) for analysis in specialist_analyses
     )
     canonical_known = _canonical_known_evidence(known_evidence)
-    known_pairs = {
-        (reference.id, reference.partition_timestamp) for reference in canonical_known
-    }
-    cited_pairs = {
-        (reference.id, reference.partition_timestamp)
+    known_ids = {reference.id for reference in canonical_known}
+    cited_ids = {
+        reference.id
         for analysis in canonical_analyses
         for observation in analysis.observations
         for reference in observation.evidence
     }
-    if not cited_pairs <= known_pairs:
+    if not cited_ids <= known_ids:
         _reject_boundary("UNKNOWN_EVIDENCE_REFERENCE")
     return canonical_analyses, canonical_known
 
 
 def _reference_payload(reference: EvidenceReference) -> dict[str, object]:
-    return {
-        "id": str(reference.id),
-        "partition_timestamp": reference.partition_timestamp.isoformat().replace(
-            "+00:00",
-            "Z",
-        ),
-    }
+    return {"id": str(reference.id)}
 
 
 def _observation_payload(observation: SpecialistObservation) -> dict[str, object]:

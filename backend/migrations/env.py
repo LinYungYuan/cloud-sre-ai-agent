@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import os
 from logging.config import fileConfig
+from pathlib import Path
 
 from alembic import context
+from dotenv import load_dotenv
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
@@ -14,6 +16,20 @@ from sre_agent.persistence.models import Base
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+
+def _load_migration_environment() -> None:
+    override_file = os.getenv("BACKEND_MIGRATION_ENV_FILE")
+    environment_file = (
+        Path(override_file) if override_file else Path.cwd() / ".env.backend-migration"
+    )
+    if override_file and not environment_file.is_file():
+        raise RuntimeError("Backend migration environment file is unavailable")
+    if environment_file.is_file():
+        load_dotenv(environment_file, override=False)
+
+
+_load_migration_environment()
 
 database_url = os.getenv("MIGRATION_TEST_DATABASE_URL") or os.getenv("DATABASE_URL")
 if database_url:

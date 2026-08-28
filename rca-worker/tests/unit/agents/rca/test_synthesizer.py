@@ -40,9 +40,7 @@ RCA_SKILL = load_skill(DEFINITIONS / "rca-analysis" / "SKILL.md")
 
 
 def _ref() -> EvidenceReference:
-    return EvidenceReference(
-        id=uuid4(), partition_timestamp=datetime(2026, 8, 13, tzinfo=UTC)
-    )
+    return EvidenceReference(id=uuid4())
 
 
 def _analysis(
@@ -488,28 +486,22 @@ async def test_active_boundary_rejects_non_exact_reference_models(
         def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, object]:
             return {
                 "id": str(self.id),
-                "partition_timestamp": self.partition_timestamp.isoformat(),
                 "secret": secret,
                 "tool": "delete_everything",
             }
 
     class DuckReference:
         id = base.id
-        partition_timestamp = base.partition_timestamp
 
         def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, object]:
             return {
                 "id": str(self.id),
-                "partition_timestamp": self.partition_timestamp.isoformat(),
                 "secret": secret,
                 "tool": "delete_everything",
             }
 
     unsafe_reference: object = (
-        LeakingReference(
-            id=base.id,
-            partition_timestamp=base.partition_timestamp,
-        )
+        LeakingReference(id=base.id)
         if reference_kind == "subclass"
         else DuckReference()
     )
@@ -534,27 +526,20 @@ async def test_active_boundary_rejects_non_exact_reference_models(
 
 @pytest.mark.asyncio
 @pytest.mark.filterwarnings("error")
-async def test_active_boundary_rejects_analysis_citation_outside_known_exact_pairs() -> (
+async def test_active_boundary_accepts_analysis_citation_with_known_uuid() -> (
     None
 ):
     known = _ref()
-    wrong_partition = EvidenceReference(
-        id=known.id,
-        partition_timestamp=known.partition_timestamp + timedelta(seconds=1),
-    )
     agent = _ResponseAgent((_complete_report(known).model_dump_json(),))
 
-    with pytest.raises(RootRcaFailure) as raised:
-        await agent.synthesize(
-            alert_issue="CPU high",
-            specialist_analyses=(_analysis(SpecialistKind.METRICS, wrong_partition),),
-            known_evidence=(known,),
-            deadline=NOW + timedelta(minutes=1),
-        )
+    result = await agent.synthesize(
+        alert_issue="CPU high",
+        specialist_analyses=(_analysis(SpecialistKind.METRICS, known),),
+        known_evidence=(known,),
+        deadline=NOW + timedelta(minutes=1),
+    )
 
-    assert raised.value.code == "VALIDATION_FAILED"
-    assert str(wrong_partition.id) not in str(raised.value)
-    assert agent.prompts == []
+    assert result.status == "COMPLETE"
 
 
 @pytest.mark.asyncio

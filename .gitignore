@@ -27,6 +27,10 @@ pnpm-debug.log*
 
 # Local runtime configuration (keep committed templates)
 .env*
-!.env.example
+!.env.backend-api.example
+!.env.rca-worker.example
+!.env.backend-migration.example
+!.env.rca-worker-migration.example
+!.env.compose.example
 */.DS_Store
 .DS_Store
