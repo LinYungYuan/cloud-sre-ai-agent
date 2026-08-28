@@ -7,9 +7,11 @@ not implement a downgrade: writes accepted by the ordinary tables cannot be
 mapped losslessly back to a partitioned layout.
 """
 
+import re
 from collections.abc import Sequence
 
 from alembic import op
+from sqlalchemy.engine import Connection
 
 revision: str = "0003_non_partition_runtime_tables"
 down_revision: str | None = "0002_grafana_normalization_v2"
@@ -29,6 +31,33 @@ CANONICAL_TABLES = (
 LEGACY_TABLES = {
     table_name: f"{table_name}__partitioned_legacy_0003"
     for table_name in CANONICAL_TABLES
+}
+
+BACKEND_SOURCE_REVISION = "0002_grafana_normalization_v2"
+WORKER_SOURCE_REVISION = "0002_adk_specialist_analysis"
+WORKER_FAILURE_CODES = {
+    "DEADLINE_EXCEEDED",
+    "MCP_TIMEOUT",
+    "MCP_TRANSPORT",
+    "POLICY_DENIED",
+    "VALIDATION_FAILED",
+    "INTERNAL_ERROR",
+    "NO_SAFE_MCP_CAPABILITY",
+    "MCP_PAYLOAD_TOO_LARGE",
+    "MCP_RESULT_INVALID",
+    "ANALYSIS_TIMEOUT",
+    "ANALYSIS_SCHEMA_INVALID",
+    "ANALYSIS_UNKNOWN_EVIDENCE",
+    "ANALYSIS_INPUT_TRUNCATED",
+    "ANALYSIS_FAILED",
+}
+WORKER_SPECIALIST_STATUSES = {
+    "QUEUED",
+    "RUNNING",
+    "SUCCEEDED",
+    "FAILED",
+    "SKIPPED",
+    "PARTIAL",
 }
 
 REPLACEMENT_DDL = (
@@ -97,8 +126,11 @@ REPLACEMENT_DDL = (
         time_window_start TIMESTAMPTZ NOT NULL,
         time_window_end TIMESTAMPTZ NOT NULL,
         structured_data JSONB NOT NULL,
-        raw_result_reference TEXT NOT NULL,
+        raw_result BYTEA NOT NULL,
+        metadata JSONB NOT NULL,
         content_hash TEXT NOT NULL,
+        CONSTRAINT ck_evidence_records_metadata_object
+            CHECK (jsonb_typeof(metadata) = 'object'),
         CHECK (time_window_end >= time_window_start),
         CHECK (team_id IS NULL OR environment_id IS NULL OR project_id IS NOT NULL),
         CHECK (project_id IS NULL OR service_id IS NULL OR environment_id IS NOT NULL),
@@ -202,12 +234,12 @@ COPY_STATEMENTS = (
     """INSERT INTO evidence_records_new (
         id, observed_at, rca_run_id, specialist_run_id, evidence_type, source_agent,
         source_endpoint, tool_name, team_id, project_id, environment_id, service_id,
-        time_window_start, time_window_end, structured_data, raw_result_reference,
+        time_window_start, time_window_end, structured_data, raw_result, metadata,
         content_hash
     ) SELECT
         id, observed_at, rca_run_id, specialist_run_id, evidence_type, source_agent,
         source_endpoint, tool_name, team_id, project_id, environment_id, service_id,
-        time_window_start, time_window_end, structured_data, raw_result_reference,
+        time_window_start, time_window_end, structured_data, raw_result, metadata,
         content_hash
     FROM evidence_records""",
     """INSERT INTO incident_messages_new (
@@ -248,6 +280,230 @@ COPY_STATEMENTS = (
     ) SELECT id, hypothesis_id, evidence_id, relation, created_at
     FROM hypothesis_evidence""",
 )
+
+
+def _column_catalog(
+    connection: Connection, table_name: str
+) -> dict[str, tuple[str, str]]:
+    rows = connection.exec_driver_sql(
+        """SELECT column_name, udt_name, is_nullable
+           FROM information_schema.columns
+           WHERE table_schema = 'public' AND table_name = $1""",
+        (table_name,),
+    )
+    return {
+        column_name: (data_type, is_nullable)
+        for column_name, data_type, is_nullable in rows
+    }
+
+
+def _column_names(connection: Connection, table_name: str) -> set[str]:
+    return set(_column_catalog(connection, table_name))
+
+
+def _check_definition(
+    connection: Connection, table_name: str, constraint_name: str
+) -> str | None:
+    return connection.exec_driver_sql(
+        """SELECT pg_get_constraintdef(constraint_row.oid, true)
+           FROM pg_constraint AS constraint_row
+           WHERE constraint_row.contype = 'c'
+             AND constraint_row.conrelid = to_regclass($1)
+             AND constraint_row.conname = $2""",
+        (f"public.{table_name}", constraint_name),
+    ).scalar_one_or_none()
+
+
+def _sql_literals(definition: str) -> set[str]:
+    return {
+        literal.replace("''", "'")
+        for literal in re.findall(r"'((?:''|[^'])*)'(?:\s*::text)?", definition)
+    }
+
+
+def _has_required_check(
+    connection: Connection,
+    table_name: str,
+    constraint_name: str,
+    *,
+    column_name: str,
+    literals: set[str],
+    fragments: tuple[str, ...] = (),
+) -> bool:
+    definition = _check_definition(connection, table_name, constraint_name)
+    if definition is None or _sql_literals(definition) != literals:
+        return False
+    normalized = re.sub(r"\s+", " ", definition).lower()
+    return column_name.lower() in normalized and all(
+        fragment.lower() in normalized for fragment in fragments
+    )
+
+
+def _has_index(
+    connection: Connection,
+    index_name: str,
+    *,
+    fragments: tuple[str, ...],
+) -> bool:
+    definition = connection.exec_driver_sql(
+        """SELECT pg_get_indexdef(index_relation.oid)
+           FROM pg_class AS index_relation
+           JOIN pg_namespace AS index_namespace
+             ON index_namespace.oid = index_relation.relnamespace
+           WHERE index_namespace.nspname = 'public'
+             AND index_relation.relkind = 'i'
+             AND index_relation.relname = $1""",
+        (index_name,),
+    ).scalar_one_or_none()
+    if definition is None:
+        return False
+    normalized = re.sub(r"\s+", " ", definition).lower()
+    return all(fragment.lower() in normalized for fragment in fragments)
+
+
+def _require_worker_0002_source() -> None:
+    connection = op.get_bind()
+    backend_version_table = connection.exec_driver_sql(
+        "SELECT to_regclass('public.alembic_version_backend')"
+    ).scalar_one()
+    backend_revision = (
+        connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version_backend"
+        ).scalar_one_or_none()
+        if backend_version_table is not None
+        else None
+    )
+    if backend_revision != BACKEND_SOURCE_REVISION:
+        raise RuntimeError(f"Backend {BACKEND_SOURCE_REVISION} is required")
+
+    worker_version_table = connection.exec_driver_sql(
+        "SELECT to_regclass('public.alembic_version_rca_worker')"
+    ).scalar_one()
+    worker_revision = (
+        connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version_rca_worker"
+        ).scalar_one_or_none()
+        if worker_version_table is not None
+        else None
+    )
+    if worker_revision != WORKER_SOURCE_REVISION:
+        raise RuntimeError(f"Worker {WORKER_SOURCE_REVISION} is required")
+
+    evidence_columns = _column_catalog(connection, "evidence_records")
+    required_evidence_columns = {
+        "raw_result": ("bytea", "NO"),
+        "metadata": ("jsonb", "NO"),
+        "content_hash": ("text", "NO"),
+    }
+    if (
+        not required_evidence_columns.items() <= evidence_columns.items()
+        or "raw_result_reference" in _column_names(connection, "evidence_records")
+        or not _has_required_check(
+            connection,
+            "evidence_records",
+            "ck_evidence_records_metadata_object",
+            column_name="metadata",
+            literals={"object"},
+            fragments=("jsonb_typeof(metadata)",),
+        )
+    ):
+        raise RuntimeError("evidence_records is not the Worker 0002 source schema")
+
+    report_columns = _column_catalog(connection, "rca_reports")
+    if report_columns.get("result_status") != ("text", "NO") or not (
+        _has_required_check(
+            connection,
+            "rca_reports",
+            "ck_rca_reports_result_status",
+            column_name="result_status",
+            literals={"COMPLETE", "PARTIAL", "FAILED"},
+        )
+    ):
+        raise RuntimeError("rca_reports.result_status Worker 0002 check is required")
+
+    for table_name in ("rca_runs", "specialist_runs", "worker_attempts"):
+        columns = _column_catalog(connection, table_name)
+        if columns.get("failure_code") != ("text", "YES") or not (
+            _has_required_check(
+                connection,
+                table_name,
+                f"ck_{table_name}_failure_code",
+                column_name="failure_code",
+                literals=WORKER_FAILURE_CODES,
+                fragments=("failure_code is null",),
+            )
+        ):
+            raise RuntimeError("Worker 0002 failure_code lifecycle schema is required")
+
+    worker_job_columns = _column_catalog(connection, "worker_jobs")
+    required_worker_job_columns = {
+        "lease_owner": ("text", "YES"),
+        "lease_expires_at": ("timestamptz", "YES"),
+        "attempt_count": ("int4", "NO"),
+    }
+    if (
+        not required_worker_job_columns.items() <= worker_job_columns.items()
+        or not _has_required_check(
+            connection,
+            "worker_jobs",
+            "ck_worker_jobs_attempt_count",
+            column_name="attempt_count",
+            literals=set(),
+            fragments=("attempt_count >= 0", "attempt_count <= 3"),
+        )
+        or not _has_required_check(
+            connection,
+            "worker_jobs",
+            "ck_worker_jobs_lease_pair",
+            column_name="lease_owner",
+            literals=set(),
+            fragments=("lease_owner is null", "lease_expires_at is null"),
+        )
+        or not _has_index(
+            connection,
+            "ix_worker_jobs_claim",
+            fragments=(
+                "worker_jobs",
+                "(status, available_at, lease_expires_at)",
+            ),
+        )
+    ):
+        raise RuntimeError("worker_jobs Worker 0002 lifecycle schema is required")
+
+    specialist_columns = _column_catalog(connection, "specialist_runs")
+    required_specialist_columns = {
+        "analysis_result": ("jsonb", "YES"),
+        "model_name": ("text", "YES"),
+        "skill_name": ("text", "YES"),
+        "skill_sha256": ("text", "YES"),
+        "analyzed_at": ("timestamptz", "YES"),
+    }
+    if (
+        not required_specialist_columns.items() <= specialist_columns.items()
+        or not _has_required_check(
+            connection,
+            "specialist_runs",
+            "ck_specialist_runs_analysis_result_object",
+            column_name="analysis_result",
+            literals={"object"},
+            fragments=("jsonb_typeof(analysis_result)",),
+        )
+        or not _has_required_check(
+            connection,
+            "specialist_runs",
+            "ck_specialist_runs_skill_sha256",
+            column_name="skill_sha256",
+            literals={"^[0-9a-f]{64}$"},
+        )
+        or not _has_required_check(
+            connection,
+            "specialist_runs",
+            "ck_specialist_runs_status",
+            column_name="status",
+            literals=WORKER_SPECIALIST_STATUSES,
+        )
+    ):
+        raise RuntimeError("specialist_runs Worker 0002 analysis schema is required")
 
 
 def _assert_no_duplicate_uuids() -> None:
@@ -384,6 +640,7 @@ def _replace_tables() -> None:
 def upgrade() -> None:
     # Alembic runs this revision in one transaction.  Do not add an autocommit
     # block: every create/copy/assertion/rename must succeed or be rolled back.
+    _require_worker_0002_source()
     # Alembic's default version column is VARCHAR(32), while this revision's
     # stable identifier is 33 characters long.
     op.execute(

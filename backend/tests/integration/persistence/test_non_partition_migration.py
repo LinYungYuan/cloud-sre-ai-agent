@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +17,7 @@ from alembic import command
 from alembic.config import Config
 
 BACKEND_ROOT = Path(__file__).resolve().parents[3]
+WORKER_ROOT = BACKEND_ROOT.parent / "rca-worker"
 DATABASE_URL = os.getenv(
     "MIGRATION_TEST_DATABASE_URL",
     "postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent",
@@ -43,10 +45,19 @@ def _with_database(database_url: str, database_name: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, f"/{database_name}", "", ""))
 
 
-def _upgrade(database_url: str, revision: str) -> None:
-    config = Config(str(BACKEND_ROOT / "alembic.ini"))
+def _upgrade(root: Path, database_url: str, revision: str) -> None:
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "migrations"))
     with patch.dict(os.environ, {"MIGRATION_TEST_DATABASE_URL": database_url}):
         command.upgrade(config, revision)
+
+
+def _upgrade_backend(database_url: str, revision: str) -> None:
+    _upgrade(BACKEND_ROOT, database_url, revision)
+
+
+def _upgrade_worker(database_url: str, revision: str) -> None:
+    _upgrade(WORKER_ROOT, database_url, revision)
 
 
 @dataclass
@@ -56,7 +67,7 @@ class MigrationDatabase:
 
 
 @pytest_asyncio.fixture
-async def migration_database() -> MigrationDatabase:
+async def migration_database() -> AsyncIterator[MigrationDatabase]:
     """Start each acceptance case from a disposable, real 0002 database."""
     database_name = f"task7_migration_{uuid4().hex}"
     admin = await asyncpg.connect(
@@ -66,9 +77,15 @@ async def migration_database() -> MigrationDatabase:
     connection: asyncpg.Connection | None = None
     try:
         await admin.execute(f'CREATE DATABASE "{database_name}"')
-        await asyncio.to_thread(_upgrade, test_url, "0002_grafana_normalization_v2")
-        connection = await asyncpg.connect(_asyncpg_url(test_url))
-        yield MigrationDatabase(test_url, connection)
+        await asyncio.to_thread(
+            _upgrade_backend, test_url, "0002_grafana_normalization_v2"
+        )
+        await asyncio.to_thread(
+            _upgrade_worker, test_url, "0002_adk_specialist_analysis"
+        )
+        active_connection = await asyncpg.connect(_asyncpg_url(test_url))
+        connection = active_connection
+        yield MigrationDatabase(test_url, active_connection)
     finally:
         if connection is not None:
             await connection.close()
@@ -203,9 +220,10 @@ async def _seed_0002_fixture(connection: asyncpg.Connection) -> dict[str, UUID]:
                 id, partition_timestamp, observed_at, rca_run_id, specialist_run_id,
                 evidence_type, source_agent, source_endpoint, tool_name, team_id,
                 project_id, environment_id, service_id, time_window_start,
-                time_window_end, structured_data, raw_result_reference, content_hash
+                time_window_end, structured_data, raw_result, metadata, content_hash
             ) VALUES ($1, $2, $2, $3, $4, 'METRIC', 'task7', 'endpoint', 'tool',
-                      $5, $6, $7, $8, $2, $2, '{}'::jsonb, $9, $10)""",
+                      $5, $6, $7, $8, $2, $2, '{}'::jsonb, $9::bytea,
+                      '{"source":"task7"}'::jsonb, $10)""",
             evidence_id,
             timestamp,
             ids["run"],
@@ -214,7 +232,7 @@ async def _seed_0002_fixture(connection: asyncpg.Connection) -> dict[str, UUID]:
             ids["project"],
             ids["environment"],
             ids["service"],
-            f"task7-reference-{suffix}",
+            f"task7-raw-result-{suffix}".encode(),
             f"task7-content-{suffix}",
         )
     await connection.execute(
@@ -283,7 +301,9 @@ async def _seed_0002_fixture(connection: asyncpg.Connection) -> dict[str, UUID]:
 
 async def _upgrade_to_0003(database: MigrationDatabase) -> asyncpg.Connection:
     await database.connection.close()
-    await asyncio.to_thread(_upgrade, database.url, "0003_non_partition_runtime_tables")
+    await asyncio.to_thread(
+        _upgrade_backend, database.url, "0003_non_partition_runtime_tables"
+    )
     return await asyncpg.connect(_asyncpg_url(database.url))
 
 
@@ -422,6 +442,13 @@ async def test_0003_replaces_runtime_tables_and_retains_partitioned_legacy_paren
     await connection.execute(
         "INSERT INTO audit_events (action, resource_type) VALUES ('task7-write', 'task7')"
     )
+    assert await connection.fetchval("SELECT count(*) FROM audit_events") == 3
+    assert (
+        await connection.fetchval(
+            "SELECT count(*) FROM audit_events__partitioned_legacy_0003"
+        )
+        == 2
+    )
 
 
 @pytest.mark.asyncio
@@ -442,7 +469,9 @@ async def test_0003_rejects_duplicate_uuids_before_replacement(
     await migration_database.connection.close()
     with pytest.raises(Exception, match="duplicate UUID precheck failed"):
         await asyncio.to_thread(
-            _upgrade, migration_database.url, "0003_non_partition_runtime_tables"
+            _upgrade_backend,
+            migration_database.url,
+            "0003_non_partition_runtime_tables",
         )
     migration_database.connection = await asyncpg.connect(
         _asyncpg_url(migration_database.url)

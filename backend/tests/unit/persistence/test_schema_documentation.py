@@ -300,6 +300,17 @@ def test_non_partition_migration_declares_replacement_contract() -> None:
         "id UUID PRIMARY KEY" in statement for statement in migration.REPLACEMENT_DDL
     )
     assert "partition_timestamp" not in "\n".join(migration.REPLACEMENT_DDL)
+    replacement_tables = _create_table_statements("\n".join(migration.REPLACEMENT_DDL))
+    evidence_manifest = _table_manifest(replacement_tables["evidence_records_new"])
+    evidence_columns = dict(evidence_manifest.columns)
+    assert evidence_columns["raw_result"] == "BYTEA NOT NULL"
+    assert evidence_columns["metadata"] == "JSONB NOT NULL"
+    assert evidence_columns["content_hash"] == "TEXT NOT NULL"
+    assert "raw_result_reference" not in evidence_columns
+    assert any(
+        "jsonb_typeof(metadata) = 'object'" in check
+        for check in evidence_manifest.checks
+    )
     assert "lossless downgrade" in migration_source
 
 
