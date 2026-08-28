@@ -2,11 +2,13 @@
 
 import asyncio
 import hashlib
+import importlib
 import json
 import os
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit, urlunsplit
@@ -16,6 +18,9 @@ import asyncpg
 import pytest
 from alembic import command
 from alembic.config import Config
+from pydantic import SecretStr
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 BACKEND_ROOT = Path(__file__).resolve().parents[3]
 REPOSITORY_ROOT = BACKEND_ROOT.parent
@@ -612,3 +617,230 @@ async def test_backend_0003_matching_rerun_is_catalog_no_op() -> None:
             ) == before
         finally:
             await connection.close()
+
+
+@pytest.mark.asyncio
+async def test_clean_four_gate_database_runs_uuid_only_worker_smoke() -> None:
+    """Exercise Worker persistence only after all four explicit rollout gates."""
+    async with _disposable_database() as database_url:
+        await upgrade_four_gates(database_url, existing_worker_head=False)
+        connection = await _connect(database_url)
+        now = datetime(2026, 8, 28, 8, 30, tzinfo=UTC)
+        team_id, project_id, environment_id, incident_id, run_id, specialist_id = (
+            uuid4() for _ in range(6)
+        )
+        try:
+            assert (
+                await connection.fetchval(
+                    "SELECT version_num FROM alembic_version_backend"
+                )
+                == "0003_non_partition_runtime_tables"
+            )
+            assert (
+                await connection.fetchval(
+                    "SELECT version_num FROM alembic_version_rca_worker"
+                )
+                == "0003_validate_ordinary_runtime_tables"
+            )
+            await connection.execute(
+                "INSERT INTO teams(id,name) VALUES ($1,$2)",
+                team_id,
+                f"task3-team-{team_id}",
+            )
+            await connection.execute(
+                "INSERT INTO projects(id,team_id,name) VALUES ($1,$2,$3)",
+                project_id,
+                team_id,
+                f"task3-project-{project_id}",
+            )
+            await connection.execute(
+                "INSERT INTO environments(id,project_id,name) VALUES ($1,$2,$3)",
+                environment_id,
+                project_id,
+                f"task3-environment-{environment_id}",
+            )
+            await connection.execute(
+                """INSERT INTO incidents(
+                       id,identity_key,title,severity,status,alert_state,
+                       team_id,project_id,environment_id,opened_at)
+                   VALUES ($1,$2,'task3 smoke','SEV3','OPEN','FIRING',
+                           $3,$4,$5,$6)""",
+                incident_id,
+                f"task3-identity-{incident_id}",
+                team_id,
+                project_id,
+                environment_id,
+                now,
+            )
+            await connection.execute(
+                """INSERT INTO rca_runs(id,incident_id,status)
+                   VALUES ($1,$2,'RUNNING')""",
+                run_id,
+                incident_id,
+            )
+            await connection.execute(
+                """INSERT INTO specialist_runs(
+                       id,rca_run_id,specialist_type,status,started_at)
+                   VALUES ($1,$2,'METRICS','RUNNING',$3)""",
+                specialist_id,
+                run_id,
+                now,
+            )
+        finally:
+            await connection.close()
+
+        worker_source = str(WORKER_ROOT / "src")
+        if worker_source not in sys.path:
+            sys.path.insert(0, worker_source)
+        job_module = importlib.import_module(
+            "sre_rca_worker.application.rca.job_lifecycle"
+        )
+        processor_module = importlib.import_module(
+            "sre_rca_worker.application.rca.processor"
+        )
+        settings_module = importlib.import_module("sre_rca_worker.config.settings")
+        evidence_module = importlib.import_module(
+            "sre_rca_worker.domain.evidence.models"
+        )
+        report_module = importlib.import_module("sre_rca_worker.domain.rca.models")
+        mcp_module = importlib.import_module("sre_rca_worker.integrations.mcp.models")
+        repository_module = importlib.import_module(
+            "sre_rca_worker.persistence.repositories.rca"
+        )
+
+        raw_result = (
+            b'\x00\xffnon-utf8\n{ "b": 1.00, "a": "\\u0061", "a": "duplicate" }\n'
+        )
+        input_sha256 = "7" * 64
+        expected_metadata = {
+            "contentType": "application/json",
+            "inputSha256": input_sha256,
+            "inputScope": {
+                "provider": "GCP",
+                "scope_id": "task3-project",
+                "safe": True,
+            },
+            "normalizedScope": {
+                "provider": "GCP",
+                "scope_id": "task3-project",
+                "safe": True,
+            },
+            "requestWindowStart": "2026-08-28T08:15:00+00:00",
+            "requestWindowEnd": "2026-08-28T08:30:00+00:00",
+        }
+        engine = create_async_engine(database_url)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            scope = mcp_module.CloudScope(
+                provider="GCP", scope_id="task3-project", safe=True
+            )
+            draft = evidence_module.EvidenceDraft(
+                endpoint_identity="metrics",
+                capability="metrics.query",
+                tool="metrics_query",
+                input_scope=scope,
+                normalized_scope=scope,
+                observed_at=now,
+                request_window_start=now - timedelta(minutes=15),
+                request_window_end=now,
+                window_start=now - timedelta(minutes=15),
+                window_end=now,
+                structured_json={"a": "duplicate", "b": 1.0},
+                raw_result=raw_result,
+                content_type="application/json",
+                input_sha256=input_sha256,
+            )
+            async with sessions() as session, session.begin():
+                repository = repository_module.RcaRepository(session)
+                reference = await repository.insert_evidence(
+                    run_id, specialist_id, draft
+                )
+                persisted = await repository.get_specialist_evidence(
+                    run_id, specialist_id, reference.id
+                )
+                assert persisted is not None
+                assert persisted.reference.model_dump(mode="json") == {
+                    "id": str(reference.id)
+                }
+                assert persisted.structured_data == {"a": "duplicate", "b": 1.0}
+                assert not hasattr(persisted, "raw_result")
+                assert not hasattr(persisted, "metadata")
+
+            partial_report = report_module.RcaReportDraft(
+                status="PARTIAL",
+                summary_zh_tw="Task 3 canonical smoke report",
+                hypotheses=(
+                    report_module.RcaHypothesis(
+                        statement="metrics spike",
+                        confidence=0.75,
+                        claims=(
+                            report_module.EvidenceClaim(
+                                statement="metric remained elevated",
+                                relation="SUPPORTS",
+                                evidence=(reference,),
+                            ),
+                        ),
+                    ),
+                ),
+                missing_evidence=("trace evidence unavailable",),
+                remediation=("reduce load",),
+                verification_steps=("verify metrics recover",),
+            )
+            settings = settings_module.WorkerSettings(
+                database_url=SecretStr(database_url),
+                pubsub_project_id="task3-local",
+                rca_topic_id="task3-rca",
+                pubsub_subscription_id="task3-worker",
+                app_environment="test",
+                model_name="task3-model",
+            )
+            processor = processor_module.ProductionRcaProcessor(sessions, settings)
+            claim = job_module.RcaJobClaim(
+                worker_job_id=uuid4(),
+                rca_run_id=run_id,
+                incident_id=incident_id,
+                attempt_number=1,
+                deadline_at=now + timedelta(minutes=5),
+                lease_owner="task3-smoke",
+            )
+            await processor._persist_report(claim, partial_report)
+
+            async with sessions() as session:
+                evidence_row = (
+                    (
+                        await session.execute(
+                            text(
+                                """SELECT raw_result,metadata,content_hash
+                                   FROM evidence_records WHERE id=:id"""
+                            ),
+                            {"id": reference.id},
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                assert bytes(evidence_row["raw_result"]) == raw_result
+                assert evidence_row["metadata"] == expected_metadata
+                assert (
+                    evidence_row["content_hash"]
+                    == hashlib.sha256(raw_result).hexdigest()
+                )
+                report_row = (
+                    await session.execute(
+                        text(
+                            """SELECT version,result_status,report
+                               FROM rca_reports WHERE rca_run_id=:run"""
+                        ),
+                        {"run": run_id},
+                    )
+                ).one()
+                assert report_row.version == 1
+                assert report_row.result_status == "PARTIAL"
+                assert report_row.report["hypotheses"][0]["claims"][0]["evidence"] == [
+                    {
+                        "evidenceId": str(reference.id),
+                        "relation": "SUPPORTS",
+                    }
+                ]
+        finally:
+            await engine.dispose()
