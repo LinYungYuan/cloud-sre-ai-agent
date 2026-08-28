@@ -5,6 +5,20 @@ ROOT = Path(__file__).resolve().parents[2]
 BACKEND_PYPROJECT = ROOT / "backend" / "pyproject.toml"
 BACKEND_SRC = ROOT / "backend" / "src"
 
+OBSOLETE_RUNTIME_MODULES = (
+    "sre_agent/config/outbox_settings.py",
+    "sre_agent/persistence/database.py",
+    "sre_agent/workers/outbox_main.py",
+    "sre_agent/workers/outbox_worker.py",
+    "sre_agent/workers/partition_worker.py",
+)
+
+RETAINED_OUTBOX_MODULES = (
+    "sre_agent/application/outbox/publish_events.py",
+    "sre_agent/application/outbox/recover_events.py",
+    "sre_agent/integrations/pubsub/publisher.py",
+)
+
 
 def test_platform_design_no_longer_contains_superseded_rca_or_chat_rules() -> None:
     text = (
@@ -43,6 +57,7 @@ def test_obsolete_outbox_and_partition_modules_are_not_in_backend_source() -> No
         "ensure_monthly_partitions",
         "PARTITIONED_TABLES",
         "outbox_main",
+        "outbox_worker",
         "partition_worker",
     )
     violations: list[str] = []
@@ -53,4 +68,27 @@ def test_obsolete_outbox_and_partition_modules_are_not_in_backend_source() -> No
                 violations.append(f"{py_file.relative_to(ROOT)}: contains '{pattern}'")
     assert not violations, (
         "backend/src 不應含以下殘留符號：\n" + "\n".join(violations)
+    )
+
+
+def test_obsolete_runtime_modules_are_removed_without_deleting_outbox_services() -> None:
+    """只移除 polling/partition runtime，保留 API 使用的發佈與復原邊界。"""
+    obsolete_modules = [
+        module
+        for module in OBSOLETE_RUNTIME_MODULES
+        if (BACKEND_SRC / module).exists()
+    ]
+    assert not obsolete_modules, (
+        "backend/src 不應保留 obsolete runtime modules:\n"
+        + "\n".join(obsolete_modules)
+    )
+
+    missing_retained_modules = [
+        module
+        for module in RETAINED_OUTBOX_MODULES
+        if not (BACKEND_SRC / module).is_file()
+    ]
+    assert not missing_retained_modules, (
+        "Task 4 不得刪除 API 仍使用的 outbox 發佈、復原或 Pub/Sub 邊界:\n"
+        + "\n".join(missing_retained_modules)
     )
