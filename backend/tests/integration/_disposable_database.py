@@ -19,6 +19,12 @@ MIGRATION_LOCK_TIMEOUT_MILLISECONDS = 5_000
 MIGRATION_STATEMENT_TIMEOUT_MILLISECONDS = 45_000
 MIGRATION_OVERALL_TIMEOUT_SECONDS = 60.0
 PROCESS_TERMINATION_TIMEOUT_SECONDS = 5.0
+MIGRATION_GATES = (
+    ("backend", "0002_grafana_normalization_v2"),
+    ("worker", "0002_adk_specialist_analysis"),
+    ("backend", "0003_non_partition_runtime_tables"),
+    ("worker", "0003_validate_ordinary_runtime_tables"),
+)
 
 
 class MigrationProcess(Protocol):
@@ -118,42 +124,51 @@ async def run_migration_subprocess(
     backend_root: Path,
     timeout: float = MIGRATION_OVERALL_TIMEOUT_SECONDS,
 ) -> None:
-    phase = "migration"
-    LOGGER.info("Task 8 disposable database phase=%s", phase)
     environment = os.environ.copy()
     environment["MIGRATION_TEST_DATABASE_URL"] = database_url
-    try:
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "alembic",
-            "-c",
-            str(backend_root / "alembic.ini"),
-            "upgrade",
-            "0003_non_partition_runtime_tables",
-            cwd=backend_root,
-            env=environment,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except OSError as error:
-        raise _phase_error("migration-start", error) from error
+    deadline = asyncio.get_running_loop().time() + timeout
+    worker_root = backend_root.parent / "rca-worker"
 
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-    except TimeoutError as error:
-        await terminate_and_reap_migration(process)
-        raise RuntimeError(
-            "Task 8 disposable database setup failed at phase=migration timeout "
-            f"after {timeout:.1f}s; subprocess was terminated and reaped."
-        ) from error
+    for stream, revision in MIGRATION_GATES:
+        root = backend_root if stream == "backend" else worker_root
+        phase = f"migration-gate stream={stream} revision={revision}"
+        LOGGER.info("Task 8 disposable database phase=%s", phase)
+        try:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "alembic",
+                "-c",
+                str(root / "alembic.ini"),
+                "upgrade",
+                revision,
+                cwd=root,
+                env=environment,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as error:
+            raise _phase_error(f"{phase} start", error) from error
 
-    if process.returncode != 0:
-        output = (stdout + stderr).decode(errors="replace")[-2_000:]
-        raise RuntimeError(
-            "Task 8 disposable database setup failed at phase=migration "
-            f"with exit code {process.returncode}: {output}"
-        )
+        remaining_timeout = max(0.0, deadline - asyncio.get_running_loop().time())
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=remaining_timeout
+            )
+        except TimeoutError as error:
+            await terminate_and_reap_migration(process)
+            raise RuntimeError(
+                "Task 8 disposable database setup failed "
+                f"at phase={phase} timeout after {timeout:.1f}s overall; "
+                "subprocess was terminated and reaped."
+            ) from error
+
+        if process.returncode != 0:
+            output = (stdout + stderr).decode(errors="replace")[-2_000:]
+            raise RuntimeError(
+                "Task 8 disposable database setup failed "
+                f"at phase={phase} with exit code {process.returncode}: {output}"
+            )
 
 
 @asynccontextmanager

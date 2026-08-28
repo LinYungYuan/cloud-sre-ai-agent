@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from copy import deepcopy
@@ -117,6 +118,12 @@ TRACE_WATERFALL = {
         },
     ],
 }
+TRACE_RAW_RESULT = b'\x00\xfftrace-result\n{"traceId":"trace-1"}'
+TRACE_METADATA = {
+    "contentType": "application/json",
+    "source": "trace",
+}
+TRACE_CONTENT_HASH = hashlib.sha256(TRACE_RAW_RESULT).hexdigest()
 
 
 class _CapturedMappings:
@@ -342,30 +349,33 @@ async def repository(isolated_database_url: str):
                 ) VALUES ($1, $2, 'TRACES', 'SUCCEEDED', $3)""",
                 (TRACE_SPECIALIST_RUN_ID, RUN_ID, AT),
             ),
-            (
-                """INSERT INTO evidence_records (
-                    observed_at, rca_run_id, specialist_run_id,
-                    evidence_type, source_agent, source_endpoint, tool_name,
-                    time_window_start, time_window_end, structured_data,
-                    raw_result_reference, content_hash
-                ) VALUES (
-                    $1, $2, $3, 'trace.query', 'TRACE', 'trace', 'trace_query',
-                    $1, $1, $4::jsonb, 'trace-result', 'trace-hash'
-                )""",
                 (
-                    AT,
-                    RUN_ID,
-                    TRACE_SPECIALIST_RUN_ID,
-                    json.dumps(TRACE_WATERFALL),
+                    """INSERT INTO evidence_records (
+                        observed_at, rca_run_id, specialist_run_id,
+                        evidence_type, source_agent, source_endpoint, tool_name,
+                        time_window_start, time_window_end, structured_data,
+                        raw_result, metadata, content_hash
+                    ) VALUES (
+                        $1, $2, $3, 'trace.query', 'TRACE', 'trace', 'trace_query',
+                        $1, $1, $4::jsonb, $5, $6::jsonb, $7
+                    )""",
+                    (
+                        AT,
+                        RUN_ID,
+                        TRACE_SPECIALIST_RUN_ID,
+                        json.dumps(TRACE_WATERFALL),
+                        TRACE_RAW_RESULT,
+                        json.dumps(TRACE_METADATA),
+                        TRACE_CONTENT_HASH,
+                    ),
                 ),
-            ),
             (
                 """INSERT INTO rca_reports (
-                    id, rca_run_id, version, summary, report, created_at
+                    id, rca_run_id, version, summary, report, result_status, created_at
                 ) VALUES (
                     $1, $2, 1, 'CPU 使用率過高',
                     '{"status":"PARTIAL","rootCause":"尚待確認","confidence":0.42,"impact":"資料庫延遲","recommendations":["確認慢查詢"],"hypotheses":[{"statement":"資料庫負載增加","confidence":0.42,"claims":[]}],"claims":[]}'::jsonb,
-                    $3
+                    'PARTIAL', $3
                 )""",
                 (REPORT_ID, RUN_ID, AT),
             ),
@@ -386,6 +396,9 @@ async def _insert_trace_evidence(
     *,
     observed_at: datetime,
 ) -> None:
+    # 使用固定的 non-UTF-8 bytes 作為 raw_result，確保符合最終 schema 欄位
+    _raw = b"\x00\xffnewer-trace-result"
+    _hash = hashlib.sha256(_raw).hexdigest()
     async with repository._session_factory() as session:
         await session.execute(
             text(
@@ -393,13 +406,14 @@ async def _insert_trace_evidence(
                     observed_at, rca_run_id, specialist_run_id,
                     evidence_type, source_agent, source_endpoint, tool_name,
                     time_window_start, time_window_end, structured_data,
-                    raw_result_reference, content_hash
+                    raw_result, metadata, content_hash
                 ) VALUES (
                     :observed_at, :rca_run_id, :specialist_run_id,
                     'trace.query', 'TRACE', 'trace', 'trace_query',
                     :observed_at, :observed_at,
-                    CAST(:structured_data AS JSONB), 'newer-trace-result',
-                    'newer-trace-hash'
+                    CAST(:structured_data AS JSONB), :raw_result,
+                    '{"contentType": "application/json", "source": "trace"}'::jsonb,
+                    :content_hash
                 )"""
             ),
             {
@@ -407,8 +421,11 @@ async def _insert_trace_evidence(
                 "rca_run_id": RUN_ID,
                 "specialist_run_id": TRACE_SPECIALIST_RUN_ID,
                 "structured_data": json.dumps(structured_data),
+                "raw_result": _raw,
+                "content_hash": _hash,
             },
         )
+
 
 
 @pytest.mark.asyncio

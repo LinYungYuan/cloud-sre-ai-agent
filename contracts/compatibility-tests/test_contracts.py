@@ -21,6 +21,9 @@ CONTRACT_PATH = ROOT / "contracts" / "openapi" / "grafana-webhook-v1.yaml"
 OPERATOR_CONTRACT_PATH = ROOT / "contracts" / "openapi" / "operator-api-v1.yaml"
 TABLE_OWNERSHIP_PATH = ROOT / "contracts" / "database" / "table-ownership.yaml"
 LOCAL_COMPOSE_PATH = ROOT / "docker-compose.yml"
+APPROVED_BACKEND_WORKER_TABLE_MIGRATIONS = frozenset(
+    {"0003_non_partition_runtime_tables.py"}
+)
 
 
 def _contract() -> dict:
@@ -53,6 +56,19 @@ def _write_example(root: Path, name: str, payload: dict) -> None:
     (root / "contracts" / "examples" / name).write_text(
         json.dumps(payload), encoding="utf-8"
     )
+
+
+def _assert_backend_migration_ownership(
+    migration_paths: list[Path], worker_owned: set[str]
+) -> None:
+    for migration_path in migration_paths:
+        if migration_path.name in APPROVED_BACKEND_WORKER_TABLE_MIGRATIONS:
+            continue
+        migration = migration_path.read_text(encoding="utf-8")
+        assert not any(
+            f'"{table_name}"' in migration or f"'{table_name}'" in migration
+            for table_name in worker_owned
+        ), f"{migration_path.name} touches an RCA Worker-owned table"
 
 
 def test_all_contracts_and_examples_are_valid():
@@ -646,12 +662,38 @@ def test_every_existing_table_has_one_migration_owner() -> None:
         for path in (ROOT / "backend" / "migrations" / "versions").glob("*.py")
         if not path.name.startswith("0001_")
     ]
-    for migration_path in future_backend_migrations:
-        migration = migration_path.read_text(encoding="utf-8")
-        assert not any(
-            f'"{table_name}"' in migration or f"'{table_name}'" in migration
-            for table_name in worker_owned
-        ), f"{migration_path.name} touches an RCA Worker-owned table"
+    assert APPROVED_BACKEND_WORKER_TABLE_MIGRATIONS == frozenset(
+        {"0003_non_partition_runtime_tables.py"}
+    )
+    _assert_backend_migration_ownership(future_backend_migrations, worker_owned)
+
+
+@pytest.mark.parametrize(
+    "migration_name",
+    [
+        "0004_future_backend_change.py",
+        "0003_non_partition_runtime_tables_copy.py",
+    ],
+)
+def test_migration_owner_rejects_every_other_backend_worker_table_change(
+    tmp_path: Path,
+    migration_name: str,
+) -> None:
+    migration_path = tmp_path / migration_name
+    migration_path.write_text(
+        'WORKER_TABLE = "evidence_records"\n'
+        'op.execute(f"ALTER TABLE {WORKER_TABLE} ADD COLUMN unsafe TEXT")',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match=f"{migration_name} touches an RCA Worker-owned table",
+    ):
+        _assert_backend_migration_ownership(
+            [migration_path],
+            {"evidence_records"},
+        )
 
 
 def test_dashboard_contract_covers_approved_operator_summary():
