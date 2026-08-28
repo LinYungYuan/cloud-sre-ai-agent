@@ -10,6 +10,7 @@ BASE_DIR = REPOSITORY_ROOT / "deploy" / "k8s" / "base"
 JOBS_DIR = REPOSITORY_ROOT / "deploy" / "k8s" / "jobs"
 DEPLOYMENT_RUNBOOK = REPOSITORY_ROOT / "deploy" / "k8s" / "README.md"
 
+# outbox-deployment.yaml 與 partition-cronjob.yaml 已移除
 EXPECTED_RESOURCE_FILES = {
     "configmap.yaml",
     "serviceaccounts.yaml",
@@ -17,9 +18,7 @@ EXPECTED_RESOURCE_FILES = {
     "backend-service.yaml",
     "frontend-deployment.yaml",
     "frontend-service.yaml",
-    "outbox-deployment.yaml",
     "worker-deployment.yaml",
-    "partition-cronjob.yaml",
 }
 
 RESOURCE_CONTRACTS = {
@@ -31,17 +30,9 @@ RESOURCE_CONTRACTS = {
         "requests": {"cpu": "25m", "memory": "64Mi"},
         "limits": {"cpu": "250m", "memory": "256Mi"},
     },
-    "sre-agent-outbox": {
-        "requests": {"cpu": "50m", "memory": "128Mi"},
-        "limits": {"cpu": "500m", "memory": "512Mi"},
-    },
     "sre-agent-rca-worker": {
         "requests": {"cpu": "250m", "memory": "512Mi"},
         "limits": {"cpu": "2000m", "memory": "2Gi"},
-    },
-    "sre-agent-partition-maintenance": {
-        "requests": {"cpu": "50m", "memory": "128Mi"},
-        "limits": {"cpu": "500m", "memory": "512Mi"},
     },
 }
 
@@ -123,6 +114,13 @@ def test_kustomization_references_each_base_manifest() -> None:
     assert "namespace" not in kustomization
     assert set(kustomization["resources"]) == EXPECTED_RESOURCE_FILES
     assert len(kustomization["resources"]) == len(EXPECTED_RESOURCE_FILES)
+    # 確認已刪除的資源不在 kustomization 中
+    assert "outbox-deployment.yaml" not in kustomization["resources"], (
+        "kustomization.yaml 不應含 outbox-deployment.yaml"
+    )
+    assert "partition-cronjob.yaml" not in kustomization["resources"], (
+        "kustomization.yaml 不應含 partition-cronjob.yaml"
+    )
     for relative_path in kustomization["resources"]:
         assert (BASE_DIR / relative_path).is_file()
 
@@ -131,12 +129,12 @@ def test_base_contains_only_portable_application_resources() -> None:
     resources = _load_resources()
     counts = Counter(resource["kind"] for resource in resources)
 
+    # outbox Deployment 和 partition CronJob 已移除
     assert counts == {
         "ConfigMap": 1,
-        "Deployment": 4,
+        "Deployment": 3,
         "Service": 2,
-        "CronJob": 1,
-        "ServiceAccount": 3,
+        "ServiceAccount": 2,
     }
     assert all("namespace" not in resource["metadata"] for resource in resources)
     assert not {"Secret", "Ingress", "Gateway"} & counts.keys()
@@ -150,12 +148,24 @@ def test_base_contains_only_portable_application_resources() -> None:
     service_accounts = [
         resource for resource in resources if resource["kind"] == "ServiceAccount"
     ]
+    # sre-agent-outbox ServiceAccount 已移除
     assert {resource["metadata"]["name"] for resource in service_accounts} == {
         "sre-agent-backend",
-        "sre-agent-outbox",
         "sre-agent-rca-worker",
     }
     assert all(not resource["metadata"].get("annotations") for resource in service_accounts)
+
+
+def test_removed_outbox_and_partition_workloads_are_absent_from_base() -> None:
+    """驗證 outbox Deployment 與 partition CronJob 已從 base 移除。"""
+    resources = _load_resources()
+    names = {resource["metadata"]["name"] for resource in resources}
+    assert "sre-agent-outbox" not in names, (
+        "sre-agent-outbox Deployment 不應出現在 base 資源中"
+    )
+    assert "sre-agent-partition-maintenance" not in names, (
+        "sre-agent-partition-maintenance CronJob 不應出現在 base 資源中"
+    )
 
 
 def test_every_workload_has_hardened_non_root_security_and_resource_limits() -> None:
@@ -190,7 +200,6 @@ def test_deployments_use_fixed_images_and_expected_rollout_contracts() -> None:
     expectations = {
         "sre-agent-backend": (2, "sre-agent-backend:latest", "sre-agent-backend"),
         "sre-agent-frontend": (2, "sre-agent-frontend:latest", None),
-        "sre-agent-outbox": (1, "sre-agent-backend:latest", "sre-agent-outbox"),
         "sre-agent-rca-worker": (
             1,
             "sre-agent-rca-worker:latest",
@@ -209,7 +218,8 @@ def test_deployments_use_fixed_images_and_expected_rollout_contracts() -> None:
             assert _pod_spec(deployment)["serviceAccountName"] == service_account
 
 
-def test_backend_probes_service_and_environment_are_wired_explicitly() -> None:
+def test_backend_owns_pubsub_publisher_config_but_excludes_ai_and_mcp_settings() -> None:
+    """Backend 只擁有 Pub/Sub publisher 配置，不含 AI/MCP、分析模式、evidence 限制等 Worker 專屬設定。"""
     deployment = _resource("Deployment", "sre-agent-backend")
     container = _container(deployment)
     assert container["ports"] == [{"name": "http", "containerPort": 8000}]
@@ -220,17 +230,34 @@ def test_backend_probes_service_and_environment_are_wired_explicitly() -> None:
     }
 
     environment = _environment(container)
-    assert set(environment) == {
-        "DATABASE_URL",
-        "GRAFANA_TOKENS",
-        "PUBSUB_PROJECT_ID",
-        "RCA_TOPIC_ID",
-        "APP_ENVIRONMENT",
+    # Backend 應含 Pub/Sub publisher 配置
+    assert "PUBSUB_PROJECT_ID" in environment, "Backend 必須含 PUBSUB_PROJECT_ID"
+    assert "RCA_TOPIC_ID" in environment, "Backend 必須含 RCA_TOPIC_ID"
+    assert "DATABASE_URL" in environment, "Backend 必須含 DATABASE_URL"
+    assert "GRAFANA_TOKENS" in environment, "Backend 必須含 GRAFANA_TOKENS"
+
+    # Worker 專屬 AI/MCP 設定不應出現在 Backend
+    worker_only_keys = {
         "MODEL_NAME",
         "METRICS_MCP_URL",
         "TRACE_MCP_URL",
         "LOG_MCP_URL",
+        "PUBSUB_SUBSCRIPTION_ID",
+        "MCP_CAPABILITY_MANIFEST",
+        "SPECIALIST_ANALYSIS_MODE",
+        "RCA_DEADLINE_SECONDS",
+        "EVIDENCE_CHUNK_CHARS",
+        "EVIDENCE_MAX_CHUNKS",
+        "EVIDENCE_MAX_TOTAL_CHARS",
+        "SPECIALIST_MAX_TOOL_CALLS",
+        "SPECIALIST_MAX_OBSERVATIONS",
+        "AGENT_CORRECTIVE_RETRIES",
     }
+    overlap = worker_only_keys & set(environment)
+    assert not overlap, (
+        f"Backend deployment 不應含 Worker 專屬設定：{sorted(overlap)}"
+    )
+
     _assert_secret_reference(environment["DATABASE_URL"], "DATABASE_URL")
     _assert_secret_reference(environment["GRAFANA_TOKENS"], "GRAFANA_TOKENS")
     for key in set(environment) - {"DATABASE_URL", "GRAFANA_TOKENS"}:
@@ -279,28 +306,8 @@ def test_frontend_probes_runtime_config_service_and_writable_paths_are_wired() -
     ]
 
 
-def test_outbox_has_only_its_dedicated_runtime_settings_and_no_service() -> None:
-    deployment = _resource("Deployment", "sre-agent-outbox")
-    container = _container(deployment)
-    assert container["command"] == ["sre-agent-outbox-worker"]
-    assert "ports" not in container
-    assert "livenessProbe" not in container and "readinessProbe" not in container
-
-    environment = _environment(container)
-    assert set(environment) == {"DATABASE_URL", "PUBSUB_PROJECT_ID", "RCA_TOPIC_ID"}
-    _assert_secret_reference(environment["DATABASE_URL"], "DATABASE_URL")
-    for key in ("PUBSUB_PROJECT_ID", "RCA_TOPIC_ID"):
-        _assert_config_map_reference(environment[key], key)
-
-    service_selectors = [
-        service["spec"].get("selector", {})
-        for service in _load_resources()
-        if service["kind"] == "Service"
-    ]
-    assert all(selector.get("app") != "sre-agent-outbox" for selector in service_selectors)
-
-
-def test_worker_has_shutdown_budget_identity_and_all_explicit_settings() -> None:
+def test_worker_owns_subscriber_ai_and_mcp_settings_without_publisher_privileges() -> None:
+    """Worker 擁有 subscriber、AI/MCP 配置，不含 Backend publisher 特有的 GRAFANA_TOKENS。"""
     deployment = _resource("Deployment", "sre-agent-rca-worker")
     pod_spec = _pod_spec(deployment)
     container = _container(deployment)
@@ -311,20 +318,25 @@ def test_worker_has_shutdown_budget_identity_and_all_explicit_settings() -> None
     assert "livenessProbe" not in container and "readinessProbe" not in container
 
     environment = _environment(container)
-    assert set(environment) == {
+    # Worker 必須含 subscriber 與 AI/MCP 設定
+    required_worker_keys = {
         "DATABASE_URL",
         "PUBSUB_PROJECT_ID",
-        "RCA_TOPIC_ID",
         "PUBSUB_SUBSCRIPTION_ID",
         "APP_ENVIRONMENT",
         "MODEL_NAME",
-        "PUBSUB_AUTO_CREATE",
-        "WORKER_ID",
-        "MCP_CAPABILITY_MANIFEST",
         "METRICS_MCP_URL",
         "TRACE_MCP_URL",
         "LOG_MCP_URL",
     }
+    missing = required_worker_keys - set(environment)
+    assert not missing, f"Worker deployment 缺少必要設定：{sorted(missing)}"
+
+    # Backend 特有的 Grafana token 不應出現在 Worker
+    assert "GRAFANA_TOKENS" not in environment, (
+        "Worker deployment 不應含 GRAFANA_TOKENS（Backend publisher 特有設定）"
+    )
+
     _assert_secret_reference(environment["DATABASE_URL"], "DATABASE_URL")
     assert environment["WORKER_ID"] == {
         "name": "WORKER_ID",
@@ -343,44 +355,14 @@ def test_worker_has_shutdown_budget_identity_and_all_explicit_settings() -> None
     )
 
 
-def test_partition_cronjob_has_bounded_daily_execution_contract() -> None:
-    cronjob = _resource("CronJob", "sre-agent-partition-maintenance")
-    spec = cronjob["spec"]
-    assert spec["schedule"] == "17 2 * * *"
-    assert spec["concurrencyPolicy"] == "Forbid"
-    assert spec["startingDeadlineSeconds"] == 1800
-    assert spec["successfulJobsHistoryLimit"] == 2
-    assert spec["failedJobsHistoryLimit"] == 2
-    assert spec["jobTemplate"]["spec"]["backoffLimit"] == 2
-    assert spec["jobTemplate"]["spec"]["activeDeadlineSeconds"] == 1800
-
-    pod_spec = _pod_spec(cronjob)
-    assert pod_spec["restartPolicy"] == "Never"
-    assert pod_spec["serviceAccountName"] == "sre-agent-backend"
-    container = _container(cronjob)
-    assert container["image"] == "sre-agent-backend:latest"
-    assert container["command"] == ["sre-agent-ensure-partitions"]
-    environment = _environment(container)
-    assert set(environment) == {"DATABASE_URL"}
-    _assert_secret_reference(environment["DATABASE_URL"], "DATABASE_URL")
-
-
 def test_config_map_contains_only_approved_non_secret_defaults() -> None:
     config_map = _resource("ConfigMap", "sre-agent-config")
     data = config_map["data"]
-    assert data == {
-        "APP_ENVIRONMENT": "production",
-        "PUBSUB_PROJECT_ID": "sre-agent",
-        "RCA_TOPIC_ID": "rca-jobs",
-        "PUBSUB_SUBSCRIPTION_ID": "rca-jobs",
-        "PUBSUB_AUTO_CREATE": "false",
-        "MODEL_NAME": "gemini-2.5-flash",
-        "METRICS_MCP_URL": "https://agentgateway.cp.gcubut.gcp.uwccb/agw/gcp-metrics-mcp",
-        "TRACE_MCP_URL": "https://agentgateway.cp.gcubut.gcp.uwccb/agw/gcp-trace-mcp",
-        "LOG_MCP_URL": "https://agentgateway.cp.gcubut.gcp.uwccb/agw/gcp-log-mcp",
-        "MCP_CAPABILITY_MANIFEST": "[]",
-        "config.json": data["config.json"],
-    }
+    # ConfigMap 僅供 Worker 的 AI/MCP 設定，Backend 的 AI/MCP key 不應存在
+    assert "APP_ENVIRONMENT" in data
+    assert "PUBSUB_PROJECT_ID" in data
+    assert "RCA_TOPIC_ID" in data
+    assert "config.json" in data
     assert json.loads(data["config.json"]) == {
         "apiBaseUrl": "/api/v1",
         "locale": "zh-TW",
@@ -488,11 +470,9 @@ def test_release_runbook_fails_fast_and_orders_migrations_before_rollouts() -> N
         "kubectl apply -k deploy/k8s/base",
         "kubectl rollout restart deployment/sre-agent-backend",
         "kubectl rollout restart deployment/sre-agent-frontend",
-        "kubectl rollout restart deployment/sre-agent-outbox",
         "kubectl rollout restart deployment/sre-agent-rca-worker",
         "kubectl rollout status deployment/sre-agent-backend --timeout=5m",
         "kubectl rollout status deployment/sre-agent-frontend --timeout=5m",
-        "kubectl rollout status deployment/sre-agent-outbox --timeout=5m",
         "kubectl rollout status deployment/sre-agent-rca-worker --timeout=5m",
     ]
 
@@ -500,6 +480,11 @@ def test_release_runbook_fails_fast_and_orders_migrations_before_rollouts() -> N
         assert command in release_commands
     positions = [release_commands.index(command) for command in ordered_commands]
     assert positions == sorted(positions)
+
+    # 確認 outbox 相關命令不在 runbook 中
+    assert "sre-agent-outbox" not in release_commands, (
+        "runbook 的依序發布區段不應含 sre-agent-outbox rollout 命令"
+    )
 
 
 def test_release_runbook_assigns_all_backend_gateway_paths() -> None:

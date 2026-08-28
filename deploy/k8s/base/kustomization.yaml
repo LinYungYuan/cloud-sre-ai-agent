@@ -7,6 +7,4 @@ resources:
   - backend-service.yaml
   - frontend-deployment.yaml
   - frontend-service.yaml
-  - outbox-deployment.yaml
   - worker-deployment.yaml
-  - partition-cronjob.yaml

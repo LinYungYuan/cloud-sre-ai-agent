@@ -60,26 +60,6 @@ spec:
                 configMapKeyRef:
                   name: sre-agent-config
                   key: APP_ENVIRONMENT
-            - name: MODEL_NAME
-              valueFrom:
-                configMapKeyRef:
-                  name: sre-agent-config
-                  key: MODEL_NAME
-            - name: METRICS_MCP_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: sre-agent-config
-                  key: METRICS_MCP_URL
-            - name: TRACE_MCP_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: sre-agent-config
-                  key: TRACE_MCP_URL
-            - name: LOG_MCP_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: sre-agent-config
-                  key: LOG_MCP_URL
           livenessProbe:
             httpGet:
               path: /health/live
