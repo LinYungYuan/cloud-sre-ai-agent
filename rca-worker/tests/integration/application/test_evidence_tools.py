@@ -450,10 +450,10 @@ async def test_duplicate_evidence_uuid_is_rejected_by_the_database() -> None:
         """INSERT INTO evidence_records(
                id,observed_at,rca_run_id,specialist_run_id,evidence_type,
                source_agent,source_endpoint,tool_name,time_window_start,
-               time_window_end,structured_data,raw_result_reference,content_hash)
+               time_window_end,structured_data,raw_result,metadata,content_hash)
            VALUES (:id,:observed,:run,:specialist,'metrics.query','METRICS',
                    'metrics','metrics_query_0',:observed,:observed,
-                   CAST(:structured AS JSONB),'worker:fixture',:hash)"""
+                   CAST(:structured AS JSONB),:raw_result,CAST(:metadata AS JSONB),:hash)"""
     )
     values = {
         "id": evidence_id,
@@ -461,6 +461,8 @@ async def test_duplicate_evidence_uuid_is_rejected_by_the_database() -> None:
         "run": run_id,
         "specialist": specialist_id,
         "structured": json.dumps({"marker": "first"}),
+        "raw_result": b"first",
+        "metadata": json.dumps({"contentType": "application/json"}),
         "hash": "first",
     }
     try:
