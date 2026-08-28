@@ -60,7 +60,7 @@ class _OfflineAlembicContext:
 def _load_backend_migration_env(monkeypatch: pytest.MonkeyPatch) -> _MigrationConfig:
     context = _OfflineAlembicContext()
     alembic = types.ModuleType("alembic")
-    alembic.context = context
+    alembic.__dict__["context"] = context
     monkeypatch.setitem(sys.modules, "alembic", alembic)
     module_path = Path(__file__).parents[3] / "migrations" / "env.py"
     spec = importlib.util.spec_from_file_location(

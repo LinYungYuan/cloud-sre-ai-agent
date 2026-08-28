@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from sre_agent.application.outbox.publish_events import (
     OutboxEventNotFound,
@@ -162,8 +163,10 @@ class _BlockingPublisher(_RecordingPublisher):
 
 
 def _service(database: _FakeSessionFactory, publisher: _RecordingPublisher):
+    session_factory = async_sessionmaker[AsyncSession]()
+    session_factory.__dict__["begin"] = database.begin
     return OutboxPublishService(
-        database,
+        session_factory,
         publisher,
         TOPIC,
         retry_delay=timedelta(seconds=30),
