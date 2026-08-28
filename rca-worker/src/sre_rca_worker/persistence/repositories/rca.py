@@ -147,6 +147,14 @@ class RcaRepository:
         draft: EvidenceDraft,
     ) -> EvidenceReference:
         content_hash = hashlib.sha256(draft.raw_result).hexdigest()
+        evidence_metadata = {
+            "contentType": draft.content_type,
+            "inputSha256": draft.input_sha256,
+            "inputScope": draft.input_scope.model_dump(mode="json"),
+            "normalizedScope": draft.normalized_scope.model_dump(mode="json"),
+            "requestWindowStart": draft.request_window_start.isoformat(),
+            "requestWindowEnd": draft.request_window_end.isoformat(),
+        }
         row = (
             await self._session.execute(
                 text(
@@ -154,14 +162,14 @@ class RcaRepository:
                          observed_at, rca_run_id,
                          specialist_run_id, evidence_type, source_agent,
                          source_endpoint, tool_name, time_window_start,
-                         time_window_end, structured_data, raw_result_reference,
+                         time_window_end, structured_data, raw_result, metadata,
                          content_hash
                        ) VALUES (
                          :observed_at, :rca_run_id,
                          :specialist_run_id, :evidence_type, :source_agent,
                          :source_endpoint, :tool_name, :window_start,
                          :window_end, CAST(:structured_data AS JSONB),
-                         :raw_result_reference, :content_hash
+                         :raw_result, CAST(:metadata AS JSONB), :content_hash
                        ) RETURNING id"""
                 ),
                 {
@@ -177,7 +185,8 @@ class RcaRepository:
                     "structured_data": __import__("json").dumps(
                         draft.structured_json, ensure_ascii=False
                     ),
-                    "raw_result_reference": f"worker:sha256:{content_hash}",
+                    "raw_result": draft.raw_result,
+                    "metadata": json.dumps(evidence_metadata, ensure_ascii=False),
                     "content_hash": content_hash,
                 },
             )

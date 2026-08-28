@@ -763,14 +763,19 @@ class ProductionRcaProcessor:
                         )
             await session.execute(
                 text(
-                    """INSERT INTO rca_reports(rca_run_id,version,summary,report)
-                       SELECT :run, COALESCE(max(version),0)+1, :summary,
-                              CAST(:report AS JSONB)
-                       FROM rca_reports WHERE rca_run_id=:run"""
+                    """INSERT INTO rca_reports(
+                              rca_run_id,version,summary,report,result_status)
+                       SELECT :run,
+                              COALESCE((
+                                  SELECT max(version) FROM rca_reports
+                                  WHERE rca_run_id=:run
+                              ),0)+1,
+                              :summary,CAST(:report AS JSONB),:result_status"""
                 ),
                 {
                     "run": claim.rca_run_id,
                     "summary": report.summary_zh_tw,
                     "report": json.dumps(body, ensure_ascii=False),
+                    "result_status": report.status,
                 },
             )

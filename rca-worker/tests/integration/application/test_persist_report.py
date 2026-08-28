@@ -103,10 +103,10 @@ async def _seed_analysis_owner(
                        id,observed_at,rca_run_id,specialist_run_id,
                        evidence_type,source_agent,source_endpoint,tool_name,
                        time_window_start,time_window_end,structured_data,content_hash,
-                       raw_result_reference)
+                       raw_result,metadata)
                    VALUES (:id,:now,:run,:specialist,:evidence_type,:source_agent,
                            :endpoint,:tool,:now,:now,CAST(:structured AS JSONB),'hash',
-                           'worker:fixture')"""
+                           convert_to('raw-fixture-secret','UTF8'),'{}')"""
             ),
             {
                 "id": evidence,
@@ -147,10 +147,10 @@ async def _seed_additional_specialist_evidence(
                        id,observed_at,rca_run_id,specialist_run_id,
                        evidence_type,source_agent,source_endpoint,tool_name,
                        time_window_start,time_window_end,structured_data,content_hash,
-                       raw_result_reference)
+                       raw_result,metadata)
                    VALUES (:id,:now,:run,:specialist,:evidence_type,:source_agent,
                            :endpoint,:tool,:now,:now,'{}','hash',
-                           'worker:fixture')"""
+                           convert_to('cross-specialist-secret','UTF8'),'{}')"""
             ),
             {
                 "id": evidence_id,
@@ -447,17 +447,17 @@ async def test_report_persists_hypothesis_confidence_and_evidence_relations() ->
                        id,observed_at,rca_run_id,specialist_run_id,
                        evidence_type,source_agent,source_endpoint,tool_name,
                        time_window_start,time_window_end,structured_data,content_hash,
-                       raw_result_reference)
+                       raw_result,metadata)
                    VALUES (:id,:now,:run,:specialist,'METRIC','metrics',
                            'metrics','metrics_query',:now,:now,'{}','hash',
-                           'worker:fixture')"""
+                           convert_to('raw','UTF8'),'{}')"""
             ),
             {"id": evidence, "now": now, "run": run, "specialist": specialist},
         )
 
     reference = EvidenceReference(id=evidence)
     report = RcaReportDraft(
-        status="COMPLETE",
+        status="PARTIAL",
         summary_zh_tw="CPU 異常由資料庫負載造成。",
         hypotheses=(
             RcaHypothesis(
@@ -472,7 +472,7 @@ async def test_report_persists_hypothesis_confidence_and_evidence_relations() ->
                 ),
             ),
         ),
-        missing_evidence=(),
+        missing_evidence=("trace evidence unavailable",),
         remediation=("限制高成本查詢",),
         verification_steps=("確認 CPU 與延遲回復",),
     )
@@ -508,7 +508,7 @@ async def test_report_persists_hypothesis_confidence_and_evidence_relations() ->
             await session.execute(
                 text(
                     """SELECT hypothesis.statement,hypothesis.confidence,link.relation,
-                              report.report
+                              report.report,report.version,report.result_status
                        FROM rca_hypotheses hypothesis
                        JOIN hypothesis_evidence link ON link.hypothesis_id=hypothesis.id
                        JOIN rca_reports report ON report.rca_run_id=hypothesis.rca_run_id
@@ -524,6 +524,8 @@ async def test_report_persists_hypothesis_confidence_and_evidence_relations() ->
         assert row.report["hypotheses"][0]["claims"][0]["evidence"][0][
             "evidenceId"
         ] == str(evidence)
+        assert row.version == 1
+        assert row.result_status == "PARTIAL"
         failed = (
             await session.execute(
                 text(
