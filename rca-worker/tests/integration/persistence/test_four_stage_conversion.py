@@ -130,6 +130,8 @@ def _month_pair() -> tuple[datetime, datetime]:
 
 async def _seed_worker_0002_source(
     connection: asyncpg.Connection,
+    *,
+    months: tuple[datetime, datetime] | None = None,
 ) -> dict[str, UUID]:
     ids = {
         "team": UUID("30000000-0000-0000-0000-000000000001"),
@@ -145,7 +147,7 @@ async def _seed_worker_0002_source(
         "evidence_one": UUID("30000000-0000-0000-0000-000000000011"),
         "evidence_two": UUID("30000000-0000-0000-0000-000000000012"),
     }
-    first_month, second_month = _month_pair()
+    first_month, second_month = months or _month_pair()
     await connection.execute(
         "INSERT INTO teams (id, name) VALUES ($1, 'task2-team')", ids["team"]
     )
@@ -190,12 +192,13 @@ async def _seed_worker_0002_source(
                analysis_result, model_name, skill_name, skill_sha256, analyzed_at
            ) VALUES (
                $1, $2, 'METRICS', 'PARTIAL', 'MCP_TIMEOUT', $3,
-               'gemini-test', 'metrics-analysis', $4, now()
+               'gemini-test', 'metrics-analysis', $4, $5
            )""",
         ids["specialist"],
         ids["run"],
         {"summary": "partial analysis", "evidenceIds": []},
         "a" * 64,
+        first_month,
     )
     await connection.execute(
         """INSERT INTO rca_reports (
@@ -268,7 +271,10 @@ async def _catalog_snapshot(
            FROM pg_constraint AS constraint_row
            JOIN pg_class AS relation
              ON relation.oid = constraint_row.conrelid
-           WHERE relation.relname = ANY($1::text[])
+           JOIN pg_namespace AS namespace
+             ON namespace.oid = relation.relnamespace
+           WHERE namespace.nspname = 'public'
+             AND relation.relname = ANY($1::text[])
            UNION ALL
            SELECT 'relation', relation.relname, relation.relkind::text,
                   relation.relispartition::text, NULL, NULL
@@ -277,7 +283,12 @@ async def _catalog_snapshot(
              ON namespace.oid = relation.relnamespace
            WHERE namespace.nspname = 'public'
              AND relation.relname = ANY($1::text[])
-           ORDER BY 1, 2, 3""",
+           UNION ALL
+           SELECT 'index', schemaname, tablename, indexname, indexdef, NULL
+           FROM pg_indexes
+           WHERE schemaname = 'public'
+             AND tablename = ANY($1::text[])
+           ORDER BY 1, 2, 3, 4""",
         [
             *CANONICAL_TABLES,
             *WORKER_CATALOG_TABLES,
@@ -293,11 +304,13 @@ async def _data_snapshot(
     connection: asyncpg.Connection, ids: dict[str, UUID]
 ) -> tuple[tuple[object, ...], ...]:
     evidence_rows = await connection.fetch(
-        """SELECT id, observed_at, raw_result, metadata, content_hash
+        """SELECT id, observed_at, structured_data, raw_result, metadata,
+                  content_hash
            FROM evidence_records ORDER BY id"""
     )
     legacy_evidence_rows = await connection.fetch(
-        """SELECT id, observed_at, raw_result, metadata, content_hash
+        """SELECT id, observed_at, structured_data, raw_result, metadata,
+                  content_hash
            FROM evidence_records__partitioned_legacy_0003 ORDER BY id"""
     )
     worker_rows = (
@@ -305,10 +318,12 @@ async def _data_snapshot(
             "SELECT status, failure_code FROM rca_runs WHERE id=$1", ids["run"]
         ),
         await connection.fetchrow(
-            "SELECT result_status, report FROM rca_reports WHERE id=$1", ids["report"]
+            """SELECT result_status, summary, report
+               FROM rca_reports WHERE id=$1""",
+            ids["report"],
         ),
         await connection.fetchrow(
-            """SELECT status, lease_owner, lease_expires_at, attempt_count
+            """SELECT status, payload, lease_owner, lease_expires_at, attempt_count
                FROM worker_jobs WHERE id=$1""",
             ids["job"],
         ),
@@ -328,6 +343,79 @@ async def _data_snapshot(
         tuple(row)
         for row in (*evidence_rows, *legacy_evidence_rows, *worker_rows)
         if row is not None
+    )
+
+
+async def _partition_helper_snapshot(
+    connection: asyncpg.Connection,
+) -> tuple[tuple[object, ...], ...]:
+    rows = await connection.fetch(
+        """SELECT table_name, column_name
+           FROM information_schema.columns
+           WHERE table_schema = 'public'
+             AND table_name = ANY($1::text[])
+             AND (column_name = 'partition_timestamp'
+                  OR column_name LIKE '%\\_partition_timestamp' ESCAPE '\\')
+           ORDER BY table_name, column_name""",
+        [
+            *CANONICAL_TABLES,
+            "ingestion_dedup_keys",
+            "alert_instances",
+            "incident_alerts",
+            "hypothesis_evidence",
+        ],
+    )
+    return tuple(tuple(row) for row in rows)
+
+
+async def _uuid_foreign_key_snapshot(
+    connection: asyncpg.Connection,
+) -> tuple[tuple[object, ...], ...]:
+    rows = await connection.fetch(
+        """SELECT relation.relname,
+                  array_agg(source_column.attname ORDER BY key_row.ordinality),
+                  target_relation.relname,
+                  array_agg(target_column.attname ORDER BY key_row.ordinality),
+                  array_agg(source_type.typname ORDER BY key_row.ordinality),
+                  array_agg(target_type.typname ORDER BY key_row.ordinality)
+           FROM pg_constraint AS constraint_row
+           JOIN pg_class AS relation ON relation.oid=constraint_row.conrelid
+           JOIN pg_namespace AS source_namespace
+             ON source_namespace.oid=relation.relnamespace
+           JOIN pg_class AS target_relation
+             ON target_relation.oid=constraint_row.confrelid
+           JOIN pg_namespace AS target_namespace
+             ON target_namespace.oid=target_relation.relnamespace
+           JOIN unnest(constraint_row.conkey, constraint_row.confkey)
+                WITH ORDINALITY AS key_row(source_num, target_num, ordinality)
+             ON true
+           JOIN pg_attribute AS source_column
+             ON source_column.attrelid=relation.oid
+            AND source_column.attnum=key_row.source_num
+           JOIN pg_attribute AS target_column
+             ON target_column.attrelid=target_relation.oid
+            AND target_column.attnum=key_row.target_num
+           JOIN pg_type AS source_type ON source_type.oid=source_column.atttypid
+           JOIN pg_type AS target_type ON target_type.oid=target_column.atttypid
+           WHERE target_relation.relname = ANY($1::text[])
+             AND source_namespace.nspname = 'public'
+             AND target_namespace.nspname = 'public'
+           GROUP BY relation.relname, target_relation.relname,
+                    constraint_row.conname
+           ORDER BY relation.relname, target_relation.relname,
+                    constraint_row.conname""",
+        list(CANONICAL_TABLES),
+    )
+    return tuple(
+        (
+            row[0],
+            tuple(row[1]),
+            row[2],
+            tuple(row[3]),
+            tuple(row[4]),
+            tuple(row[5]),
+        )
+        for row in rows
     )
 
 
@@ -357,8 +445,11 @@ async def _assert_final_catalog(connection: asyncpg.Connection) -> None:
     }
     relations = await connection.fetch(
         """SELECT relname, relkind, relispartition
-           FROM pg_class
-           WHERE oid = ANY($1::regclass[])
+           FROM pg_class AS relation
+           JOIN pg_namespace AS namespace
+             ON namespace.oid = relation.relnamespace
+           WHERE namespace.nspname = 'public'
+             AND relname = ANY($1::text[])
            ORDER BY relname""",
         list(CANONICAL_TABLES),
     )
@@ -367,8 +458,11 @@ async def _assert_final_catalog(connection: asyncpg.Connection) -> None:
     ]
     legacy_relations = await connection.fetch(
         """SELECT relname, relkind
-           FROM pg_class
-           WHERE oid = ANY($1::regclass[])
+           FROM pg_class AS relation
+           JOIN pg_namespace AS namespace
+             ON namespace.oid = relation.relnamespace
+           WHERE namespace.nspname = 'public'
+             AND relname = ANY($1::text[])
            ORDER BY relname""",
         [f"{table}__partitioned_legacy_0003" for table in CANONICAL_TABLES],
     )
@@ -378,7 +472,8 @@ async def _assert_final_catalog(connection: asyncpg.Connection) -> None:
     ]
     primary_keys = await connection.fetch(
         """SELECT relation.relname,
-                  array_agg(column_row.attname ORDER BY key_row.ordinality)
+                  array_agg(column_row.attname ORDER BY key_row.ordinality),
+                  array_agg(type_row.typname ORDER BY key_row.ordinality)
            FROM pg_constraint AS constraint_row
            JOIN pg_class AS relation ON relation.oid = constraint_row.conrelid
            JOIN pg_namespace AS namespace
@@ -388,6 +483,7 @@ async def _assert_final_catalog(connection: asyncpg.Connection) -> None:
            JOIN pg_attribute AS column_row
              ON column_row.attrelid = relation.oid
             AND column_row.attnum = key_row.attnum
+           JOIN pg_type AS type_row ON type_row.oid = column_row.atttypid
            WHERE constraint_row.contype = 'p'
              AND namespace.nspname = 'public'
              AND relation.relname = ANY($1::text[])
@@ -396,24 +492,9 @@ async def _assert_final_catalog(connection: asyncpg.Connection) -> None:
         list(CANONICAL_TABLES),
     )
     assert [tuple(row) for row in primary_keys] == [
-        (table_name, ["id"]) for table_name in sorted(CANONICAL_TABLES)
+        (table_name, ["id"], ["uuid"]) for table_name in sorted(CANONICAL_TABLES)
     ]
-    helper_columns = await connection.fetch(
-        """SELECT table_name, column_name
-           FROM information_schema.columns
-           WHERE table_schema = 'public'
-             AND table_name = ANY($1::text[])
-             AND (column_name = 'partition_timestamp'
-                  OR column_name LIKE '%\\_partition_timestamp' ESCAPE '\\')""",
-        [
-            *CANONICAL_TABLES,
-            "ingestion_dedup_keys",
-            "alert_instances",
-            "incident_alerts",
-            "hypothesis_evidence",
-        ],
-    )
-    assert helper_columns == []
+    assert await _partition_helper_snapshot(connection) == ()
     evidence = await connection.fetchrow(
         """SELECT
                max(CASE WHEN column_name='raw_result' THEN udt_name END) raw_type,
@@ -424,37 +505,185 @@ async def _assert_final_catalog(connection: asyncpg.Connection) -> None:
     )
     assert evidence is not None
     assert tuple(evidence) == ("bytea", "jsonb", "text")
-    foreign_keys = await connection.fetch(
-        """SELECT relation.relname,
-                  array_agg(source_column.attname ORDER BY key_row.ordinality),
-                  target_relation.relname,
-                  array_agg(target_column.attname ORDER BY key_row.ordinality)
-           FROM pg_constraint AS constraint_row
-           JOIN pg_class AS relation ON relation.oid=constraint_row.conrelid
-           JOIN pg_namespace AS source_namespace
-             ON source_namespace.oid=relation.relnamespace
-           JOIN pg_class AS target_relation
-             ON target_relation.oid=constraint_row.confrelid
-           JOIN pg_namespace AS target_namespace
-             ON target_namespace.oid=target_relation.relnamespace
-           JOIN unnest(constraint_row.conkey, constraint_row.confkey)
-                WITH ORDINALITY AS key_row(source_num, target_num, ordinality)
-             ON true
-           JOIN pg_attribute AS source_column
-             ON source_column.attrelid=relation.oid
-            AND source_column.attnum=key_row.source_num
-           JOIN pg_attribute AS target_column
-             ON target_column.attrelid=target_relation.oid
-            AND target_column.attnum=key_row.target_num
-           WHERE target_relation.relname = ANY($1::text[])
-             AND source_namespace.nspname = 'public'
-             AND target_namespace.nspname = 'public'
-           GROUP BY relation.relname, target_relation.relname,
-                    constraint_row.conname
-           ORDER BY relation.relname, target_relation.relname""",
-        list(CANONICAL_TABLES),
+    worker_columns = await connection.fetch(
+        """SELECT table_name, column_name, udt_name, is_nullable
+           FROM information_schema.columns
+           WHERE table_schema = 'public'
+             AND (table_name, column_name) IN (
+                 ('evidence_records', 'structured_data'),
+                 ('evidence_records', 'raw_result'),
+                 ('evidence_records', 'metadata'),
+                 ('evidence_records', 'content_hash'),
+                 ('rca_reports', 'result_status'),
+                 ('rca_runs', 'failure_code'),
+                 ('worker_jobs', 'lease_owner'),
+                 ('worker_jobs', 'lease_expires_at'),
+                 ('worker_jobs', 'attempt_count'),
+                 ('worker_attempts', 'failure_code'),
+                 ('specialist_runs', 'failure_code'),
+                 ('specialist_runs', 'analysis_result'),
+                 ('specialist_runs', 'model_name'),
+                 ('specialist_runs', 'skill_name'),
+                 ('specialist_runs', 'skill_sha256'),
+                 ('specialist_runs', 'analyzed_at')
+             )
+           ORDER BY table_name, column_name"""
     )
-    assert all(len(row[1]) == 1 and len(row[3]) == 1 for row in foreign_keys)
+    assert {tuple(row) for row in worker_columns} == {
+        ("evidence_records", "structured_data", "jsonb", "NO"),
+        ("evidence_records", "raw_result", "bytea", "NO"),
+        ("evidence_records", "metadata", "jsonb", "NO"),
+        ("evidence_records", "content_hash", "text", "NO"),
+        ("rca_reports", "result_status", "text", "NO"),
+        ("rca_runs", "failure_code", "text", "YES"),
+        ("worker_jobs", "lease_owner", "text", "YES"),
+        ("worker_jobs", "lease_expires_at", "timestamptz", "YES"),
+        ("worker_jobs", "attempt_count", "int4", "NO"),
+        ("worker_attempts", "failure_code", "text", "YES"),
+        ("specialist_runs", "failure_code", "text", "YES"),
+        ("specialist_runs", "analysis_result", "jsonb", "YES"),
+        ("specialist_runs", "model_name", "text", "YES"),
+        ("specialist_runs", "skill_name", "text", "YES"),
+        ("specialist_runs", "skill_sha256", "text", "YES"),
+        ("specialist_runs", "analyzed_at", "timestamptz", "YES"),
+    }
+    worker_constraints = await connection.fetch(
+        """SELECT relation.relname, constraint_row.conname
+           FROM pg_constraint AS constraint_row
+           JOIN pg_class AS relation ON relation.oid = constraint_row.conrelid
+           JOIN pg_namespace AS namespace
+             ON namespace.oid = relation.relnamespace
+           WHERE namespace.nspname = 'public'
+             AND constraint_row.conname = ANY($1::text[])
+             AND relation.relname = ANY($2::text[])""",
+        [
+            "ck_evidence_records_metadata_object",
+            "ck_rca_reports_result_status",
+            "ck_rca_runs_failure_code",
+            "ck_worker_jobs_attempt_count",
+            "ck_worker_jobs_lease_pair",
+            "ck_worker_attempts_failure_code",
+            "ck_specialist_runs_failure_code",
+            "ck_specialist_runs_analysis_result_object",
+            "ck_specialist_runs_skill_sha256",
+            "ck_specialist_runs_status",
+        ],
+        list(WORKER_CATALOG_TABLES),
+    )
+    assert {tuple(row) for row in worker_constraints} == {
+        ("evidence_records", "ck_evidence_records_metadata_object"),
+        ("rca_reports", "ck_rca_reports_result_status"),
+        ("rca_runs", "ck_rca_runs_failure_code"),
+        ("worker_jobs", "ck_worker_jobs_attempt_count"),
+        ("worker_jobs", "ck_worker_jobs_lease_pair"),
+        ("worker_attempts", "ck_worker_attempts_failure_code"),
+        ("specialist_runs", "ck_specialist_runs_failure_code"),
+        ("specialist_runs", "ck_specialist_runs_analysis_result_object"),
+        ("specialist_runs", "ck_specialist_runs_skill_sha256"),
+        ("specialist_runs", "ck_specialist_runs_status"),
+    }
+    claim_index = await connection.fetchval(
+        """SELECT indexdef
+           FROM pg_indexes
+           WHERE schemaname = 'public'
+             AND tablename = 'worker_jobs'
+             AND indexname = 'ix_worker_jobs_claim'"""
+    )
+    assert isinstance(claim_index, str)
+    assert "(status, available_at, lease_expires_at)" in claim_index
+    assert set(await _uuid_foreign_key_snapshot(connection)) == {
+        (
+            "ingestion_dedup_keys",
+            ("delivery_id",),
+            "webhook_deliveries",
+            ("id",),
+            ("uuid",),
+            ("uuid",),
+        ),
+        (
+            "alert_events",
+            ("delivery_id",),
+            "webhook_deliveries",
+            ("id",),
+            ("uuid",),
+            ("uuid",),
+        ),
+        (
+            "alert_instances",
+            ("latest_event_id",),
+            "alert_events",
+            ("id",),
+            ("uuid",),
+            ("uuid",),
+        ),
+        (
+            "incident_alerts",
+            ("alert_event_id",),
+            "alert_events",
+            ("id",),
+            ("uuid",),
+            ("uuid",),
+        ),
+        (
+            "hypothesis_evidence",
+            ("evidence_id",),
+            "evidence_records",
+            ("id",),
+            ("uuid",),
+            ("uuid",),
+        ),
+    }
+
+
+async def _final_state_snapshot(
+    connection: asyncpg.Connection, ids: dict[str, UUID]
+) -> tuple[tuple[tuple[object, ...], ...], ...]:
+    await _assert_final_catalog(connection)
+    versions = await connection.fetch(
+        """SELECT 'backend', version_num FROM public.alembic_version_backend
+           UNION ALL
+           SELECT 'worker', version_num FROM public.alembic_version_rca_worker
+           ORDER BY 1"""
+    )
+    return (
+        tuple(tuple(row) for row in versions),
+        await _catalog_snapshot(connection),
+        await _partition_helper_snapshot(connection),
+        await _uuid_foreign_key_snapshot(connection),
+        await _data_snapshot(connection, ids),
+    )
+
+
+def _assert_exact_seeded_data(
+    data: tuple[tuple[object, ...], ...], ids: dict[str, UUID]
+) -> None:
+    evidence_rows = data[:4]
+    assert [row[0] for row in evidence_rows] == [
+        ids["evidence_one"],
+        ids["evidence_two"],
+        ids["evidence_one"],
+        ids["evidence_two"],
+    ]
+    assert all(
+        row[2] == {}
+        and row[3] == RAW_RESULT
+        and row[4] == METADATA
+        and row[5] == CONTENT_HASH
+        for row in evidence_rows
+    )
+    assert data[4] == ("FAILED", "MCP_TIMEOUT")
+    assert data[5] == ("PARTIAL", "task2 report", {"status": "PARTIAL"})
+    assert data[6] == ("FAILED", {}, None, None, 1)
+    assert data[7] == (1, "MCP_TIMEOUT")
+    assert data[8][:6] == (
+        "PARTIAL",
+        "MCP_TIMEOUT",
+        {"summary": "partial analysis", "evidenceIds": []},
+        "gemini-test",
+        "metrics-analysis",
+        "a" * 64,
+    )
+    assert data[8][6] == evidence_rows[0][1]
 
 
 async def _assert_worker_gate_fails_without_change(
@@ -514,11 +743,17 @@ def _load_worker_0003_module():
     return module
 
 
-async def _invoke_worker_0003_body(database_url: str) -> None:
+async def _invoke_worker_0003_body(
+    database_url: str, *, shadow_search_path: bool = False
+) -> None:
     module = _load_worker_0003_module()
     engine = create_async_engine(database_url)
     try:
         async with engine.begin() as connection:
+            if shadow_search_path:
+                await connection.exec_driver_sql(
+                    "SET LOCAL search_path TO task2_shadow, public"
+                )
 
             def invoke(sync_connection) -> None:
                 migration_context = MigrationContext.configure(sync_connection)
@@ -651,6 +886,77 @@ async def test_worker_0003_rejects_damaged_catalog_before_version_column_change(
 
 
 @pytest.mark.asyncio
+async def test_worker_0003_qualifies_worker_version_table_ddl() -> None:
+    """The final DDL must alter public, never a search-path shadow table."""
+    async with _disposable_database() as database_url:
+        await asyncio.to_thread(
+            upgrade_backend, database_url, "0002_grafana_normalization_v2"
+        )
+        await asyncio.to_thread(
+            upgrade_worker, database_url, "0002_adk_specialist_analysis"
+        )
+        await asyncio.to_thread(
+            upgrade_backend, database_url, "0003_non_partition_runtime_tables"
+        )
+        connection = await _connect(database_url)
+        await connection.execute(
+            """CREATE SCHEMA task2_shadow;
+               CREATE TABLE task2_shadow.alembic_version_rca_worker (
+                   version_num VARCHAR(32) NOT NULL
+               );
+               INSERT INTO task2_shadow.alembic_version_rca_worker (version_num)
+               VALUES ('0002_adk_specialist_analysis')"""
+        )
+        shadow_before = await connection.fetchrow(
+            """SELECT column_name, data_type, character_maximum_length,
+                      is_nullable
+               FROM information_schema.columns
+               WHERE table_schema = 'task2_shadow'
+                 AND table_name = 'alembic_version_rca_worker'
+                 AND column_name = 'version_num'"""
+        )
+        shadow_rows_before = await connection.fetch(
+            """SELECT version_num
+               FROM task2_shadow.alembic_version_rca_worker
+               ORDER BY version_num"""
+        )
+        await connection.close()
+
+        await _invoke_worker_0003_body(database_url, shadow_search_path=True)
+
+        connection = await _connect(database_url)
+        try:
+            assert (
+                await connection.fetchval(
+                    """SELECT character_maximum_length
+                       FROM information_schema.columns
+                       WHERE table_schema = 'public'
+                         AND table_name = 'alembic_version_rca_worker'
+                         AND column_name = 'version_num'"""
+                )
+                == 64
+            )
+            assert (
+                await connection.fetchrow(
+                    """SELECT column_name, data_type, character_maximum_length,
+                              is_nullable
+                       FROM information_schema.columns
+                       WHERE table_schema = 'task2_shadow'
+                         AND table_name = 'alembic_version_rca_worker'
+                         AND column_name = 'version_num'"""
+                )
+                == shadow_before
+            )
+            assert await connection.fetch(
+                """SELECT version_num
+                   FROM task2_shadow.alembic_version_rca_worker
+                   ORDER BY version_num"""
+            ) == shadow_rows_before
+        finally:
+            await connection.close()
+
+
+@pytest.mark.asyncio
 async def test_worker_0003_ignores_catalog_objects_outside_public_schema() -> None:
     """A shadow schema must not participate in the public rollout gate."""
     async with _disposable_database() as database_url:
@@ -723,16 +1029,48 @@ async def test_worker_0003_rejects_composite_evidence_foreign_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_existing_worker_head_four_gate_path_preserves_catalog_and_data() -> None:
-    async with _disposable_database() as database_url:
+async def test_clean_and_existing_paths_finish_with_identical_catalog_and_data() -> (
+    None
+):
+    seed_months = _month_pair()
+    async with _disposable_database() as clean_database_url:
         await asyncio.to_thread(
-            upgrade_backend, database_url, "0002_grafana_normalization_v2"
+            upgrade_backend, clean_database_url, "0002_grafana_normalization_v2"
         )
         await asyncio.to_thread(
-            upgrade_worker, database_url, "0002_adk_specialist_analysis"
+            upgrade_worker, clean_database_url, "0002_adk_specialist_analysis"
         )
-        connection = await _connect(database_url)
-        ids = await _seed_worker_0002_source(connection)
+        connection = await _connect(clean_database_url)
+        clean_ids = await _seed_worker_0002_source(connection, months=seed_months)
+        await connection.close()
+        await asyncio.to_thread(
+            upgrade_backend,
+            clean_database_url,
+            "0003_non_partition_runtime_tables",
+        )
+        await asyncio.to_thread(
+            upgrade_worker,
+            clean_database_url,
+            "0003_validate_ordinary_runtime_tables",
+        )
+        connection = await _connect(clean_database_url)
+        try:
+            clean_snapshot = await _final_state_snapshot(connection, clean_ids)
+            _assert_exact_seeded_data(clean_snapshot[4], clean_ids)
+        finally:
+            await connection.close()
+
+    async with _disposable_database() as existing_database_url:
+        await asyncio.to_thread(
+            upgrade_backend, existing_database_url, "0002_grafana_normalization_v2"
+        )
+        await asyncio.to_thread(
+            upgrade_worker, existing_database_url, "0002_adk_specialist_analysis"
+        )
+        connection = await _connect(existing_database_url)
+        existing_ids = await _seed_worker_0002_source(
+            connection, months=seed_months
+        )
         assert (
             await connection.fetchval("SELECT version_num FROM alembic_version_backend")
             == "0002_grafana_normalization_v2"
@@ -746,29 +1084,26 @@ async def test_existing_worker_head_four_gate_path_preserves_catalog_and_data() 
         await connection.close()
 
         await asyncio.to_thread(
-            upgrade_backend, database_url, "0003_non_partition_runtime_tables"
+            upgrade_backend,
+            existing_database_url,
+            "0003_non_partition_runtime_tables",
         )
-        connection = await _connect(database_url)
-        data_before_worker_gate = await _data_snapshot(connection, ids)
+        connection = await _connect(existing_database_url)
+        data_before_worker_gate = await _data_snapshot(connection, existing_ids)
         catalog_before_worker_gate = await _catalog_snapshot(connection)
         await connection.close()
 
         await asyncio.to_thread(
             upgrade_worker,
-            database_url,
+            existing_database_url,
             "0003_validate_ordinary_runtime_tables",
         )
-        connection = await _connect(database_url)
+        connection = await _connect(existing_database_url)
         try:
-            await _assert_final_catalog(connection)
-            assert await _data_snapshot(connection, ids) == data_before_worker_gate
-            assert all(
-                row[2] == RAW_RESULT
-                and row[3] == METADATA
-                and row[4] == CONTENT_HASH
-                for row in data_before_worker_gate[:4]
-            )
-            catalog_after_worker_gate = await _catalog_snapshot(connection)
+            existing_snapshot = await _final_state_snapshot(connection, existing_ids)
+            assert existing_snapshot[4] == data_before_worker_gate
+            _assert_exact_seeded_data(existing_snapshot[4], existing_ids)
+            catalog_after_worker_gate = existing_snapshot[1]
             assert tuple(
                 row
                 for row in catalog_after_worker_gate
@@ -780,6 +1115,8 @@ async def test_existing_worker_head_four_gate_path_preserves_catalog_and_data() 
             )
         finally:
             await connection.close()
+
+    assert clean_snapshot == existing_snapshot
 
 
 def test_worker_0003_downgrade_is_explicitly_unsupported() -> None:

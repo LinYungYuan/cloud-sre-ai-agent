@@ -457,7 +457,7 @@ def upgrade() -> None:
     _require_worker_lifecycle_and_analysis(connection)
     _require_uuid_only_dependent_foreign_keys(connection)
     op.execute(
-        "ALTER TABLE alembic_version_rca_worker "
+        "ALTER TABLE public.alembic_version_rca_worker "
         "ALTER COLUMN version_num TYPE VARCHAR(64)"
     )
 

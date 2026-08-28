@@ -29,7 +29,7 @@ The takeover started from four uncommitted owned-path differences left by the fi
 ## Acceptance results
 
 - Backend four-stage acceptance: `9 passed`; the clean database executes Backend `0002` → Worker `0002` → Backend `0003` → Worker `0003` with explicit revisions.
-- Worker conversion plus schema acceptance: `20 passed`; the existing Worker-head path verifies Backend `0002` and Worker `0002`, then executes only Backend `0003` and Worker `0003`.
+- Worker conversion plus schema acceptance: `21 passed`; the existing Worker-head path verifies Backend `0002` and Worker `0002`, then executes only Backend `0003` and Worker `0003`.
 - Exact persistence evidence is preserved across canonical and retained legacy tables: non-UTF-8/non-canonical JSON raw bytes, JSONB provenance metadata, content hash, report `result_status`, lifecycle failure data, lease/attempt state, and specialist analysis fields.
 - Six canonical tables end as ordinary relations with one-column UUID primary keys; six `__partitioned_legacy_0003` parents remain partitioned; partition helpers and composite dependent FKs are rejected.
 - Downgrade raises the required forward-gate `RuntimeError` exactly.
@@ -37,6 +37,13 @@ The takeover started from four uncommitted owned-path differences left by the fi
 - Full Backend Pyright: `0 errors, 0 warnings, 0 informations`.
 - Full Worker Pyright: `0 errors, 0 warnings, 0 informations`.
 - `git diff --check` passes. Baseline immutable-file diff is empty.
+
+## Fix round 1
+
+- Independent review found that the final version-column DDL was not schema-qualified even though every precondition inspected `public`. A real RED created `task2_shadow.alembic_version_rca_worker`, put that schema first in `search_path`, and invoked the migration body. The unqualified statement widened the shadow column while public remained `VARCHAR(32)`.
+- The only production correction is `ALTER TABLE public.alembic_version_rca_worker ...`. GREEN proves public widens from 32 to 64 while the shadow table's column catalog and version rows are unchanged. Version and catalog preconditions remain in their original order before this sole DDL statement.
+- Clean-path acceptance now uses the same final assertion and snapshot shape as the existing Worker-head path. Both explicitly run the four named gates, seed the same deterministic Worker-0002 data, and assert exact version rows/lengths; six public ordinary canonical relations with one-column UUID primary keys; six retained partition parents; no helper columns; the exact five public UUID-only foreign keys; Worker evidence/report/lifecycle/analysis columns, checks, and claim index; and exact canonical/legacy evidence plus report/lifecycle/analysis data.
+- The clean and existing snapshots include public columns, constraint definitions, indexes, relation kinds, helper-column rows, normalized FK tuples, exact version rows, and exact data rows. Their complete snapshots compare equal; no field is excluded to make the paths match.
 
 ## Database isolation and cleanup
 
