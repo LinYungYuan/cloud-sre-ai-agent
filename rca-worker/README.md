@@ -51,8 +51,9 @@ Specialist output 是 validated `SpecialistAnalysisDraft`：最多 20 observatio
 只收到固定順序的 validated observations 與 opaque references，永遠不收到 raw telemetry
 或 legacy generic `Finding`。
 
-Worker migration head 是 `0002_adk_specialist_analysis`，增加 Specialist analysis audit
-欄位、`PARTIAL` status 與 stable failure-code constraints。可使用的 stable codes 是：
+Worker migration head 是 `0003_validate_ordinary_runtime_tables`，增加 Specialist analysis audit
+欄位、`PARTIAL` status 與 stable failure-code constraints，並驗證 Backend `0003_non_partition_runtime_tables`
+轉換的普通表結構與 UUID-only FK。可使用的 stable codes 是：
 
 `NO_SAFE_MCP_CAPABILITY`、`MCP_TIMEOUT`、`MCP_TRANSPORT`、`MCP_PAYLOAD_TOO_LARGE`、
 `MCP_RESULT_INVALID`、`ANALYSIS_TIMEOUT`、`ANALYSIS_SCHEMA_INVALID`、
@@ -93,16 +94,17 @@ production：
 
 ```bash
 # Run these commands from the repository root.
-docker compose up -d postgres pubsub-emulator
+docker compose --env-file .env.compose.example up -d postgres pubsub-emulator
 export PUBSUB_EMULATOR_HOST=127.0.0.1:58085
 export PUBSUB_PROJECT_ID=sre-agent-local
 export PUBSUB_AUTO_CREATE=true
 export MIGRATION_TEST_DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent'
 
-# Apply the Backend migration first, then the RCA Worker migration, using the
-# same database URL for both Alembic environments.
-(cd backend && UV_CACHE_DIR="$PWD/.uv-cache" uv run alembic upgrade head)
-(cd rca-worker && UV_CACHE_DIR="$PWD/.uv-cache" uv run alembic upgrade head)
+# 依序執行四個明確 revision 命令，不得跨越未驗證 gate
+(cd backend && BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0002_grafana_normalization_v2)
+(cd rca-worker && RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0002_adk_specialist_analysis)
+(cd backend && BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0003_non_partition_runtime_tables)
+(cd rca-worker && RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0003_validate_ordinary_runtime_tables)
 
 # Run the full Backend and RCA Worker suites against the migrated database and emulator.
 (cd backend && UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest -v)

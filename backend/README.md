@@ -9,7 +9,8 @@ credential，也不會連線 PostgreSQL。應用程式 lifespan 會驗證設定�
 Grafana source／classification catalog，並建立 SQLAlchemy resource；無效設定或
 database／catalog drift 會使啟動失敗。
 
-此階段除了既有平台設定外，還需要以下環境變數：
+此階段需要以下環境變數；可透過 `.env.backend-api` 或 OS environment 提供，
+OS environment 優先，明確指定但不存在的 env file 路徑必須 fail closed：
 
 ```sh
 export DATABASE_URL='postgresql+asyncpg://app:password@db:5432/sre_agent'
@@ -17,11 +18,10 @@ export GRAFANA_TOKENS='{"50000000-0000-0000-0000-000000000001":{"current-2026-08
 export PUBSUB_PROJECT_ID='project-id'
 export RCA_TOPIC_ID='rca-jobs'
 export APP_ENVIRONMENT='production'
-export MODEL_NAME='model-name'
-export METRICS_MCP_URL='https://gateway.example/metrics/mcp'
-export TRACE_MCP_URL='https://gateway.example/traces/mcp'
-export LOG_MCP_URL='https://gateway.example/logs/mcp'
 ```
+
+`MODEL_NAME`、`METRICS_MCP_URL`、`TRACE_MCP_URL`、`LOG_MCP_URL`、MCP manifest
+與 evidence budget 屬於 RCA Worker 設定，不得注入 Backend 容器。
 
 `GRAFANA_TOKENS` 是具有固定階層的 JSON：source UUID → 非機密 token ID → 不透明
 Bearer credential。Token ID 必須由 1–128 個 ASCII 字母、數字、`.`、`_`、`:` 或
@@ -44,17 +44,4 @@ docker build -t sre-agent-backend:gke-plan backend
 ```
 
 image 以 UID/GID `65532` 執行、監聽 port `8000`，並使用 Uvicorn 啟動 ASGI
-應用程式。它包含已安裝的 Worker console script、`alembic.ini` 與 `migrations/`，
-因此同一個 image 可供 API、Outbox Worker、Migration 與 Partition Maintenance
-workload 使用。
-
-使用獨立於應用程式的命令，維持本月與未來兩個月的 partition runway：
-
-```sh
-uv run sre-agent-ensure-partitions
-# equivalent:
-uv run python -m sre_agent.workers.partition_worker
-```
-
-Partition 命令只會在執行時讀取 `DATABASE_URL`；若失敗或發現 catalog drift，會回傳
-非零 exit code。此命令不會建立或排程任何基礎設施。
+應用程式。同一個 image 可供 API 與 Backend migration Job 使用。

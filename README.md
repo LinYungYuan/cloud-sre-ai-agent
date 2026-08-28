@@ -107,28 +107,30 @@ make test-contracts
 
 Backend ASGI 進入點是 `sre_agent.api.main:app`。Backend 設定會在應用程式 lifespan
 啟動期間驗證，而不是在匯入模組時驗證。必要的 `DATABASE_URL`、不透明 Grafana
-Bearer Token JSON 格式、輪替方式與可獨立執行的 partition maintenance 命令，請參閱
-[`backend/README.md`](backend/README.md)。無效設定會使 Backend 啟動失敗，而不會讓
-原本有效的 webhook request 變成通用 HTTP 500 response。
+Bearer Token JSON 格式與輪替方式，請參閱 [`backend/README.md`](backend/README.md)。
+無效設定會使 Backend 啟動失敗，而不會讓原本有效的 webhook request 變成通用 HTTP 500 response。
+
+系統依職責隔離環境變數設定檔，並提供範本檔案：
+- `.env.backend-api.example`：Backend API 執行期設定
+- `.env.rca-worker.example`：RCA Worker 執行期設定（包含模型與 MCP 配置）
+- `.env.backend-migration.example`：Backend Alembic migration 設定
+- `.env.rca-worker-migration.example`：RCA Worker Alembic migration 設定
+- `.env.compose.example`：Docker Compose 本機相依服務 port 設定
+
+各環境變數設定彼此隔離，OS 環境變數優先；明確指定但不存在的 override 路徑會 fail closed。真實 `.env.*` 不得提交至儲存庫。
 
 Backend、RCA Worker 與兩條 Alembic migration stream 共用一個 Cloud SQL
 PostgreSQL 18 application role；Angular 不會連線 PostgreSQL。該 role 具有應用程式
 DML 與 migration DDL 權限，但沒有 superuser、role 管理、database owner 或無關
-schema 的權限。新環境會先用此 role 執行 Backend migration
-（`alembic_version_backend`），再執行 RCA Worker migration
-（`alembic_version_rca_worker`）。舊版 `0001_alert_incident_schema` revision 早於套件
-拆分；實作計畫只遷移其 version table 中繼資料，不會重新執行 DDL。加入規劃中的
-`contracts/database/table-ownership.yaml` 後，後續 migration 所有權會由該檔案定義，
-並透過相容性測試而不是不同的資料庫登入 role 強制執行。
+schema 的權限。新環境會依序執行四個 migration gate：先執行 Backend `0002_grafana_normalization_v2`，
+接著 Worker `0002_adk_specialist_analysis`，再執行 Backend `0003_non_partition_runtime_tables`，
+最後執行 Worker `0003_validate_ordinary_runtime_tables`。
+任何 migration 不得以 `head` 取代特定 revision。
 
-本機 Pub/Sub 傳遞使用 Google 官方 Emulator。兩個程序都需設定
+本機 Pub/Sub 傳遞使用 Google 官方 Emulator。Backend 與 Worker 需設定
 `PUBSUB_EMULATOR_HOST=127.0.0.1:58085`，RCA Worker 另需設定
-`PUBSUB_AUTO_CREATE=true`：
-
-```bash
-docker compose up -d pubsub-emulator
-cd backend && UV_CACHE_DIR="$PWD/.uv-cache" uv run sre-agent-outbox-worker
-```
+`PUBSUB_AUTO_CREATE=true`。Outbox event 在 Backend request transaction commit 後
+由應用程式即時發布至 Pub/Sub，不再需要獨立的 outbox polling worker。
 
 正式環境不設定 `PUBSUB_EMULATOR_HOST`；Google client 使用 ADC 與 Workload
 Identity，RCA Worker 維持 `PUBSUB_AUTO_CREATE=false`。此儲存庫不保存任何
@@ -156,8 +158,8 @@ Workload Identity 綁定、Secret 資料、Gateway 路由及 Terraform 管理的
 
 ## 完整本機啟動
 
-以下流程會啟動 PostgreSQL、Pub/Sub Emulator、Backend、outbox publisher、
-RCA Worker 與 Angular frontend。每個長時間運行的程序使用獨立 terminal。
+以下流程會啟動 PostgreSQL、Pub/Sub Emulator、Backend、RCA Worker 與 Angular frontend。
+每個長時間運行的程序使用獨立 terminal。
 
 ### 1. 準備相依套件
 
@@ -183,35 +185,13 @@ Node 安裝在非預設位置，將它的 `bin` 目錄放在該 terminal 的 `PA
 
 ### 2. 啟動 PostgreSQL 與 Pub/Sub Emulator
 
-若 `55432` 與 `58085` 都沒有被占用，可直接使用 Compose：
+可使用 Compose 啟動本機相依服務：
 
 ```bash
-docker compose up -d postgres pubsub-emulator
+docker compose --env-file .env.compose.example up -d postgres pubsub-emulator
 ```
 
-本次本機環境的 `55432` 已被其他專案占用，因此 PostgreSQL 改用 `55434`，並保留
-既有容器不動。首次建立專用資料庫時執行：
-
-```bash
-docker volume create sre-agent20_postgres_data
-docker run --name sre-agent20-local-postgres \
-  -e POSTGRES_DB=sre_agent \
-  -e POSTGRES_USER=postgres \
-  -e POSTGRES_HOST_AUTH_METHOD=trust \
-  -p 127.0.0.1:55434:5432 \
-  -v sre-agent20_postgres_data:/var/lib/postgresql \
-  -d postgres:18
-```
-
-之後只需重新啟動既有容器：
-
-```bash
-docker start sre-agent20-local-postgres
-```
-
-本次 `58085` 已有健康的 Google 官方 Pub/Sub Emulator，因此直接沿用。可用以下
-命令確認；若無回應且 port 未被占用，再執行
-`docker compose up -d pubsub-emulator`：
+可以用以下命令確認 Pub/Sub Emulator 狀態：
 
 ```bash
 curl -fsS http://127.0.0.1:58085/v1/projects/sre-agent-local/topics
@@ -220,38 +200,31 @@ curl -fsS http://127.0.0.1:58085/v1/projects/sre-agent-local/topics
 後續範例均使用：
 
 ```bash
-export DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:55434/sre_agent'
+export DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent'
 export PUBSUB_EMULATOR_HOST='127.0.0.1:58085'
 export PUBSUB_PROJECT_ID='sre-agent-local'
 export PUBSUB_AUTO_CREATE=true
 export RCA_TOPIC_ID='rca-jobs'
 ```
 
-若使用 Compose 的預設 PostgreSQL port，將 `DATABASE_URL` 中的 `55434` 改為
-`55432`。
+### 3. 依序套用四個 migration gate
 
-### 3. 依序套用兩組 migration
-
-Backend migration 必須先完成，才能套用 Worker migration：
+套用 migration 時必須依序執行四個明確 revision 命令；不得跨越未驗證的 revision：
 
 ```bash
-(
-  cd backend
-  UV_CACHE_DIR="$PWD/.uv-cache" uv run alembic upgrade head
-)
-(
-  cd rca-worker
-  UV_CACHE_DIR="$PWD/.uv-cache" uv run alembic upgrade head
-)
+(cd backend && BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0002_grafana_normalization_v2)
+(cd rca-worker && RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0002_adk_specialist_analysis)
+(cd backend && BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0003_non_partition_runtime_tables)
+(cd rca-worker && RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0003_validate_ordinary_runtime_tables)
 ```
 
 ### 4. 建立最小本機 Grafana catalog
 
-Backend 啟動時會驗證 `GRAFANA_TOKENS` 中的 source 已在資料庫啟用。使用本次的
-專用 PostgreSQL 容器時，執行以下 idempotent seed：
+Backend 啟動時會驗證 `GRAFANA_TOKENS` 中的 source 已在資料庫啟用。
+執行以下 idempotent seed：
 
 ```bash
-docker exec sre-agent20-local-postgres psql -U postgres -d sre_agent \
+docker compose --env-file .env.compose.example exec -T postgres psql -U postgres -d sre_agent \
   -v ON_ERROR_STOP=1 \
   -c "INSERT INTO teams (id, name) VALUES ('10000000-0000-0000-0000-000000000001', 'Local Team') ON CONFLICT DO NOTHING" \
   -c "INSERT INTO projects (id, team_id, name) VALUES ('20000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000001', 'local-project') ON CONFLICT DO NOTHING" \
@@ -259,25 +232,18 @@ docker exec sre-agent20-local-postgres psql -U postgres -d sre_agent \
   -c "INSERT INTO grafana_sources (id, project_id, environment_id, name) VALUES ('50000000-0000-0000-0000-000000000001', '20000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000001', 'local-grafana') ON CONFLICT DO NOTHING"
 ```
 
-若使用 Compose PostgreSQL，將 `docker exec sre-agent20-local-postgres` 改為
-`docker compose exec -T postgres`。
-
 ### 5. 啟動 Backend
 
 Backend 已將 Uvicorn 鎖定在應用程式依賴內；本機直接以 `uv run uvicorn` 啟動：
 
 ```bash
 cd backend
-export DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:55434/sre_agent'
+export DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent'
 export PUBSUB_EMULATOR_HOST='127.0.0.1:58085'
 export PUBSUB_PROJECT_ID='sre-agent-local'
 export RCA_TOPIC_ID='rca-jobs'
 export GRAFANA_TOKENS='{"50000000-0000-0000-0000-000000000001":{"local":"local-dev-token"}}'
 export APP_ENVIRONMENT='local'
-export MODEL_NAME='gemini-2.5-flash'
-export METRICS_MCP_URL='https://localhost.invalid/metrics/mcp'
-export TRACE_MCP_URL='https://localhost.invalid/traces/mcp'
-export LOG_MCP_URL='https://localhost.invalid/logs/mcp'
 UV_CACHE_DIR="$PWD/.uv-cache" uv run uvicorn \
   sre_agent.api.main:app --host 127.0.0.1 --port 8000
 ```
@@ -289,7 +255,7 @@ Worker 在本機明確設定 `PUBSUB_AUTO_CREATE=true` 時，會 idempotently �
 
 ```bash
 cd rca-worker
-export DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:55434/sre_agent'
+export DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent'
 export PUBSUB_EMULATOR_HOST='127.0.0.1:58085'
 export PUBSUB_PROJECT_ID='sre-agent-local'
 export PUBSUB_AUTO_CREATE=true
@@ -306,20 +272,7 @@ UV_CACHE_DIR="$PWD/.uv-cache" uv run sre-agent-rca-worker
 若要產生有 evidence 的完整 RCA，需設定核准的 manifest、可連線的三個 MCP URL，
 以及所選 ADK model 所需的 Google AI 或 Vertex AI credentials。
 
-### 7. 啟動 outbox publisher
-
-等本機 Worker 建立 topic 後，再開另一個 terminal：
-
-```bash
-cd backend
-export DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:55434/sre_agent'
-export PUBSUB_EMULATOR_HOST='127.0.0.1:58085'
-export PUBSUB_PROJECT_ID='sre-agent-local'
-export RCA_TOPIC_ID='rca-jobs'
-UV_CACHE_DIR="$PWD/.uv-cache" uv run sre-agent-outbox-worker
-```
-
-### 8. 啟動 Angular frontend
+### 7. 啟動 Angular frontend
 
 `frontend/proxy.conf.json` 會把 `/api` 轉送到本機 Backend：
 
@@ -331,7 +284,7 @@ CI=1 NG_CLI_ANALYTICS=false npm start -- \
 
 開啟 <http://127.0.0.1:4200/>。新資料庫的 Incident 清單一開始會是空的。
 
-### 9. 驗證與停止
+### 8. 驗證與停止
 
 ```bash
 curl -fsS http://127.0.0.1:4200/config.json
@@ -355,11 +308,11 @@ curl -fsS -X POST \
 使用空 manifest 時，最新 RCA 與 worker job 應分別是 `PARTIAL` 和
 `SUCCEEDED`，outbox event 應是 `PUBLISHED`。
 
-Backend、Worker、outbox publisher 與 frontend 可在各自 terminal 按 `Ctrl-C`
-停止。此專案專用 PostgreSQL 使用：
+Backend、Worker 與 frontend 可在各自 terminal 按 `Ctrl-C` 停止。
+停止本機 PostgreSQL 與 Pub/Sub Emulator 請使用：
 
 ```bash
-docker stop sre-agent20-local-postgres
+docker compose --env-file .env.compose.example stop
 ```
 
 ## 完整驗證
