@@ -54,7 +54,7 @@ def upgrade_worker(database_url: str, revision: str) -> None:
 
 
 async def upgrade_four_gates(database_url: str, *, existing_worker_head: bool) -> None:
-    """Run the explicit rollout targets that exist before the Worker 0003 gate."""
+    """Run all explicit rollout targets without stamping or using ``head``."""
     if not existing_worker_head:
         await asyncio.to_thread(
             upgrade_backend, database_url, "0002_grafana_normalization_v2"
@@ -64,6 +64,11 @@ async def upgrade_four_gates(database_url: str, *, existing_worker_head: bool) -
         )
     await asyncio.to_thread(
         upgrade_backend, database_url, "0003_non_partition_runtime_tables"
+    )
+    await asyncio.to_thread(
+        upgrade_worker,
+        database_url,
+        "0003_validate_ordinary_runtime_tables",
     )
 
 
@@ -80,6 +85,11 @@ async def _connect(database_url: str) -> asyncpg.Connection:
 
 @asynccontextmanager
 async def _disposable_database() -> AsyncIterator[str]:
+    parsed = urlsplit(DATABASE_URL)
+    if parsed.hostname != "127.0.0.1" or parsed.port != 5432:
+        raise RuntimeError(
+            "Four-stage tests require disposable PostgreSQL at 127.0.0.1:5432"
+        )
     database_name = f"task1_four_stage_{uuid4().hex}"
     admin = await asyncpg.connect(
         _asyncpg_url(_with_database(DATABASE_URL, "postgres"))
@@ -415,6 +425,11 @@ async def test_backend_0003_preserves_worker_0002_evidence_and_lifecycle() -> No
         await asyncio.to_thread(
             upgrade_backend, database_url, "0003_non_partition_runtime_tables"
         )
+        await asyncio.to_thread(
+            upgrade_worker,
+            database_url,
+            "0003_validate_ordinary_runtime_tables",
+        )
         connection = await _connect(database_url)
         try:
             rows = await connection.fetch(
@@ -445,6 +460,18 @@ async def test_backend_0003_preserves_worker_0002_evidence_and_lifecycle() -> No
             ) == {"summary": "partial analysis", "evidenceIds": []}
             assert await _worker_catalog_snapshot(connection) == catalog_before
             assert await _worker_data_snapshot(connection, ids) == worker_data_before
+            assert (
+                await connection.fetchval(
+                    "SELECT version_num FROM alembic_version_backend"
+                )
+                == "0003_non_partition_runtime_tables"
+            )
+            assert (
+                await connection.fetchval(
+                    "SELECT version_num FROM alembic_version_rca_worker"
+                )
+                == "0003_validate_ordinary_runtime_tables"
+            )
         finally:
             await connection.close()
 

@@ -1,20 +1,94 @@
+import asyncio
 import importlib.util
 import os
 import sys
 import types
-from contextlib import nullcontext
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
+from unittest.mock import patch
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
+import asyncpg
 import pytest
+import pytest_asyncio
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 DATABASE_URL = os.getenv(
     "MIGRATION_TEST_DATABASE_URL",
-    "postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent",
+    "postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent",
 )
+WORKER_ROOT = Path(__file__).resolve().parents[3]
+REPOSITORY_ROOT = WORKER_ROOT.parent
+BACKEND_ROOT = REPOSITORY_ROOT / "backend"
+sys.path.insert(0, str(BACKEND_ROOT / "src"))
+
+
+def _asyncpg_url(database_url: str) -> str:
+    return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+
+def _with_database(database_url: str, database_name: str) -> str:
+    parsed = urlsplit(database_url)
+    return urlunsplit((parsed.scheme, parsed.netloc, f"/{database_name}", "", ""))
+
+
+def _upgrade(root: Path, database_url: str, revision: str) -> None:
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "migrations"))
+    with patch.dict(os.environ, {"MIGRATION_TEST_DATABASE_URL": database_url}):
+        command.upgrade(config, revision)
+
+
+@asynccontextmanager
+async def _final_schema_database() -> AsyncIterator[str]:
+    parsed = urlsplit(DATABASE_URL)
+    if parsed.hostname != "127.0.0.1" or parsed.port != 5432:
+        raise RuntimeError(
+            "Worker schema tests require disposable PostgreSQL at 127.0.0.1:5432"
+        )
+    database_name = f"task2_worker_schema_{uuid4().hex}"
+    admin = await asyncpg.connect(
+        _asyncpg_url(_with_database(DATABASE_URL, "postgres"))
+    )
+    database_url = _with_database(DATABASE_URL, database_name)
+    created = False
+    try:
+        await admin.execute(f'CREATE DATABASE "{database_name}"')
+        created = True
+        await asyncio.to_thread(
+            _upgrade, BACKEND_ROOT, database_url, "0002_grafana_normalization_v2"
+        )
+        await asyncio.to_thread(
+            _upgrade, WORKER_ROOT, database_url, "0002_adk_specialist_analysis"
+        )
+        await asyncio.to_thread(
+            _upgrade, BACKEND_ROOT, database_url, "0003_non_partition_runtime_tables"
+        )
+        await asyncio.to_thread(
+            _upgrade,
+            WORKER_ROOT,
+            database_url,
+            "0003_validate_ordinary_runtime_tables",
+        )
+        yield database_url
+    finally:
+        if created:
+            await admin.execute(
+                f'DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)'
+            )
+        await admin.close()
+
+
+@pytest_asyncio.fixture
+async def final_schema_database_url() -> AsyncIterator[str]:
+    async with _final_schema_database() as database_url:
+        yield database_url
 
 
 class _MigrationConfig:
@@ -56,7 +130,7 @@ class _OfflineAlembicContext:
 def _load_worker_migration_env(monkeypatch: pytest.MonkeyPatch) -> _MigrationConfig:
     context = _OfflineAlembicContext()
     alembic = types.ModuleType("alembic")
-    alembic.context = context
+    alembic.__dict__["context"] = context
     monkeypatch.setitem(sys.modules, "alembic", alembic)
     module_path = Path(__file__).parents[3] / "migrations" / "env.py"
     spec = importlib.util.spec_from_file_location(
@@ -184,8 +258,10 @@ FAILURE_CODES = tuple(dict.fromkeys((*LEGACY_FAILURE_CODES, *SPECIALIST_FAILURE_
 
 
 @pytest.mark.asyncio
-async def test_worker_schema_has_leases_attempts_and_all_safe_failure_codes() -> None:
-    engine = create_async_engine(DATABASE_URL)
+async def test_worker_schema_has_leases_attempts_and_all_safe_failure_codes(
+    final_schema_database_url: str,
+) -> None:
+    engine = create_async_engine(final_schema_database_url)
     async with engine.connect() as connection:
         columns = (
             (
@@ -277,8 +353,10 @@ async def test_worker_schema_has_leases_attempts_and_all_safe_failure_codes() ->
 
 
 @pytest.mark.asyncio
-async def test_specialist_analysis_audit_schema_enforces_safe_values() -> None:
-    engine = create_async_engine(DATABASE_URL)
+async def test_specialist_analysis_audit_schema_enforces_safe_values(
+    final_schema_database_url: str,
+) -> None:
+    engine = create_async_engine(final_schema_database_url)
     async with engine.connect() as connection:
         columns = {
             row.column_name: (row.data_type, row.is_nullable)
@@ -380,13 +458,15 @@ async def test_specialist_analysis_audit_schema_enforces_safe_values() -> None:
         version = await connection.scalar(
             text("SELECT version_num FROM alembic_version_rca_worker")
         )
-        assert version == "0002_adk_specialist_analysis"
+        assert version == "0003_validate_ordinary_runtime_tables"
     await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_evidence_and_reports_store_exact_safe_results() -> None:
-    engine = create_async_engine(DATABASE_URL)
+async def test_evidence_and_reports_store_exact_safe_results(
+    final_schema_database_url: str,
+) -> None:
+    engine = create_async_engine(final_schema_database_url)
     async with engine.connect() as connection:
         evidence_columns = set(
             (
