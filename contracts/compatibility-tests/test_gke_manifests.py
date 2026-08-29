@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -9,6 +11,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BASE_DIR = REPOSITORY_ROOT / "deploy" / "k8s" / "base"
 JOBS_DIR = REPOSITORY_ROOT / "deploy" / "k8s" / "jobs"
 DEPLOYMENT_RUNBOOK = REPOSITORY_ROOT / "deploy" / "k8s" / "README.md"
+COMPOSE_ENV_EXAMPLE = REPOSITORY_ROOT / ".env.compose.example"
 
 # outbox-deployment.yaml 與 partition-cronjob.yaml 已移除
 EXPECTED_RESOURCE_FILES = {
@@ -100,6 +103,56 @@ def _assert_secret_reference(entry: dict[str, Any], key: str) -> None:
             "secretKeyRef": {"name": "sre-agent-secrets", "key": key},
         },
     }
+
+
+def _render_compose(**environment: str) -> dict[str, Any]:
+    completed = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            str(COMPOSE_ENV_EXAMPLE),
+            "config",
+        ],
+        cwd=REPOSITORY_ROOT,
+        env={**os.environ, **environment},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rendered: dict[str, Any] = yaml.safe_load(completed.stdout)
+    return rendered
+
+
+def _published_port(service: dict[str, Any]) -> tuple[str, int]:
+    ports = service["ports"]
+    assert len(ports) == 1
+    return ports[0]["published"], ports[0]["target"]
+
+
+def test_compose_env_file_controls_local_host_ports() -> None:
+    rendered = _render_compose()
+    services = rendered["services"]
+    assert _published_port(services["postgres"]) == ("5432", 5432)
+    assert _published_port(services["pubsub-emulator"]) == ("58085", 8085)
+
+    overridden = _render_compose(
+        POSTGRES_HOST_PORT="15432",
+        PUBSUB_HOST_PORT="18085",
+    )["services"]
+    assert _published_port(overridden["postgres"]) == ("15432", 5432)
+    assert _published_port(overridden["pubsub-emulator"]) == ("18085", 8085)
+
+
+def test_compose_renders_only_infrastructure_services() -> None:
+    services = _render_compose()["services"]
+    assert set(services) == {"postgres", "pubsub-emulator"}
+    assert services["postgres"]["environment"] == {
+        "POSTGRES_DB": "sre_agent",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
+        "POSTGRES_USER": "postgres",
+    }
+    assert "environment" not in services["pubsub-emulator"]
 
 
 def test_kustomization_references_each_base_manifest() -> None:
@@ -230,11 +283,13 @@ def test_backend_owns_pubsub_publisher_config_but_excludes_ai_and_mcp_settings()
     }
 
     environment = _environment(container)
-    # Backend 應含 Pub/Sub publisher 配置
-    assert "PUBSUB_PROJECT_ID" in environment, "Backend 必須含 PUBSUB_PROJECT_ID"
-    assert "RCA_TOPIC_ID" in environment, "Backend 必須含 RCA_TOPIC_ID"
-    assert "DATABASE_URL" in environment, "Backend 必須含 DATABASE_URL"
-    assert "GRAFANA_TOKENS" in environment, "Backend 必須含 GRAFANA_TOKENS"
+    assert set(environment) == {
+        "DATABASE_URL",
+        "GRAFANA_TOKENS",
+        "PUBSUB_PROJECT_ID",
+        "RCA_TOPIC_ID",
+        "APP_ENVIRONMENT",
+    }
 
     # Worker 專屬 AI/MCP 設定不應出現在 Backend
     worker_only_keys = {
@@ -318,24 +373,29 @@ def test_worker_owns_subscriber_ai_and_mcp_settings_without_publisher_privileges
     assert "livenessProbe" not in container and "readinessProbe" not in container
 
     environment = _environment(container)
-    # Worker 必須含 subscriber 與 AI/MCP 設定
-    required_worker_keys = {
+    assert set(environment) == {
         "DATABASE_URL",
         "PUBSUB_PROJECT_ID",
+        "RCA_TOPIC_ID",
         "PUBSUB_SUBSCRIPTION_ID",
         "APP_ENVIRONMENT",
         "MODEL_NAME",
+        "PUBSUB_AUTO_CREATE",
+        "WORKER_ID",
+        "MCP_CAPABILITY_MANIFEST",
         "METRICS_MCP_URL",
         "TRACE_MCP_URL",
         "LOG_MCP_URL",
+        "SPECIALIST_ANALYSIS_MODE",
+        "MCP_MAX_RESPONSE_BYTES",
+        "EVIDENCE_CHUNK_CHARS",
+        "EVIDENCE_MAX_CHUNKS",
+        "EVIDENCE_MAX_TOTAL_CHARS",
+        "SPECIALIST_MAX_TOOL_CALLS",
+        "SPECIALIST_MAX_OBSERVATIONS",
+        "RCA_DEADLINE_SECONDS",
+        "AGENT_CORRECTIVE_RETRIES",
     }
-    missing = required_worker_keys - set(environment)
-    assert not missing, f"Worker deployment 缺少必要設定：{sorted(missing)}"
-
-    # Backend 特有的 Grafana token 不應出現在 Worker
-    assert "GRAFANA_TOKENS" not in environment, (
-        "Worker deployment 不應含 GRAFANA_TOKENS（Backend publisher 特有設定）"
-    )
 
     _assert_secret_reference(environment["DATABASE_URL"], "DATABASE_URL")
     assert environment["WORKER_ID"] == {
@@ -382,21 +442,37 @@ def test_config_map_contains_only_approved_non_secret_defaults() -> None:
 
 def test_migration_jobs_are_immutable_bounded_and_least_privilege() -> None:
     expectations = {
-        "backend-migration-job.yaml": {
-            "generate_name": "sre-agent-backend-migration-",
+        "backend-0002-migration-job.yaml": {
+            "generate_name": "sre-agent-backend-0002-migration-",
             "image": "sre-agent-backend:latest",
             "service_account": "sre-agent-backend",
+            "revision": "0002_grafana_normalization_v2",
         },
-        "worker-migration-job.yaml": {
-            "generate_name": "sre-agent-worker-migration-",
+        "worker-0002-migration-job.yaml": {
+            "generate_name": "sre-agent-worker-0002-migration-",
             "image": "sre-agent-rca-worker:latest",
             "service_account": "sre-agent-rca-worker",
+            "revision": "0002_adk_specialist_analysis",
+        },
+        "backend-0003-migration-job.yaml": {
+            "generate_name": "sre-agent-backend-0003-migration-",
+            "image": "sre-agent-backend:latest",
+            "service_account": "sre-agent-backend",
+            "revision": "0003_non_partition_runtime_tables",
+        },
+        "worker-0003-migration-job.yaml": {
+            "generate_name": "sre-agent-worker-0003-migration-",
+            "image": "sre-agent-rca-worker:latest",
+            "service_account": "sre-agent-rca-worker",
+            "revision": "0003_validate_ordinary_runtime_tables",
         },
     }
     expected_resources = {
         "requests": {"cpu": "100m", "memory": "256Mi"},
         "limits": {"cpu": "1000m", "memory": "1Gi"},
     }
+
+    assert {path.name for path in JOBS_DIR.glob("*.yaml")} == set(expectations)
 
     for filename, expected in expectations.items():
         path = JOBS_DIR / filename
@@ -429,7 +505,11 @@ def test_migration_jobs_are_immutable_bounded_and_least_privilege() -> None:
 
         container = _container(job)
         assert container["image"] == expected["image"]
-        assert container["command"] == ["alembic", "upgrade", "head"]
+        assert container["command"] == [
+            "alembic",
+            "upgrade",
+            expected["revision"],
+        ]
         environment = _environment(container)
         assert set(environment) == {"DATABASE_URL"}
         _assert_secret_reference(environment["DATABASE_URL"], "DATABASE_URL")
