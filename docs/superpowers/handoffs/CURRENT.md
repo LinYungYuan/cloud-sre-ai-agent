@@ -21,9 +21,9 @@
 
 整體實作已進入最後 release gate 階段：
 
-- Tasks 1–6 全部完成（含 Task 6 round-3 independent re-review APPROVED）。
-- Task 7 post-fix rerun 已中途執行，完成 Safety preflight、Step 1（四 gate migration 兩個 DB）、Step 2 Backend（345 passed），但在 Step 2 Worker tests 執行前被用戶中斷，並已清理兩個 disposable DBs。
-- Task 7 必須從 Step 1（重建 disposable DBs）全新重跑，不可沿用本次中斷前的結果。
+- Tasks 1–6 全部完成；Task 6 round 4 的文件契約修正 `c316537` 已通過 independent review。
+- Task 7 post-fix attempt 2 fresh 完成兩個 DB 的八個 explicit migration gates 與 Backend（345 passed），但 Worker full suite 以 1 failed／429 passed／1 skipped 揭露 Task 6 文件缺口後停止。
+- 該缺口已修正並 review clean；兩個 disposable DBs 已清理，Task 7 必須再次從 Safety Preflight／Step 1 全新重跑，不可沿用 attempt 2 的部分結果。
 
 ## Superpowers Plan
 
@@ -32,7 +32,7 @@
 - 已核准 spec：`docs/superpowers/specs/2026-08-26-backend-runtime-simplification-design.md`
 - 目前 implementation plan：`docs/superpowers/plans/2026-08-28-immutable-migration-rollout-correction.md`
 - SDD ledger：`.superpowers/sdd/2026-08-28-immutable-migration-rollout-correction/progress.md`
-- Task 6 round-3 commit 已通過 independent re-review（本 handoff session 執行）
+- Task 6 round-4 fix brief：`.superpowers/sdd/2026-08-28-immutable-migration-rollout-correction/task-6-round-4-brief.md`
 - Task 7 rerun brief：`.superpowers/sdd/2026-08-28-immutable-migration-rollout-correction/task-7-rerun-brief.md`
 
 `docs/superpowers/plans/2026-08-26-backend-runtime-simplification-implementation.md` 是較早的 implementation plan；目前 correction plan 已接管，不要回到舊計畫。
@@ -50,6 +50,7 @@
 - Task 6 round 1：`b5f20e6`，scoped review approved。
 - Task 6 round 2：`51ee41b`，修補 schema documentation，round-2 review 仍有 Important finding 未解。
 - Task 6 round 3：`4ca879c`，分離 Backend-0001/0002 schema evolution 區段，新增 section-bounded regression test；**本 handoff session 執行 independent re-review：APPROVED（無 Critical/Important 發現）**。
+- Task 6 round 4：`c316537` 恢復 `Backend migration → RCA Worker migration` 與 `無法還原` 文件契約；Worker focused 1 passed、Backend schema documentation 10 passed、contracts 56 passed，independent review 無任何 finding。
 - Task 7 Safety preflight（本 handoff session）：✅ worktree clean，migration hashes 已記錄，無 release DBs，OID=16384。
 - Task 7 Step 1 四 gate migration 兩個 DB（本 handoff session）：
   - `sre_agent_release_acceptance`：Backend-0002 → Worker-0002 → Backend-0003 → Worker-0003，全部 ✅。
@@ -59,17 +60,17 @@
 
 ## In Progress
 
-### Task 7 — post-fix full release gate（中途被中斷）
+### Task 7 — post-fix full release gate（attempt 2 被 fresh failure 停止）
 
-**已完成部分（本次 handoff session 中執行，已清理）：**
+**attempt 2 fresh evidence（已清理，不可作為完成憑證）：**
 
 - Safety preflight ✅
 - Step 1：兩個 disposable DB 四 gate migration ✅（已清理）
 - Step 2 Backend 345 passed ✅
+- Step 2 Worker：429 passed、1 skipped、1 failed ❌；失敗已路由 Task 6 並由 `c316537` 修正、review clean。
 
-**尚未執行（被用戶中斷前停止）：**
+**尚未執行（因 Worker gate red 而正確停止）：**
 
-- Step 2 RCA Worker 完整測試
 - Step 2 Contracts 相容性測試
 - Step 3：Backend / Worker Ruff + Pyright + `git diff --check`
 - Step 4：Compose + Kustomize manifest 驗證
@@ -78,7 +79,7 @@
 - Step 7：Catalog 驗證（六 `r` + 六 `p`）
 - Step 8：Cleanup（此次已清理，下次亦需清理）
 
-**report 檔案目前狀態：** `.superpowers/sdd/2026-08-28-immutable-migration-rollout-correction/task-7-report.md` 尚未更新（本次中斷前未寫入）。下一個 agent 需在全部 gates 通過後追加新段落。
+**report 檔案目前狀態：** `.superpowers/sdd/2026-08-28-immutable-migration-rollout-correction/task-7-report.md` 已追加 attempt 2 的 NOT READY 與 cleanup 證據；下一次仍需以新的 fresh section 記錄完整 rerun。
 
 ## Next Action
 
@@ -152,8 +153,8 @@ handoff commit 修改：
 
 - Worktree：`/Users/linyungyuan/Desktop/sre-agent2.0/.worktrees/backend-runtime-simplification`
 - Branch：`codex/backend-runtime-simplification`
-- HEAD：`8911467101a5623366e9d378bee0f712d1c1bad8`（前次 handoff commit，`docs: add current ai development handoff`）
-- Implementation baseline：`4ca879c7f1455bac65ed5f8f16fbf158d10d8022`（`docs: separate published schema evolution stages`）
+- Implementation HEAD：`c3165376149e07643f165779586df29bbe08fa1f`（`docs: restore migration stream order contract`）
+- Current HEAD：本 handoff checkpoint 提交後請以 `git rev-parse HEAD` 取得。
 - Staged files：無
 - Unstaged tracked files：無
 - Untracked files：無
@@ -161,6 +162,8 @@ handoff commit 修改：
 最近相關 commits（新到舊）：
 
 ```text
+ c316537 docs: restore migration stream order contract
+3b2cf9a docs: update handoff — task-6 round-3 approved, task-7 partial cleanup
 8911467 docs: add current ai development handoff
 4ca879c docs: separate published schema evolution stages
 51ee41b docs: restore complete schema evolution reference
@@ -176,6 +179,13 @@ d7a90cb test: reconcile disposable databases with four gates
 不要 push；使用者只要求 session handoff。
 
 ## Verification
+
+### Task 6 round-4 correction and independent review（本 session）
+
+- Task 7 attempt 2 Worker full suite fresh failure：`1 failed, 429 passed, 1 skipped`，缺少 `Backend migration → RCA Worker migration`。
+- Focused RED：Worker schema-documentation test `1 failed`。
+- `c316537` GREEN：Worker focused `1 passed`、Backend schema-documentation `10 passed`、contracts `56 passed`、stale-text scan 與 `git diff --check` clean。
+- Independent scoped review：Spec compliant、Task quality Approved；Critical／Important／Minor 均無。
 
 ### Task 6 round-3 independent re-review（本 handoff session）
 
@@ -217,7 +227,7 @@ Verification 結果（本 handoff session fresh 執行）：
 - 四 gate fixture 的獨立 report 缺失（minor process debt）。
 - `.superpowers/.../progress.md` 的 Task 7 段落有歷史「complete」記錄，但已被 reopening 條目明確推翻；以最新 reopening 與本 handoff 為準。
 - 本地 branch 比 upstream 多若干 commits；尚未 push（依使用者要求）。
-- `task-7-report.md` 尚未追加本次中途執行結果（因未完成所有 gates，依 brief 規定不得寫入）。
+- `task-7-report.md` 已追加 attempt 2 的 NOT READY 與 cleanup 證據；尚無完整成功 rerun。
 - 下一次 Task 7 開始前必須重新確認 ports、container ownership、disposable DB absence、shared DB OID 與無殘留 processes；不能沿用本 handoff 的 runtime 狀態。
 
 ## Do Not Do

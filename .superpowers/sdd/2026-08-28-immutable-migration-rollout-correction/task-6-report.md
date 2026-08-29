@@ -186,3 +186,49 @@ altering its six-table canonical or retained-legacy contracts.
 
 Round 3 is **READY_TO_COMMIT**: no files are staged and no commit has been
 created for this round.
+
+## Round 4 — cross-stream migration-order contract restoration
+
+### Trigger, RED evidence, and root cause
+
+Task 7's fresh Worker suite reported **1 failed, 429 passed, 1 skipped**. The
+focused failure was
+`test_schema_documentation_describes_worker_migration_order_and_data_loss`:
+the authoritative schema reference no longer contained the exact phrase
+`Backend migration → RCA Worker migration`. `git log -S` traced that removal
+to Task 6 commit `b5f20e6`, which replaced the earlier overview while adding
+the correct four-gate procedure. After restoring the phrase contiguously, the
+same focused test exposed its next previously masked assertion: the exact
+`無法還原` data-loss warning had also been removed by `b5f20e6`.
+
+### Minimal correction
+
+Only `docs/database/postgresql-schema.md` changed. Its introduction now states
+the required cross-stream order and maps it truthfully to both interleaved
+pairs: Backend-0002 before Worker-0002, then Backend-0003 before Worker-0003.
+The existing forward-only recovery paragraph now states that the exact
+pre-conversion state is `無法還原` through Alembic downgrade while preserving
+the prohibition on downgrade and the approved-backup/validated-delta recovery
+paths. No gate command, version query, maintenance-window rule, retained-legacy
+policy, or executable behavior changed.
+
+### Round-4 GREEN evidence
+
+| Gate | Result |
+| --- | --- |
+| RCA Worker focused schema-documentation test | 1 passed |
+| Backend focused schema-documentation module | 10 passed |
+| Full `contracts/compatibility-tests` | 56 passed |
+| Operator stale-text scan | no matches for unsafe head/stamp, removed runtime commands, or lossless downgrade claims |
+| `git diff --check` | clean |
+
+### Self-review
+
+- The tracked diff contains exactly two documentation clarifications in the
+  owned schema reference; the ignored report is the only other edited path.
+- All four explicit revision commands and all eight per-gate version queries
+  remain byte-for-byte present and in their original order.
+- The maintenance-window, existing Worker-0002, no-stamp/no-replay, retained
+  legacy parents, and forward-only recovery policies remain intact.
+- No test, migration, runtime, manifest, `CURRENT.md`, or `progress.md` path was
+  modified.
