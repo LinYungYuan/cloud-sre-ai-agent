@@ -89,3 +89,58 @@ removed the remaining worker container example that offered a head upgrade.
   a lossless post-write downgrade.
 - This worktree remains **READY_TO_COMMIT** only: nothing has been staged or
   committed, pending controller authorization.
+
+## Round 2 — schema reference completeness correction
+
+### Trigger and root cause
+
+Task 7 reran the Backend gate from `b5f20e6` and found a deterministic schema
+reference regression: **338 passed, 6 failed** in the full Backend suite, and
+the focused schema-documentation module was **6 failed, 3 passed**. The
+four-gate rewrite correctly made the final six runtime relations authoritative,
+but accidentally removed the evolving reference's immutable Backend-0001
+historical inventory, operational indexes, and Backend-0002 normalization-v2
+fragments. No production code, Job, Compose, or migration behavior was at
+fault.
+
+The six failures mapped one-to-one to the missing reference material:
+
+1. Historical Backend-0001 table manifest no longer contained every migration
+   parent table.
+2. The same missing table inventory violated the parent-table coverage check.
+3. The 15 required operational indexes were absent.
+4. The final `webhook_deliveries` reference had lost the accepted
+   `VALIDATION_FAILED` delivery status.
+5. Validation/default fields and incident identity-v2 fields were absent.
+6. Backend-0002 normalization rules, folder mapping, column alterations, and
+   lookup-index fragments were absent.
+
+### Minimal correction
+
+Only `docs/database/postgresql-schema.md` changed in this round. It now keeps a
+clearly labelled, non-runtime historical Backend-0001/0002 manifest alongside
+the approved final UUID-only six-table section. The historical pointer field is
+explicitly historical; the canonical evidence interface remains
+`raw_result BYTEA`, object `metadata JSONB`, and `content_hash`. The final
+delivery and alert table definitions now reflect the actual Backend-0003
+replacement contract, including validation and normalization columns. The
+legacy partition-parent section and forward-only rollout procedure remain
+unchanged.
+
+### Round-2 GREEN evidence
+
+| Gate | Result |
+| --- | --- |
+| Focused `test_schema_documentation.py` | 9 passed |
+| Full Backend suite (explicit local test DB URL on port 5432) | 344 passed, 40 warnings |
+| Full `contracts/compatibility-tests` | 56 passed |
+| Backend Ruff | passed |
+| RCA Worker Ruff | passed |
+| Backend Pyright | 0 errors, 0 warnings, 0 informations |
+| RCA Worker Pyright | completed successfully with no diagnostics |
+| Operator stale-text scan | no matches |
+| Immutable migration path diff | no changed migration paths |
+| `git diff --check` | clean |
+
+This round is **READY_TO_COMMIT**: no files are staged and no new commit has
+been made.
