@@ -144,3 +144,45 @@ unchanged.
 
 This round is **READY_TO_COMMIT**: no files are staged and no new commit has
 been made.
+
+## Round 3 — immutable Backend-0001/0002 section boundary correction
+
+### Trigger, TDD RED, and root cause
+
+Round-2 review found one Important contradiction: the labelled Backend-0001
+inventory had already made `incidents.team_id`, `project_id`, and
+`environment_id` nullable and included the Backend-0002-only
+`identity_version`, `provider`, `folder_code`, and `alert_name` columns. It
+then represented some of the same changes again as Backend-0002 `ALTER`s.
+
+The new section-bounded regression was written first and produced the expected
+RED: **1 failed** because the document had no separate
+`### Backend-0001 published baseline` and
+`### Backend-0002 normalization and identity mutations` boundaries. The test
+asserts the published 0001 scope `NOT NULL` contract and absence of every
+identity-v2 column, then asserts all four `ADD COLUMN` operations and all
+three `DROP NOT NULL` operations in only the 0002 block, plus post-state
+presence in the final section.
+
+### Minimal correction and GREEN evidence
+
+Only the owned schema document and its regression test changed. The 0001
+`incidents` inventory now reflects its published baseline exactly for the
+three scope columns and excludes every 0002-only column. The 0002 block now
+contains each identity-v2 `ADD COLUMN` and the original nullability changes;
+the final UUID-only section describes the post-0002 Incident state without
+altering its six-table canonical or retained-legacy contracts.
+
+| Gate | Result |
+| --- | --- |
+| Focused schema-documentation module | 10 passed |
+| Full Backend suite (explicit local test DB URL on port 5432) | 345 passed, 40 warnings |
+| Full `contracts/compatibility-tests` | 56 passed |
+| Backend Ruff / RCA Worker Ruff | passed / passed |
+| Backend Pyright / RCA Worker Pyright | 0 errors, 0 warnings / 0 errors, 0 warnings |
+| Operator stale-text scan | no matches |
+| Immutable migration path diff | no changed migration paths |
+| `git diff --check` | clean |
+
+Round 3 is **READY_TO_COMMIT**: no files are staged and no commit has been
+created for this round.

@@ -71,6 +71,8 @@ It makes the immutable migration ancestry auditable; it is **not** an
 instruction to recreate partitioned tables or to restore their composite-key
 interface. `alembic_version_backend` records the Backend stream version.
 
+### Backend-0001 published baseline
+
 ```sql
 CREATE TABLE teams (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -136,12 +138,11 @@ CREATE TABLE classification_mappings (
 CREATE TABLE incidents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(), incident_number BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
     identity_key TEXT NOT NULL, title TEXT NOT NULL, severity TEXT NOT NULL, status TEXT NOT NULL,
-    alert_state TEXT NOT NULL, team_id UUID REFERENCES teams(id), project_id UUID REFERENCES projects(id),
-    environment_id UUID REFERENCES environments(id), service_id UUID REFERENCES services(id),
+    alert_state TEXT NOT NULL, team_id UUID NOT NULL REFERENCES teams(id), project_id UUID NOT NULL REFERENCES projects(id),
+    environment_id UUID NOT NULL REFERENCES environments(id), service_id UUID REFERENCES services(id),
     acknowledged_at TIMESTAMPTZ, acknowledged_by UUID REFERENCES subjects(id), assigned_to UUID REFERENCES subjects(id),
     opened_at TIMESTAMPTZ NOT NULL, resolved_at TIMESTAMPTZ, reopened_from_incident_id UUID REFERENCES incidents(id),
-    version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    identity_version INTEGER NOT NULL DEFAULT 1, provider TEXT NULL, folder_code TEXT NULL, alert_name TEXT NULL
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE incident_alerts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(), incident_id UUID NOT NULL REFERENCES incidents(id),
@@ -210,6 +211,8 @@ which intentionally replaces their old partition-key columns. The old
 `evidence_records` pointer column is historical only; the canonical table has
 `raw_result BYTEA`, `metadata JSONB`, and `content_hash`.
 
+### Backend-0002 normalization and identity mutations
+
 Backend-0002 additionally introduced the following persistent normalization
 objects and altered columns. `folder_code is not projects.id`; it is a source
 folder identifier mapped by `folder_scope_mappings`.
@@ -235,6 +238,9 @@ ALTER TABLE webhook_deliveries ADD COLUMN truncated_alerts INTEGER NOT NULL DEFA
 ALTER TABLE webhook_deliveries ADD COLUMN incomplete BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE alert_events ADD COLUMN provider TEXT NULL;
 ALTER TABLE incidents ADD COLUMN identity_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE incidents ADD COLUMN provider TEXT NULL;
+ALTER TABLE incidents ADD COLUMN folder_code TEXT NULL;
+ALTER TABLE incidents ADD COLUMN alert_name TEXT NULL;
 ALTER TABLE incidents ALTER COLUMN team_id DROP NOT NULL;
 ALTER TABLE incidents ALTER COLUMN project_id DROP NOT NULL;
 ALTER TABLE incidents ALTER COLUMN environment_id DROP NOT NULL;
@@ -275,6 +281,11 @@ only. The canonical catalog requirement is `relkind = 'r'` and
 the runtime interface. During Backend-0003 conversion, **historical rows are copied and validated before cutover**; row counts, UUID uniqueness, required
 fields, foreign keys, and representative reads/writes are checked before the
 canonical names switch.
+
+The post-Backend-0002 Incident state retains `identity_version`, `provider`,
+`folder_code`, and `alert_name`; scope columns are nullable only because the
+explicit Backend-0002 mutations above dropped their original `NOT NULL`
+requirements.
 
 ```sql
 CREATE TABLE webhook_deliveries (
