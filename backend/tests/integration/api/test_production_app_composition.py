@@ -6,7 +6,6 @@ from uuid import UUID
 
 import httpx
 import pytest
-from google.api_core.client_options import ClientOptions
 from google.auth.credentials import AnonymousCredentials
 from pydantic import SecretStr
 from sqlalchemy import event, text
@@ -196,24 +195,68 @@ async def test_production_resources_stops_client_and_disposes_engine_on_normal_e
     assert engine.dispose_calls == 1
 
 
-def test_local_emulator_client_uses_explicit_endpoint_and_anonymous_credentials(
+def test_local_emulator_client_uses_explicit_insecure_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    channel = object()
     constructed: dict[str, object] = {}
+
+    class FakePublisherTransport:
+        def __init__(
+            self,
+            *,
+            channel: object,
+            credentials: AnonymousCredentials,
+        ) -> None:
+            constructed["created_transport"] = self
+            constructed["transport_channel"] = channel
+            constructed["transport_credentials"] = credentials
 
     class FakePublisherClient:
         def __init__(self, **values: object) -> None:
             constructed.update(values)
 
+    monkeypatch.setenv("PUBSUB_EMULATOR_HOST", "external-value-must-not-change")
+    monkeypatch.setattr(
+        pubsub_publisher.grpc,
+        "insecure_channel",
+        lambda host: constructed.setdefault("channel_host", host) and channel,
+    )
+    monkeypatch.setattr(
+        pubsub_publisher,
+        "PublisherGrpcTransport",
+        FakePublisherTransport,
+    )
     monkeypatch.setattr(
         pubsub_publisher.pubsub_v1, "PublisherClient", FakePublisherClient
     )
 
     pubsub_publisher.create_publisher_client("127.0.0.1:58085")
 
-    assert isinstance(constructed["credentials"], AnonymousCredentials)
-    assert isinstance(constructed["client_options"], ClientOptions)
-    assert constructed["client_options"].api_endpoint == "127.0.0.1:58085"
+    assert constructed["channel_host"] == "127.0.0.1:58085"
+    assert constructed["transport_channel"] is channel
+    assert isinstance(constructed["transport_credentials"], AnonymousCredentials)
+    assert constructed["transport"] is constructed["created_transport"]
+    assert os.environ["PUBSUB_EMULATOR_HOST"] == "external-value-must-not-change"
+
+
+def test_publisher_client_uses_adc_defaults_without_an_emulator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    constructed: list[dict[str, object]] = []
+
+    class FakePublisherClient:
+        def __init__(self, **values: object) -> None:
+            constructed.append(values)
+
+    monkeypatch.setattr(
+        pubsub_publisher.pubsub_v1, "PublisherClient", FakePublisherClient
+    )
+
+    client = pubsub_publisher.create_publisher_client(None)
+
+    assert isinstance(client, FakePublisherClient)
+    assert constructed == [{}]
 
 
 @pytest.mark.asyncio

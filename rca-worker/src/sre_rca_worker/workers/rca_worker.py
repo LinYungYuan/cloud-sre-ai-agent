@@ -4,9 +4,15 @@ import asyncio
 import signal
 from collections.abc import Awaitable, Callable
 
-from google.api_core.client_options import ClientOptions
+import grpc
 from google.auth.credentials import AnonymousCredentials
-from google.cloud import pubsub_v1
+from google.cloud import pubsub_v1  # pyright: ignore[reportAttributeAccessIssue]
+from google.pubsub_v1.services.publisher.transports.grpc import (  # pyright: ignore[reportMissingImports]
+    PublisherGrpcTransport,
+)
+from google.pubsub_v1.services.subscriber.transports.grpc import (  # pyright: ignore[reportMissingImports]
+    SubscriberGrpcTransport,
+)
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -49,17 +55,17 @@ def _create_pubsub_clients(
     settings: WorkerSettings,
 ) -> tuple[pubsub_v1.PublisherClient, pubsub_v1.SubscriberClient]:
     if settings.pubsub_emulator_host:
-        client_options = ClientOptions(api_endpoint=settings.pubsub_emulator_host)
-        credentials = AnonymousCredentials()
+        publisher_transport = PublisherGrpcTransport(
+            channel=grpc.insecure_channel(settings.pubsub_emulator_host),
+            credentials=AnonymousCredentials(),
+        )
+        subscriber_transport = SubscriberGrpcTransport(
+            channel=grpc.insecure_channel(settings.pubsub_emulator_host),
+            credentials=AnonymousCredentials(),
+        )
         return (
-            pubsub_v1.PublisherClient(
-                client_options=client_options,
-                credentials=credentials,
-            ),
-            pubsub_v1.SubscriberClient(
-                client_options=client_options,
-                credentials=credentials,
-            ),
+            pubsub_v1.PublisherClient(transport=publisher_transport),
+            pubsub_v1.SubscriberClient(transport=subscriber_transport),
         )
     return pubsub_v1.PublisherClient(), pubsub_v1.SubscriberClient()
 

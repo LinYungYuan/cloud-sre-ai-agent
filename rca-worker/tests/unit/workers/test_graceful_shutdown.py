@@ -10,7 +10,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from google.api_core.client_options import ClientOptions
 from google.auth.credentials import AnonymousCredentials
 
 from sre_rca_worker.application.rca.job_lifecycle import JobDisposition
@@ -37,28 +36,53 @@ def _worker_settings(
     )
 
 
-def test_pubsub_clients_use_explicit_anonymous_emulator_configuration(
+def test_pubsub_clients_use_independent_explicit_insecure_emulator_transports(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = _worker_settings(
         app_environment="local",
         pubsub_emulator_host="127.0.0.1:58085",
     )
-    configured_clients: list[tuple[ClientOptions, AnonymousCredentials]] = []
+    channels = [object(), object()]
+    created_channels: list[str] = []
+    configured_transports: list[tuple[object, object, AnonymousCredentials]] = []
+    configured_clients: list[object] = []
 
-    class FakePublisher:
+    class FakePublisherTransport:
         def __init__(
             self,
             *,
-            client_options: ClientOptions,
+            channel: object,
             credentials: AnonymousCredentials,
         ) -> None:
-            configured_clients.append((client_options, credentials))
+            configured_transports.append((self, channel, credentials))
+
+    class FakeSubscriberTransport(FakePublisherTransport):
+        pass
+
+    class FakePublisher:
+        def __init__(self, *, transport: object) -> None:
+            configured_clients.append(transport)
 
     class FakeSubscriber(FakePublisher):
         pass
 
     monkeypatch.setenv("PUBSUB_EMULATOR_HOST", "external-value-must-not-change")
+    monkeypatch.setattr(
+        rca_worker.grpc,
+        "insecure_channel",
+        lambda host: (created_channels.append(host), channels.pop(0))[1],
+    )
+    monkeypatch.setattr(
+        rca_worker,
+        "PublisherGrpcTransport",
+        FakePublisherTransport,
+    )
+    monkeypatch.setattr(
+        rca_worker,
+        "SubscriberGrpcTransport",
+        FakeSubscriberTransport,
+    )
     monkeypatch.setattr(rca_worker.pubsub_v1, "PublisherClient", FakePublisher)
     monkeypatch.setattr(rca_worker.pubsub_v1, "SubscriberClient", FakeSubscriber)
 
@@ -66,14 +90,19 @@ def test_pubsub_clients_use_explicit_anonymous_emulator_configuration(
 
     assert isinstance(publisher, FakePublisher)
     assert isinstance(subscriber, FakeSubscriber)
-    assert [options.api_endpoint for options, _ in configured_clients] == [
+    assert created_channels == [
         "127.0.0.1:58085",
         "127.0.0.1:58085",
     ]
+    assert configured_transports[0][1] is not configured_transports[1][1]
     assert all(
         isinstance(credentials, AnonymousCredentials)
-        for _, credentials in configured_clients
+        for _, _, credentials in configured_transports
     )
+    assert configured_clients == [
+        configured_transports[0][0],
+        configured_transports[1][0],
+    ]
     assert os.environ["PUBSUB_EMULATOR_HOST"] == "external-value-must-not-change"
 
 

@@ -4,9 +4,12 @@ import threading
 from collections.abc import Mapping
 from typing import Protocol
 
-from google.api_core.client_options import ClientOptions
+import grpc
 from google.auth.credentials import AnonymousCredentials
-from google.cloud import pubsub_v1
+from google.cloud import pubsub_v1  # pyright: ignore[reportAttributeAccessIssue]
+from google.pubsub_v1.services.publisher.transports.grpc import (  # pyright: ignore[reportMissingImports]
+    PublisherGrpcTransport,
+)
 
 
 class MessagePublisher(Protocol):
@@ -31,9 +34,12 @@ def create_publisher_client(
     """Create an explicit emulator client without mutating process environment."""
     if pubsub_emulator_host is None:
         return pubsub_v1.PublisherClient()
-    return pubsub_v1.PublisherClient(
+    transport = PublisherGrpcTransport(
+        channel=grpc.insecure_channel(pubsub_emulator_host),
         credentials=AnonymousCredentials(),
-        client_options=ClientOptions(api_endpoint=pubsub_emulator_host),
+    )
+    return pubsub_v1.PublisherClient(
+        transport=transport,
     )
 
 
