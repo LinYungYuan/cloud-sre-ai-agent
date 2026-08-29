@@ -21,9 +21,9 @@
 
 整體實作已進入最後 release gate 階段：
 
-- Tasks 1–6 全部完成；Task 6 round 4 的文件契約修正 `c316537` 已通過 independent review。
-- Task 7 post-fix attempt 2 fresh 完成兩個 DB 的八個 explicit migration gates 與 Backend（345 passed），但 Worker full suite 以 1 failed／429 passed／1 skipped 揭露 Task 6 文件缺口後停止。
-- 該缺口已修正並 review clean；兩個 disposable DBs 已清理，Task 7 必須再次從 Safety Preflight／Step 1 全新重跑，不可沿用 attempt 2 的部分結果。
+- Tasks 1–6 全部完成；Task 6 round 4 文件修正與 Task 4 Pub/Sub emulator transport follow-up 均已通過 independent review。
+- Task 7 attempt 4 fresh 通過 migrations、完整 tests/static、renders 與 canonical evidence smoke，但 live Worker 揭露 emulator client 錯用 TLS；該 defect 已由 `a37c1d4`、`e5b9c8e`、`077ed0b`、`07b22be` 修正並 review clean。
+- Attempt 4 的兩個 disposable DBs 已清理；Task 7 必須再次從 Safety Preflight／Step 1 全新重跑，不可沿用任何部分結果。
 
 ## Superpowers Plan
 
@@ -33,6 +33,7 @@
 - 目前 implementation plan：`docs/superpowers/plans/2026-08-28-immutable-migration-rollout-correction.md`
 - SDD ledger：`.superpowers/sdd/2026-08-28-immutable-migration-rollout-correction/progress.md`
 - Task 6 round-4 fix brief：`.superpowers/sdd/2026-08-28-immutable-migration-rollout-correction/task-6-round-4-brief.md`
+- Pub/Sub emulator transport defect brief：`.superpowers/sdd/2026-08-28-immutable-migration-rollout-correction/task-4-emulator-transport-fix-brief.md`
 - Task 7 rerun brief：`.superpowers/sdd/2026-08-28-immutable-migration-rollout-correction/task-7-rerun-brief.md`
 
 `docs/superpowers/plans/2026-08-26-backend-runtime-simplification-implementation.md` 是較早的 implementation plan；目前 correction plan 已接管，不要回到舊計畫。
@@ -51,6 +52,7 @@
 - Task 6 round 2：`51ee41b`，修補 schema documentation，round-2 review 仍有 Important finding 未解。
 - Task 6 round 3：`4ca879c`，分離 Backend-0001/0002 schema evolution 區段，新增 section-bounded regression test；**本 handoff session 執行 independent re-review：APPROVED（無 Critical/Important 發現）**。
 - Task 6 round 4：`c316537` 恢復 `Backend migration → RCA Worker migration` 與 `無法還原` 文件契約；Worker focused 1 passed、Backend schema documentation 10 passed、contracts 56 passed，independent review 無任何 finding。
+- Task 4 Pub/Sub emulator follow-up：`a37c1d4` 顯式建立 insecure transports；`e5b9c8e`、`077ed0b`、`07b22be` 依三輪 scoped review 補齊 deterministic close、partial-construction cleanup、test doubles 與 primary-error preservation；final scoped review APPROVED。
 - Task 7 Safety preflight（本 handoff session）：✅ worktree clean，migration hashes 已記錄，無 release DBs，OID=16384。
 - Task 7 Step 1 四 gate migration 兩個 DB（本 handoff session）：
   - `sre_agent_release_acceptance`：Backend-0002 → Worker-0002 → Backend-0003 → Worker-0003，全部 ✅。
@@ -60,21 +62,19 @@
 
 ## In Progress
 
-### Task 7 — post-fix full release gate（attempt 2 被 fresh failure 停止）
+### Task 7 — post-fix full release gate（attempt 4 被 live transport failure 停止）
 
-**attempt 2 fresh evidence（已清理，不可作為完成憑證）：**
+**attempt 4 fresh evidence（已清理，不可作為完成憑證）：**
 
 - Safety preflight ✅
 - Step 1：兩個 disposable DB 四 gate migration ✅（已清理）
 - Step 2 Backend 345 passed ✅
-- Step 2 Worker：429 passed、1 skipped、1 failed ❌；失敗已路由 Task 6 並由 `c316537` 修正、review clean。
+- Step 2 Worker 430 passed、1 skipped ✅；contracts 56 passed ✅。
+- Static、Compose/Kustomize/four Jobs、canonical evidence smoke ✅。
+- Live Worker ❌：TLS `WRONG_VERSION_NUMBER`；已路由 Task 4 follow-up 並由 `a37c1d4..07b22be` 修正、review clean。
 
-**尚未執行（因 Worker gate red 而正確停止）：**
+**尚未執行（因 live Worker gate red 而正確停止）：**
 
-- Step 2 Contracts 相容性測試
-- Step 3：Backend / Worker Ruff + Pyright + `git diff --check`
-- Step 4：Compose + Kustomize manifest 驗證
-- Step 5：Canonical four-gate evidence smoke
 - Step 6：Live request/recovery smoke
 - Step 7：Catalog 驗證（六 `r` + 六 `p`）
 - Step 8：Cleanup（此次已清理，下次亦需清理）
@@ -153,7 +153,7 @@ handoff commit 修改：
 
 - Worktree：`/Users/linyungyuan/Desktop/sre-agent2.0/.worktrees/backend-runtime-simplification`
 - Branch：`codex/backend-runtime-simplification`
-- Implementation HEAD：`c3165376149e07643f165779586df29bbe08fa1f`（`docs: restore migration stream order contract`）
+- Implementation HEAD：`07b22bebd719529d83c9963d3dec911745039fd8`（`fix: preserve backend cleanup errors`）
 - Current HEAD：本 handoff checkpoint 提交後請以 `git rev-parse HEAD` 取得。
 - Staged files：無
 - Unstaged tracked files：無
@@ -162,6 +162,11 @@ handoff commit 修改：
 最近相關 commits（新到舊）：
 
 ```text
+07b22be fix: preserve backend cleanup errors
+077ed0b fix: preserve pubsub cleanup failures
+e5b9c8e fix: close pubsub emulator transports
+a37c1d4 fix: use insecure pubsub emulator transports
+fc15ca4 docs: checkpoint task 6 round 4
  c316537 docs: restore migration stream order contract
 3b2cf9a docs: update handoff — task-6 round-3 approved, task-7 partial cleanup
 8911467 docs: add current ai development handoff
@@ -179,6 +184,13 @@ d7a90cb test: reconcile disposable databases with four gates
 不要 push；使用者只要求 session handoff。
 
 ## Verification
+
+### Task 4 Pub/Sub emulator transport follow-up（本 session）
+
+- Task 7 attempt 4 live RED：Worker 對 plaintext emulator 使用 TLS，`WRONG_VERSION_NUMBER`。
+- TDD commits：`a37c1d4`、`e5b9c8e`、`077ed0b`、`07b22be`。
+- Scoped re-review round 3：所有 findings addressed，無新 breakage，APPROVED。
+- Controller fresh：Backend lifecycle `12 passed, 1 deselected`；Worker lifecycle＋identity integration `10 passed`；Backend/Worker Ruff clean；兩邊 Pyright `0 errors, 0 warnings`；`git diff --check` clean。
 
 ### Task 6 round-4 correction and independent review（本 session）
 
@@ -222,7 +234,7 @@ Verification 結果（本 handoff session fresh 執行）：
 ## Known Issues
 
 - Task 7 post-fix full release gate 尚未完成（不能宣稱 release ready）。
-- Task 7 必須在確認 release DBs 不存在後從 Step 1 全新重跑；本 handoff 的中途結果僅為歷史參考。
+- Task 7 必須在確認 release DBs 不存在後從 Step 1 全新重跑；attempt 2–4 的部分結果僅為歷史參考。
 - Full Backend 有 40 個 Alembic `path_separator` deprecation warnings；是技術債，不是 failure。
 - 四 gate fixture 的獨立 report 缺失（minor process debt）。
 - `.superpowers/.../progress.md` 的 Task 7 段落有歷史「complete」記錄，但已被 reopening 條目明確推翻；以最新 reopening 與本 handoff 為準。
