@@ -74,16 +74,31 @@ class _LifecycleEngine:
         self.dispose_calls += 1
 
 
+class _LifecyclePublisherTransport:
+    def __init__(self, *, close_error: Exception | None = None) -> None:
+        self.close_error = close_error
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
 class _LifecyclePublisherClient:
     def __init__(
         self,
         *,
         topic_error: Exception | None = None,
         stop_error: Exception | None = None,
+        transport_close_error: Exception | None = None,
     ) -> None:
         self.topic_error = topic_error
         self.stop_error = stop_error
         self.stop_calls = 0
+        self.transport = _LifecyclePublisherTransport(
+            close_error=transport_close_error
+        )
 
     def topic_path(self, project_id: str, topic_id: str) -> str:
         del project_id, topic_id
@@ -159,6 +174,7 @@ async def test_production_resources_stops_client_and_disposes_engine_when_topic_
             raise AssertionError("topic acquisition should fail")
 
     assert client.stop_calls == 1
+    assert client.transport.close_calls == 1
     assert engine.dispose_calls == 1
 
 
@@ -176,6 +192,7 @@ async def test_production_resources_disposes_engine_when_client_stop_fails(
             pass
 
     assert client.stop_calls == 1
+    assert client.transport.close_calls == 1
     assert engine.dispose_calls == 1
 
 
@@ -192,6 +209,27 @@ async def test_production_resources_stops_client_and_disposes_engine_on_normal_e
         pass
 
     assert client.stop_calls == 1
+    assert client.transport.close_calls == 1
+    assert engine.dispose_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_production_resources_disposes_engine_when_publisher_transport_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _LifecycleEngine()
+    client = _LifecyclePublisherClient(
+        transport_close_error=RuntimeError("transport close failed")
+    )
+    _stub_resource_dependencies(monkeypatch, engine)
+    monkeypatch.setattr(composition, "create_publisher_client", lambda _: client)
+
+    with pytest.raises(RuntimeError, match="transport close failed"):
+        async with composition.production_resources(_resource_settings()):
+            pass
+
+    assert client.stop_calls == 1
+    assert client.transport.close_calls == 1
     assert engine.dispose_calls == 1
 
 
@@ -238,6 +276,48 @@ def test_local_emulator_client_uses_explicit_insecure_transport(
     assert isinstance(constructed["transport_credentials"], AnonymousCredentials)
     assert constructed["transport"] is constructed["created_transport"]
     assert os.environ["PUBSUB_EMULATOR_HOST"] == "external-value-must-not-change"
+
+
+def test_local_emulator_client_closes_transport_when_client_construction_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class FakeChannel:
+        def close(self) -> None:
+            events.append("channel.close")
+
+    class FakePublisherTransport:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def close(self) -> None:
+            events.append("transport.close")
+
+    class FailingPublisherClient:
+        def __init__(self, **_: object) -> None:
+            raise RuntimeError("client construction failed")
+
+    monkeypatch.setattr(
+        pubsub_publisher.grpc,
+        "insecure_channel",
+        lambda _: FakeChannel(),
+    )
+    monkeypatch.setattr(
+        pubsub_publisher,
+        "PublisherGrpcTransport",
+        FakePublisherTransport,
+    )
+    monkeypatch.setattr(
+        pubsub_publisher.pubsub_v1,
+        "PublisherClient",
+        FailingPublisherClient,
+    )
+
+    with pytest.raises(RuntimeError, match="client construction failed"):
+        pubsub_publisher.create_publisher_client("127.0.0.1:58085")
+
+    assert events == ["transport.close"]
 
 
 def test_publisher_client_uses_adc_defaults_without_an_emulator(

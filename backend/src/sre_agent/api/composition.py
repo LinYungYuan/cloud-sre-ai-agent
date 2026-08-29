@@ -28,6 +28,7 @@ from sre_agent.integrations.grafana.authenticator import (
 )
 from sre_agent.integrations.pubsub.publisher import (
     GooglePubSubPublisher,
+    close_publisher_transport,
     create_publisher_client,
 )
 from sre_agent.persistence.repositories.normalization import (
@@ -110,7 +111,10 @@ async def production_resources(settings: Settings) -> AsyncIterator[RuntimeResou
                 ),
             )
         finally:
-            publisher_client.stop()
+            try:
+                publisher_client.stop()
+            finally:
+                close_publisher_transport(publisher_client)
     finally:
         await engine.dispose()
 

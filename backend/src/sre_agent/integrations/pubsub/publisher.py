@@ -34,13 +34,25 @@ def create_publisher_client(
     """Create an explicit emulator client without mutating process environment."""
     if pubsub_emulator_host is None:
         return pubsub_v1.PublisherClient()
-    transport = PublisherGrpcTransport(
-        channel=grpc.insecure_channel(pubsub_emulator_host),
-        credentials=AnonymousCredentials(),
-    )
-    return pubsub_v1.PublisherClient(
-        transport=transport,
-    )
+    channel = grpc.insecure_channel(pubsub_emulator_host)
+    try:
+        transport = PublisherGrpcTransport(
+            channel=channel,
+            credentials=AnonymousCredentials(),
+        )
+    except BaseException:
+        channel.close()
+        raise
+    try:
+        return pubsub_v1.PublisherClient(transport=transport)
+    except BaseException:
+        transport.close()
+        raise
+
+
+def close_publisher_transport(client: pubsub_v1.PublisherClient) -> None:
+    """Close the gRPC transport after the publisher has stopped batching."""
+    client.transport.close()
 
 
 class GooglePubSubPublisher:

@@ -55,18 +55,38 @@ def _create_pubsub_clients(
     settings: WorkerSettings,
 ) -> tuple[pubsub_v1.PublisherClient, pubsub_v1.SubscriberClient]:
     if settings.pubsub_emulator_host:
-        publisher_transport = PublisherGrpcTransport(
-            channel=grpc.insecure_channel(settings.pubsub_emulator_host),
-            credentials=AnonymousCredentials(),
-        )
-        subscriber_transport = SubscriberGrpcTransport(
-            channel=grpc.insecure_channel(settings.pubsub_emulator_host),
-            credentials=AnonymousCredentials(),
-        )
-        return (
-            pubsub_v1.PublisherClient(transport=publisher_transport),
-            pubsub_v1.SubscriberClient(transport=subscriber_transport),
-        )
+        publisher_channel = grpc.insecure_channel(settings.pubsub_emulator_host)
+        try:
+            publisher_transport = PublisherGrpcTransport(
+                channel=publisher_channel,
+                credentials=AnonymousCredentials(),
+            )
+        except BaseException:
+            publisher_channel.close()
+            raise
+        try:
+            publisher = pubsub_v1.PublisherClient(transport=publisher_transport)
+        except BaseException:
+            publisher_transport.close()
+            raise
+
+        subscriber_channel = grpc.insecure_channel(settings.pubsub_emulator_host)
+        try:
+            subscriber_transport = SubscriberGrpcTransport(
+                channel=subscriber_channel,
+                credentials=AnonymousCredentials(),
+            )
+        except BaseException:
+            subscriber_channel.close()
+            publisher_transport.close()
+            raise
+        try:
+            subscriber = pubsub_v1.SubscriberClient(transport=subscriber_transport)
+        except BaseException:
+            subscriber_transport.close()
+            publisher_transport.close()
+            raise
+        return publisher, subscriber
     return pubsub_v1.PublisherClient(), pubsub_v1.SubscriberClient()
 
 
@@ -171,6 +191,13 @@ async def run_production(stop_event: asyncio.Event | None = None) -> None:
                     },
                 )
     finally:
-        publisher.stop()
-        subscriber.close()
-        await engine.dispose()
+        try:
+            publisher.stop()
+        finally:
+            try:
+                publisher.transport.close()
+            finally:
+                try:
+                    subscriber.close()
+                finally:
+                    await engine.dispose()
