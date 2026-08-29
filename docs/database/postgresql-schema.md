@@ -5,7 +5,9 @@ conversion. Alembic files, not the examples below, are the executable schema
 authority. Backend migrations write `alembic_version_backend`; RCA Worker
 migrations write `alembic_version_rca_worker`. The two streams share an
 application role but retain separate version tables and table-ownership
-boundaries.
+boundaries. The required cross-stream order at each interleaved pair is
+**Backend migration → RCA Worker migration**: Backend-0002 before Worker-0002,
+then Backend-0003 before Worker-0003.
 
 ## 維護窗口與四個 migration gate
 
@@ -59,9 +61,10 @@ It must **不得 stamp 或 replay** either published migration.
 
 If a gate or catalog check fails before runtime restart, leave writes stopped
 and investigate from the approved backup. Retained legacy parents remain in
-place. After new writes, **不得執行 Alembic downgrade**: stop traffic and
-restore from an **approved backup** or migrate the validated delta under an
-explicit recovery plan.
+place. After new writes, the exact pre-conversion database state **無法還原**
+through Alembic downgrade. **不得執行 Alembic downgrade**: stop traffic
+and restore from an **approved backup** or migrate the validated delta under
+an explicit recovery plan.
 
 ## Historical Backend-0001 and Backend-0002 reference manifest
 
