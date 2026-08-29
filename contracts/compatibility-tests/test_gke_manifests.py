@@ -534,19 +534,32 @@ def test_release_runbook_fails_fast_and_orders_migrations_before_rollouts() -> N
     release_commands = ordered_release.split("```bash", maxsplit=1)[1].split(
         "```", maxsplit=1
     )[0]
+    gate_pairs = (
+        (
+            "BACKEND_0002_JOB=$(kubectl create -f "
+            "deploy/k8s/jobs/backend-0002-migration-job.yaml",
+            'kubectl wait --for=condition=complete --timeout=15m "job/${BACKEND_0002_JOB}"',
+        ),
+        (
+            "WORKER_0002_JOB=$(kubectl create -f "
+            "deploy/k8s/jobs/worker-0002-migration-job.yaml",
+            'kubectl wait --for=condition=complete --timeout=15m "job/${WORKER_0002_JOB}"',
+        ),
+        (
+            "BACKEND_0003_JOB=$(kubectl create -f "
+            "deploy/k8s/jobs/backend-0003-migration-job.yaml",
+            'kubectl wait --for=condition=complete --timeout=15m "job/${BACKEND_0003_JOB}"',
+        ),
+        (
+            "WORKER_0003_JOB=$(kubectl create -f "
+            "deploy/k8s/jobs/worker-0003-migration-job.yaml",
+            'kubectl wait --for=condition=complete --timeout=15m "job/${WORKER_0003_JOB}"',
+        ),
+    )
     ordered_commands = [
         "set -euo pipefail",
         "kubectl apply -f deploy/k8s/base/serviceaccounts.yaml",
-        (
-            "BACKEND_JOB=$(kubectl create -f "
-            "deploy/k8s/jobs/backend-migration-job.yaml"
-        ),
-        'kubectl wait --for=condition=complete --timeout=15m "job/${BACKEND_JOB}"',
-        (
-            "WORKER_JOB=$(kubectl create -f "
-            "deploy/k8s/jobs/worker-migration-job.yaml"
-        ),
-        'kubectl wait --for=condition=complete --timeout=15m "job/${WORKER_JOB}"',
+        *(command for pair in gate_pairs for command in pair),
         "kubectl apply -k deploy/k8s/base",
         "kubectl rollout restart deployment/sre-agent-backend",
         "kubectl rollout restart deployment/sre-agent-frontend",
@@ -560,6 +573,14 @@ def test_release_runbook_fails_fast_and_orders_migrations_before_rollouts() -> N
         assert command in release_commands
     positions = [release_commands.index(command) for command in ordered_commands]
     assert positions == sorted(positions)
+
+    for forbidden in (
+        "backend-migration-job.yaml",
+        "worker-migration-job.yaml",
+        "upgrade head",
+        "alembic stamp",
+    ):
+        assert forbidden not in release_commands
 
     # 確認 outbox 相關命令不在 runbook 中
     assert "sre-agent-outbox" not in release_commands, (

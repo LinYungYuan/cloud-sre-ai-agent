@@ -44,16 +44,22 @@ KSA-to-GSA 綁定與 IAM role 由環境負責。請分離以下預期職責：
 ## 依序發布
 
 請從已產生的發布 bundle 根目錄執行以下命令。此順序具有約束力：任何命令失敗都必須
-立即停止。Backend migration 完成前不得建立 Worker migration；兩條 migration
-都完成前不得套用完整 base。
+立即停止。開始前停止 Backend、Worker 與所有 writes。每一個 Job 完成後，依
+[`docs/database/postgresql-schema.md`](../../docs/database/postgresql-schema.md) 的唯讀
+version-table query 確認兩條 stream，才可建立下一個 Job。第四個 Job 的 catalog
+postcondition 通過前，不得套用 base 或啟動任何 runtime。
 
 ```bash
 set -euo pipefail
 kubectl apply -f deploy/k8s/base/serviceaccounts.yaml
-BACKEND_JOB=$(kubectl create -f deploy/k8s/jobs/backend-migration-job.yaml -o jsonpath='{.metadata.name}')
-kubectl wait --for=condition=complete --timeout=15m "job/${BACKEND_JOB}"
-WORKER_JOB=$(kubectl create -f deploy/k8s/jobs/worker-migration-job.yaml -o jsonpath='{.metadata.name}')
-kubectl wait --for=condition=complete --timeout=15m "job/${WORKER_JOB}"
+BACKEND_0002_JOB=$(kubectl create -f deploy/k8s/jobs/backend-0002-migration-job.yaml -o jsonpath='{.metadata.name}')
+kubectl wait --for=condition=complete --timeout=15m "job/${BACKEND_0002_JOB}"
+WORKER_0002_JOB=$(kubectl create -f deploy/k8s/jobs/worker-0002-migration-job.yaml -o jsonpath='{.metadata.name}')
+kubectl wait --for=condition=complete --timeout=15m "job/${WORKER_0002_JOB}"
+BACKEND_0003_JOB=$(kubectl create -f deploy/k8s/jobs/backend-0003-migration-job.yaml -o jsonpath='{.metadata.name}')
+kubectl wait --for=condition=complete --timeout=15m "job/${BACKEND_0003_JOB}"
+WORKER_0003_JOB=$(kubectl create -f deploy/k8s/jobs/worker-0003-migration-job.yaml -o jsonpath='{.metadata.name}')
+kubectl wait --for=condition=complete --timeout=15m "job/${WORKER_0003_JOB}"
 kubectl apply -k deploy/k8s/base
 kubectl rollout restart deployment/sre-agent-backend
 kubectl rollout restart deployment/sre-agent-frontend
@@ -68,10 +74,10 @@ Job 紀錄。Kubernetes 會保留已完成的 Job 24 小時。若 Job 失敗，�
 新的 Job 重試：
 
 ```bash
-kubectl describe "job/${BACKEND_JOB}"
-kubectl logs "job/${BACKEND_JOB}"
-kubectl describe "job/${WORKER_JOB}"
-kubectl logs "job/${WORKER_JOB}"
+for job in "$BACKEND_0002_JOB" "$WORKER_0002_JOB" "$BACKEND_0003_JOB" "$WORKER_0003_JOB"; do
+  kubectl describe "job/${job}"
+  kubectl logs "job/${job}"
+done
 ```
 
 ## 路由與正式環境限制

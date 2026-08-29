@@ -119,46 +119,107 @@ DEPLOY_README = ROOT / "deploy" / "k8s" / "README.md"
 
 ALL_DOCS = (ROOT_README, BACKEND_README, WORKER_README, DEPLOY_README, SCHEMA_DOC)
 
+VERSION_QUERIES = (
+    "SELECT version_num FROM alembic_version_backend;",
+    "SELECT version_num FROM alembic_version_rca_worker;",
+)
 
-def test_all_four_migration_commands_appear_in_documentation() -> None:
-    """四個明確 revision 命令必須出現在至少一份文件中；不得以 head 取代任何一個。"""
-    combined = "\n".join(doc.read_text(encoding="utf-8") for doc in ALL_DOCS)
-    missing = [cmd for cmd in FOUR_MIGRATION_COMMANDS if cmd not in combined]
-    assert not missing, (
-        "以下 migration 命令未出現在任何文件中：\n" + "\n".join(missing)
+
+def _text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _block_after(text: str, heading: str) -> str:
+    assert heading in text, f"missing required documentation section: {heading}"
+    return text.split(heading, maxsplit=1)[1]
+
+
+def test_authoritative_migration_procedure_is_four_gated_and_safe() -> None:
+    """受控維護窗口必須將四個明確 gate 與每一步雙版本檢查綁在一起。"""
+    procedure = _block_after(_text(SCHEMA_DOC), "## 維護窗口與四個 migration gate")
+    positions = [procedure.index(command) for command in FOUR_MIGRATION_COMMANDS]
+    assert positions == sorted(positions)
+    assert procedure.count("SELECT version_num FROM alembic_version_backend;") >= 4
+    assert procedure.count("SELECT version_num FROM alembic_version_rca_worker;") >= 4
+    for required in (
+        "停止 Backend 與 RCA Worker 的所有 writes",
+        "Worker-0003 的 postcondition catalog checks",
+        "既有 Worker-0002 head",
+        "只執行 gate 3 與 gate 4",
+        "不得 stamp 或 replay",
+        "不得執行 Alembic downgrade",
+        "approved backup",
+    ):
+        assert required in procedure
+
+
+def test_operator_docs_never_offer_upgrade_head_or_stamp() -> None:
+    """任何 operator-visible 命令都不得跨越未驗證 migration gate。"""
+    violations = [
+        f"{doc.relative_to(ROOT)}"
+        for doc in ALL_DOCS
+        if "alembic upgrade head" in _text(doc) or "alembic stamp" in _text(doc)
+    ]
+    assert not violations, "operator docs contain unsafe migration commands: " + ", ".join(
+        violations
     )
 
 
-def test_operator_docs_do_not_use_upgrade_head_for_migration_sequence() -> None:
-    """migration 操作步驟不得含 'alembic upgrade head'；head 只允許在 docker run 示範行中出現。"""
-    violations: list[str] = []
-    for doc in ALL_DOCS:
-        text = doc.read_text(encoding="utf-8")
-        # 逐行掃描，排除 docker run 示範（僅允許 image 測試用途）
-        for lineno, line in enumerate(text.splitlines(), 1):
-            if "alembic upgrade head" in line and "docker run" not in line:
-                violations.append(f"{doc.name}:{lineno}: {line.strip()}")
-    assert not violations, (
-        "operator 文件不得以 'alembic upgrade head' 作為 migration 步驟：\n"
-        + "\n".join(violations)
-    )
+def test_root_operator_recovery_contract_names_all_protected_paths_and_policy() -> None:
+    """人工 recovery 必須可執行，且不可意外重播或接受 payload override。"""
+    text = _text(ROOT_README)
+    for required in (
+        "/api/v1/operations/outbox-events/{eventId}/retry",
+        "/api/v1/operations/outbox-events/retry-pending?limit=100",
+        "/api/v1/operations/outbox-events/retry-failed?limit=100",
+        "authentication and global authorization",
+        "no startup, periodic, or incidental backlog replay",
+        "does not accept payload, topic, project, subscription, or scope overrides",
+    ):
+        assert required in text
 
 
-def test_schema_doc_contains_required_evidence_fields() -> None:
-    """schema 文件必須記載精確的 evidence 欄位與 legacy partition 資料表。"""
-    text = SCHEMA_DOC.read_text(encoding="utf-8")
-    required_terms = (
+def test_schema_doc_describes_one_final_uuid_only_runtime_schema() -> None:
+    """canonical schema must be ordinary UUID-only tables; partitions are legacy only."""
+    text = _text(SCHEMA_DOC)
+    runtime_schema = _block_after(text, "## Final UUID-only runtime schema").split(
+        "## Retained legacy partition parents", maxsplit=1
+    )[0]
+    for table in (
+        "webhook_deliveries",
+        "alert_events",
+        "evidence_records",
+        "incident_messages",
+        "incident_timeline_events",
+        "audit_events",
+    ):
+        assert f"CREATE TABLE {table}" in runtime_schema
+    for required in (
+        "id UUID PRIMARY KEY",
         "raw_result BYTEA",
         "metadata JSONB",
         "content_hash",
         "result_status",
-        "__partitioned_legacy_0003",
+        "relkind = 'r'",
+        "historical rows are copied and validated before cutover",
+    ):
+        assert required in runtime_schema
+    assert "PARTITION BY" not in runtime_schema
+    assert "partition_timestamp" not in runtime_schema
+    assert "raw_result_reference" not in runtime_schema
+
+    legacy = _block_after(text, "## Retained legacy partition parents")
+    expected_legacy = (
+        "webhook_deliveries__partitioned_legacy_0003",
+        "alert_events__partitioned_legacy_0003",
+        "evidence_records__partitioned_legacy_0003",
+        "incident_messages__partitioned_legacy_0003",
+        "incident_timeline_events__partitioned_legacy_0003",
+        "audit_events__partitioned_legacy_0003",
     )
-    missing = [term for term in required_terms if term not in text]
-    assert not missing, (
-        "docs/database/postgresql-schema.md 缺少以下必要欄位說明：\n"
-        + "\n".join(missing)
-    )
+    for table in expected_legacy:
+        assert table in legacy
+    assert "autevents__partitioned_legacy_0003" not in text
 
 
 def test_docs_do_not_reference_removed_runtime_commands() -> None:

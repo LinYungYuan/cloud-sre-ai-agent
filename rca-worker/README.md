@@ -98,9 +98,11 @@ docker compose --env-file .env.compose.example up -d postgres pubsub-emulator
 export PUBSUB_EMULATOR_HOST=127.0.0.1:58085
 export PUBSUB_PROJECT_ID=sre-agent-local
 export PUBSUB_AUTO_CREATE=true
-export MIGRATION_TEST_DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent'
+export MIGRATION_TEST_DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent'
 
-# 依序執行四個明確 revision 命令，不得跨越未驗證 gate
+# 依序執行四個明確 revision 命令，不得跨越未驗證 gate。
+# 先停止所有 writes，且每一 gate 後查詢兩個 version table；完整受控維護
+# 窗口、既有 Worker-0002 head 與 rollback 規則見 docs/database/postgresql-schema.md。
 (cd backend && BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0002_grafana_normalization_v2)
 (cd rca-worker && RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0002_adk_specialist_analysis)
 (cd backend && BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0003_non_partition_runtime_tables)
@@ -163,7 +165,7 @@ UV_CACHE_DIR="$PWD/.uv-cache" uv run pyright
 
 ```bash
 docker build -t sre-agent-rca-worker:gke-plan rca-worker
-docker run --rm --entrypoint alembic sre-agent-rca-worker:gke-plan upgrade head
+docker run --rm --entrypoint alembic sre-agent-rca-worker:gke-plan current
 ```
 
 runtime 只包含 Worker virtual environment、套件原始碼、Alembic 設定與 Worker

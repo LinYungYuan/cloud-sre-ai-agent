@@ -29,6 +29,22 @@ Bearer credential。Token ID 必須由 1–128 個 ASCII 字母、數字、`.`�
 token ID。系統只保存符合的 token ID；token value 使用 `SecretStr`，絕對不可寫入
 log。這些是不透明 Bearer Token，不是 JWT。
 
+## Migration and recovery operations
+
+Backend migration is only gate 1 or gate 3 of the authoritative four-gate
+maintenance-window procedure in
+[`../docs/database/postgresql-schema.md`](../docs/database/postgresql-schema.md).
+Stop writers before the first gate, verify both Alembic version tables after
+every gate, and do not restart either runtime until Worker gate 4 and its
+catalog checks pass. The operation is forward-only: retained legacy parents
+remain, and post-write recovery uses an approved backup/delta plan rather than
+a destructive schema rollback.
+
+The API never automatically replays historical outbox backlog. A globally
+authorized operator uses the protected single-event or bounded batch recovery
+paths documented in the repository [README](../README.md#protected-outbox-recovery);
+the API accepts no payload or routing override from that request.
+
 使用已安裝的 ASGI server 啟動應用程式，例如：
 
 ```sh
