@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import signal
 from collections.abc import Awaitable, Callable
+from typing import NoReturn
 
 import grpc
 from google.auth.credentials import AnonymousCredentials
@@ -61,33 +62,55 @@ def _create_pubsub_clients(
                 channel=publisher_channel,
                 credentials=AnonymousCredentials(),
             )
-        except BaseException:
-            publisher_channel.close()
-            raise
+        except BaseException as error:  # noqa: BLE001 - preserve cancellation errors
+            _reraise_after_closing(error, publisher_channel.close)
         try:
             publisher = pubsub_v1.PublisherClient(transport=publisher_transport)
-        except BaseException:
-            publisher_transport.close()
-            raise
+        except BaseException as error:  # noqa: BLE001 - preserve construction error
+            _reraise_after_closing(error, publisher_transport.close)
 
-        subscriber_channel = grpc.insecure_channel(settings.pubsub_emulator_host)
+        try:
+            subscriber_channel = grpc.insecure_channel(settings.pubsub_emulator_host)
+        except BaseException as error:  # noqa: BLE001 - preserve construction error
+            _reraise_after_closing(error, publisher_transport.close)
         try:
             subscriber_transport = SubscriberGrpcTransport(
                 channel=subscriber_channel,
                 credentials=AnonymousCredentials(),
             )
-        except BaseException:
-            subscriber_channel.close()
-            publisher_transport.close()
-            raise
+        except BaseException as error:  # noqa: BLE001 - preserve construction error
+            _reraise_after_closing(
+                error,
+                subscriber_channel.close,
+                publisher_transport.close,
+            )
         try:
             subscriber = pubsub_v1.SubscriberClient(transport=subscriber_transport)
-        except BaseException:
-            subscriber_transport.close()
-            publisher_transport.close()
-            raise
+        except BaseException as error:  # noqa: BLE001 - preserve construction error
+            _reraise_after_closing(
+                error,
+                subscriber_transport.close,
+                publisher_transport.close,
+            )
         return publisher, subscriber
-    return pubsub_v1.PublisherClient(), pubsub_v1.SubscriberClient()
+    publisher = pubsub_v1.PublisherClient()
+    try:
+        subscriber = pubsub_v1.SubscriberClient()
+    except BaseException as error:  # noqa: BLE001 - preserve construction error
+        _reraise_after_closing(error, publisher.transport.close)
+    return publisher, subscriber
+
+
+def _reraise_after_closing(
+    error: BaseException,
+    *closers: Callable[[], None],
+) -> NoReturn:
+    for close in closers:
+        try:
+            close()
+        except BaseException:  # noqa: BLE001, S110 - preserve primary failure
+            pass
+    raise error
 
 
 def main(
@@ -136,6 +159,7 @@ async def run_production(stop_event: asyncio.Event | None = None) -> None:
         deadline_seconds=settings.rca_deadline_seconds,
     )
     publisher, subscriber = _create_pubsub_clients(settings)
+    primary_error: BaseException | None = None
     try:
         _, subscription = await asyncio.to_thread(
             prepare_topic_and_subscription,
@@ -190,14 +214,22 @@ async def run_production(stop_event: asyncio.Event | None = None) -> None:
                         "ack_deadline_seconds": 0,
                     },
                 )
-    finally:
+    except BaseException as error:  # noqa: BLE001 - preserve runtime cancellation
+        primary_error = error
+
+    cleanup_error: BaseException | None = None
+    for close in (publisher.stop, publisher.transport.close, subscriber.close):
         try:
-            publisher.stop()
-        finally:
-            try:
-                publisher.transport.close()
-            finally:
-                try:
-                    subscriber.close()
-                finally:
-                    await engine.dispose()
+            close()
+        except BaseException as error:  # noqa: BLE001 - preserve primary failure
+            if cleanup_error is None:
+                cleanup_error = error
+    try:
+        await engine.dispose()
+    except BaseException as error:  # noqa: BLE001 - preserve primary failure
+        if cleanup_error is None:
+            cleanup_error = error
+    if primary_error is not None:
+        raise primary_error
+    if cleanup_error is not None:
+        raise cleanup_error

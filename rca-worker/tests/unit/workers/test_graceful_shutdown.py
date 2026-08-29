@@ -116,8 +116,13 @@ def test_pubsub_clients_use_adc_defaults_in_production(
     constructor_arguments: list[dict[str, object]] = []
 
     class FakePublisher:
+        class Transport:
+            def close(self) -> None:
+                return None
+
         def __init__(self, **kwargs: object) -> None:
             constructor_arguments.append(kwargs)
+            self.transport = self.Transport()
 
     class FakeSubscriber(FakePublisher):
         pass
@@ -130,6 +135,81 @@ def test_pubsub_clients_use_adc_defaults_in_production(
     assert isinstance(publisher, FakePublisher)
     assert isinstance(subscriber, FakeSubscriber)
     assert constructor_arguments == [{}, {}]
+
+
+def test_pubsub_clients_close_publisher_transport_when_adc_subscriber_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _worker_settings(
+        app_environment="production",
+        pubsub_emulator_host=None,
+    )
+    events: list[str] = []
+
+    class FakePublisher:
+        class Transport:
+            def close(self) -> None:
+                events.append("publisher transport.close")
+
+        def __init__(self) -> None:
+            self.transport = self.Transport()
+
+    class FailingSubscriber:
+        def __init__(self) -> None:
+            raise RuntimeError("adc subscriber construction failed")
+
+    monkeypatch.setattr(rca_worker.pubsub_v1, "PublisherClient", FakePublisher)
+    monkeypatch.setattr(
+        rca_worker.pubsub_v1,
+        "SubscriberClient",
+        FailingSubscriber,
+    )
+
+    with pytest.raises(RuntimeError, match="adc subscriber construction failed"):
+        rca_worker._create_pubsub_clients(settings)
+
+    assert events == ["publisher transport.close"]
+
+
+def test_pubsub_clients_close_publisher_transport_when_second_channel_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _worker_settings(
+        app_environment="local",
+        pubsub_emulator_host="127.0.0.1:58085",
+    )
+    events: list[str] = []
+    channels = [object()]
+
+    class FakePublisherTransport:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def close(self) -> None:
+            events.append("publisher transport.close")
+            raise RuntimeError("publisher cleanup failed")
+
+    class FakePublisher:
+        def __init__(self, **_: object) -> None:
+            pass
+
+    def create_channel(_: str) -> object:
+        if channels:
+            return channels.pop()
+        raise RuntimeError("subscriber channel failed")
+
+    monkeypatch.setattr(rca_worker.grpc, "insecure_channel", create_channel)
+    monkeypatch.setattr(
+        rca_worker,
+        "PublisherGrpcTransport",
+        FakePublisherTransport,
+    )
+    monkeypatch.setattr(rca_worker.pubsub_v1, "PublisherClient", FakePublisher)
+
+    with pytest.raises(RuntimeError, match="subscriber channel failed"):
+        rca_worker._create_pubsub_clients(settings)
+
+    assert events == ["publisher transport.close"]
 
 
 def test_pubsub_clients_close_created_transports_when_subscriber_construction_fails(
@@ -147,6 +227,7 @@ def test_pubsub_clients_close_created_transports_when_subscriber_construction_fa
 
         def close(self) -> None:
             events.append("publisher transport.close")
+            raise RuntimeError("publisher transport cleanup failed")
 
     class FakeSubscriberTransport:
         def __init__(self, **_: object) -> None:
@@ -154,6 +235,7 @@ def test_pubsub_clients_close_created_transports_when_subscriber_construction_fa
 
         def close(self) -> None:
             events.append("subscriber transport.close")
+            raise RuntimeError("subscriber transport cleanup failed")
 
     class FakePublisher:
         def __init__(self, **_: object) -> None:
@@ -252,11 +334,13 @@ async def test_stop_failure_still_closes_worker_pubsub_transports_and_engine(
     class FakeEngine:
         async def dispose(self) -> None:
             events.append("engine.dispose")
+            raise RuntimeError("engine cleanup failed")
 
     class FakePublisher:
         class Transport:
             def close(self) -> None:
                 events.append("publisher transport.close")
+                raise RuntimeError("publisher transport cleanup failed")
 
         def __init__(self) -> None:
             self.transport = self.Transport()
@@ -268,6 +352,7 @@ async def test_stop_failure_still_closes_worker_pubsub_transports_and_engine(
     class FakeSubscriber:
         def close(self) -> None:
             events.append("subscriber.close")
+            raise RuntimeError("subscriber cleanup failed")
 
     monkeypatch.setattr(rca_worker, "WorkerSettings", lambda: settings)
     monkeypatch.setattr(rca_worker, "create_async_engine", lambda _: FakeEngine())

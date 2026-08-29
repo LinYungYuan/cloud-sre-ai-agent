@@ -37,9 +37,14 @@ class _PublishFuture:
 
 
 class RecordingPublisherClient:
+    class Transport:
+        def close(self) -> None:
+            return None
+
     def __init__(self) -> None:
         self.messages: list[tuple[str, bytes, dict[str, str]]] = []
         self.stopped = False
+        self.transport = self.Transport()
 
     def topic_path(self, project_id: str, topic_id: str) -> str:
         return f"projects/{project_id}/topics/{topic_id}"
@@ -318,6 +323,40 @@ def test_local_emulator_client_closes_transport_when_client_construction_fails(
         pubsub_publisher.create_publisher_client("127.0.0.1:58085")
 
     assert events == ["transport.close"]
+
+
+def test_local_emulator_client_preserves_construction_error_when_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakePublisherTransport:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def close(self) -> None:
+            raise RuntimeError("transport cleanup failed")
+
+    class FailingPublisherClient:
+        def __init__(self, **_: object) -> None:
+            raise RuntimeError("client construction failed")
+
+    monkeypatch.setattr(
+        pubsub_publisher.grpc,
+        "insecure_channel",
+        lambda _: object(),
+    )
+    monkeypatch.setattr(
+        pubsub_publisher,
+        "PublisherGrpcTransport",
+        FakePublisherTransport,
+    )
+    monkeypatch.setattr(
+        pubsub_publisher.pubsub_v1,
+        "PublisherClient",
+        FailingPublisherClient,
+    )
+
+    with pytest.raises(RuntimeError, match="client construction failed"):
+        pubsub_publisher.create_publisher_client("127.0.0.1:58085")
 
 
 def test_publisher_client_uses_adc_defaults_without_an_emulator(

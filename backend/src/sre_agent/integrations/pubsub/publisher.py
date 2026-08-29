@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Mapping
-from typing import Protocol
+from collections.abc import Callable, Mapping
+from typing import NoReturn, Protocol
 
 import grpc
 from google.auth.credentials import AnonymousCredentials
@@ -40,14 +40,24 @@ def create_publisher_client(
             channel=channel,
             credentials=AnonymousCredentials(),
         )
-    except BaseException:
-        channel.close()
-        raise
+    except BaseException as error:  # noqa: BLE001 - preserve construction error
+        _reraise_after_closing(error, channel.close)
     try:
         return pubsub_v1.PublisherClient(transport=transport)
-    except BaseException:
-        transport.close()
-        raise
+    except BaseException as error:  # noqa: BLE001 - preserve construction error
+        _reraise_after_closing(error, transport.close)
+
+
+def _reraise_after_closing(
+    error: BaseException,
+    *closers: Callable[[], None],
+) -> NoReturn:
+    for close in closers:
+        try:
+            close()
+        except BaseException:  # noqa: BLE001, S110 - preserve primary failure
+            pass
+    raise error
 
 
 def close_publisher_transport(client: pubsub_v1.PublisherClient) -> None:
