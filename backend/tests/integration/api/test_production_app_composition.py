@@ -1,3 +1,4 @@
+import asyncio
 import os
 from pathlib import Path
 from time import perf_counter
@@ -69,23 +70,42 @@ class _LifecycleConnection:
 
 
 class _LifecycleEngine:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        dispose_error: BaseException | None = None,
+        events: list[str] | None = None,
+    ) -> None:
         self.dispose_calls = 0
+        self.dispose_error = dispose_error
+        self.events = events
 
     def connect(self) -> _LifecycleConnection:
         return _LifecycleConnection()
 
     async def dispose(self) -> None:
         self.dispose_calls += 1
+        if self.events is not None:
+            self.events.append("engine.dispose")
+        if self.dispose_error is not None:
+            raise self.dispose_error
 
 
 class _LifecyclePublisherTransport:
-    def __init__(self, *, close_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        close_error: BaseException | None = None,
+        events: list[str] | None = None,
+    ) -> None:
         self.close_error = close_error
         self.close_calls = 0
+        self.events = events
 
     def close(self) -> None:
         self.close_calls += 1
+        if self.events is not None:
+            self.events.append("publisher.transport.close")
         if self.close_error is not None:
             raise self.close_error
 
@@ -94,16 +114,19 @@ class _LifecyclePublisherClient:
     def __init__(
         self,
         *,
-        topic_error: Exception | None = None,
-        stop_error: Exception | None = None,
-        transport_close_error: Exception | None = None,
+        topic_error: BaseException | None = None,
+        stop_error: BaseException | None = None,
+        transport_close_error: BaseException | None = None,
+        events: list[str] | None = None,
     ) -> None:
         self.topic_error = topic_error
         self.stop_error = stop_error
         self.stop_calls = 0
         self.transport = _LifecyclePublisherTransport(
-            close_error=transport_close_error
+            close_error=transport_close_error,
+            events=events,
         )
+        self.events = events
 
     def topic_path(self, project_id: str, topic_id: str) -> str:
         del project_id, topic_id
@@ -113,6 +136,8 @@ class _LifecyclePublisherClient:
 
     def stop(self) -> None:
         self.stop_calls += 1
+        if self.events is not None:
+            self.events.append("publisher.stop")
         if self.stop_error is not None:
             raise self.stop_error
 
@@ -233,6 +258,99 @@ async def test_production_resources_disposes_engine_when_publisher_transport_clo
         async with composition.production_resources(_resource_settings()):
             pass
 
+    assert client.stop_calls == 1
+    assert client.transport.close_calls == 1
+    assert engine.dispose_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_production_resources_preserves_body_error_after_all_cleanup_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    engine = _LifecycleEngine(
+        dispose_error=RuntimeError("engine dispose failed"),
+        events=events,
+    )
+    client = _LifecyclePublisherClient(
+        stop_error=RuntimeError("stop failed"),
+        transport_close_error=RuntimeError("transport close failed"),
+        events=events,
+    )
+    _stub_resource_dependencies(monkeypatch, engine)
+    monkeypatch.setattr(composition, "create_publisher_client", lambda _: client)
+
+    with pytest.raises(RuntimeError, match="body failed"):
+        async with composition.production_resources(_resource_settings()):
+            raise RuntimeError("body failed")
+
+    assert events == [
+        "publisher.stop",
+        "publisher.transport.close",
+        "engine.dispose",
+    ]
+    assert client.stop_calls == 1
+    assert client.transport.close_calls == 1
+    assert engine.dispose_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_production_resources_raises_first_cleanup_error_after_attempting_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    engine = _LifecycleEngine(
+        dispose_error=RuntimeError("engine dispose failed"),
+        events=events,
+    )
+    client = _LifecyclePublisherClient(
+        stop_error=RuntimeError("stop failed"),
+        transport_close_error=RuntimeError("transport close failed"),
+        events=events,
+    )
+    _stub_resource_dependencies(monkeypatch, engine)
+    monkeypatch.setattr(composition, "create_publisher_client", lambda _: client)
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        async with composition.production_resources(_resource_settings()):
+            pass
+
+    assert events == [
+        "publisher.stop",
+        "publisher.transport.close",
+        "engine.dispose",
+    ]
+    assert client.stop_calls == 1
+    assert client.transport.close_calls == 1
+    assert engine.dispose_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_production_resources_preserves_cancellation_after_cleanup_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    engine = _LifecycleEngine(
+        dispose_error=RuntimeError("engine dispose failed"),
+        events=events,
+    )
+    client = _LifecyclePublisherClient(
+        stop_error=RuntimeError("stop failed"),
+        transport_close_error=RuntimeError("transport close failed"),
+        events=events,
+    )
+    _stub_resource_dependencies(monkeypatch, engine)
+    monkeypatch.setattr(composition, "create_publisher_client", lambda _: client)
+
+    with pytest.raises(asyncio.CancelledError):
+        async with composition.production_resources(_resource_settings()):
+            raise asyncio.CancelledError()
+
+    assert events == [
+        "publisher.stop",
+        "publisher.transport.close",
+        "engine.dispose",
+    ]
     assert client.stop_calls == 1
     assert client.transport.close_calls == 1
     assert engine.dispose_calls == 1

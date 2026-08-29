@@ -77,46 +77,64 @@ class ResourceFactory(Protocol):
 @asynccontextmanager
 async def production_resources(settings: Settings) -> AsyncIterator[RuntimeResources]:
     engine = create_async_engine(settings.database_url.get_secret_value())
+    publisher_client = None
+    primary_error: BaseException | None = None
     try:
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         publisher_client = create_publisher_client(settings.pubsub_emulator_host)
-        try:
-            topic = publisher_client.topic_path(
-                settings.pubsub_project_id, settings.rca_topic_id
-            )
 
-            async def readiness_check() -> None:
-                async with engine.connect() as connection:
-                    await connection.execute(text("SELECT 1"))
+        topic = publisher_client.topic_path(
+            settings.pubsub_project_id, settings.rca_topic_id
+        )
 
+        async def readiness_check() -> None:
             async with engine.connect() as connection:
-                rules = await load_normalization_rule_provider(connection)
-                folders = await load_folder_scope_provider(connection)
-            _validate_configured_sources(settings, rules)
-            outbox_publish_service = OutboxPublishService(
-                session_factory,
-                GooglePubSubPublisher(publisher_client),
-                topic,
+                await connection.execute(text("SELECT 1"))
+
+        async with engine.connect() as connection:
+            rules = await load_normalization_rule_provider(connection)
+            folders = await load_folder_scope_provider(connection)
+        _validate_configured_sources(settings, rules)
+        outbox_publish_service = OutboxPublishService(
+            session_factory,
+            GooglePubSubPublisher(publisher_client),
+            topic,
+        )
+        yield RuntimeResources(
+            uow_factory=lambda: SqlAlchemyUnitOfWork(session_factory),
+            normalization_rule_provider=rules,
+            folder_scope_provider=folders,
+            readiness_check=readiness_check,
+            operator_reads=SqlAlchemyOperatorReadRepository(session_factory),
+            outbox_publish_service=outbox_publish_service,
+            outbox_recovery_service=OutboxRecoveryService(
+                outbox_publish_service,
+                SqlAlchemyOutboxRecoveryAuditRepository(session_factory),
             )
-            yield RuntimeResources(
-                uow_factory=lambda: SqlAlchemyUnitOfWork(session_factory),
-                normalization_rule_provider=rules,
-                folder_scope_provider=folders,
-                readiness_check=readiness_check,
-                operator_reads=SqlAlchemyOperatorReadRepository(session_factory),
-                outbox_publish_service=outbox_publish_service,
-                outbox_recovery_service=OutboxRecoveryService(
-                    outbox_publish_service,
-                    SqlAlchemyOutboxRecoveryAuditRepository(session_factory),
-                ),
-            )
-        finally:
-            try:
-                publisher_client.stop()
-            finally:
-                close_publisher_transport(publisher_client)
-    finally:
+        )
+    except BaseException as error:  # noqa: BLE001 - preserve runtime cancellation
+        primary_error = error
+
+    cleanup_error: BaseException | None = None
+    if publisher_client is not None:
+        try:
+            publisher_client.stop()
+        except BaseException as error:  # noqa: BLE001 - preserve primary failure
+            cleanup_error = error
+        try:
+            close_publisher_transport(publisher_client)
+        except BaseException as error:  # noqa: BLE001 - preserve primary failure
+            if cleanup_error is None:
+                cleanup_error = error
+    try:
         await engine.dispose()
+    except BaseException as error:  # noqa: BLE001 - preserve primary failure
+        if cleanup_error is None:
+            cleanup_error = error
+    if primary_error is not None:
+        raise primary_error
+    if cleanup_error is not None:
+        raise cleanup_error
 
 
 def compose_services(
