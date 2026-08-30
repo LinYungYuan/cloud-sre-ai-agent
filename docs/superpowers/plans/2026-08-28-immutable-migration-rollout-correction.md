@@ -557,6 +557,22 @@
 
 - [ ] **Step 4: Run request/recovery and evidence end-to-end smoke (2–5 minutes per phase)**
 
+  Before starting either runtime, seed the exact source configured by `.env.backend-api.example` into the disposable acceptance database. The explicit database argument and first fail-closed assertion are both required; abort if `current_database()` is not exactly `sre_agent_release_acceptance`. Never adapt this command to, or run it against, the shared `sre_agent` database.
+
+  ```bash
+  docker compose --env-file .env.compose.example exec -T postgres psql -U postgres --dbname=sre_agent_release_acceptance \
+    -v ON_ERROR_STOP=1 \
+    -c "DO \$\$ BEGIN IF current_database() <> 'sre_agent_release_acceptance' THEN RAISE EXCEPTION 'refusing catalog seed in database %', current_database(); END IF; END \$\$;" \
+    -c "INSERT INTO teams (id, name) VALUES ('10000000-0000-0000-0000-000000000001', 'Local Team') ON CONFLICT DO NOTHING" \
+    -c "INSERT INTO projects (id, team_id, name) VALUES ('20000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000001', 'local-project') ON CONFLICT DO NOTHING" \
+    -c "INSERT INTO environments (id, project_id, name) VALUES ('30000000-0000-0000-0000-000000000001', '20000000-0000-0000-0000-000000000001', 'local') ON CONFLICT DO NOTHING" \
+    -c "INSERT INTO grafana_sources (id, project_id, environment_id, name) VALUES ('50000000-0000-0000-0000-000000000001', '20000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000001', 'local-grafana') ON CONFLICT DO NOTHING" \
+    -c "DO \$\$ BEGIN IF (SELECT count(*) FROM grafana_sources AS source JOIN projects AS project ON project.id = source.project_id JOIN teams AS team ON team.id = project.team_id JOIN environments AS environment ON environment.id = source.environment_id AND environment.project_id = source.project_id WHERE source.id = '50000000-0000-0000-0000-000000000001' AND source.name = 'local-grafana' AND source.enabled IS TRUE AND source.project_id = '20000000-0000-0000-0000-000000000001' AND source.environment_id = '30000000-0000-0000-0000-000000000001' AND project.id = '20000000-0000-0000-0000-000000000001' AND project.name = 'local-project' AND project.team_id = '10000000-0000-0000-0000-000000000001' AND team.id = '10000000-0000-0000-0000-000000000001' AND team.name = 'Local Team' AND environment.id = '30000000-0000-0000-0000-000000000001' AND environment.name = 'local' AND environment.project_id = '20000000-0000-0000-0000-000000000001') <> 1 THEN RAISE EXCEPTION 'acceptance Grafana catalog does not exactly match the required enabled source and relationships'; END IF; END \$\$;" \
+    -c "SELECT source.id AS source_id, source.name AS source_name, source.enabled, source.project_id, project.name AS project_name, project.team_id, team.name AS team_name, source.environment_id, environment.name AS environment_name, environment.project_id AS environment_project_id FROM grafana_sources AS source JOIN projects AS project ON project.id = source.project_id JOIN teams AS team ON team.id = project.team_id JOIN environments AS environment ON environment.id = source.environment_id AND environment.project_id = source.project_id WHERE source.id = '50000000-0000-0000-0000-000000000001'"
+  ```
+
+  Expected: the assertion succeeds only when exactly one row has all four exact names and UUIDs, `enabled=true`, and the exact team/project/environment relationships shown above; otherwise `ON_ERROR_STOP` aborts before Backend startup. The final query records the asserted row as readable evidence.
+
   Start the processes in separate terminals with OS `DATABASE_URL` overriding only their own example file:
 
   ```bash

@@ -22,8 +22,9 @@
 整體實作已進入最後 release gate 階段：
 
 - Tasks 1–6 全部完成；Task 6 round 4 文件修正與 Task 4 Pub/Sub emulator transport follow-up 均已通過 independent review。
-- Task 7 attempt 4 fresh 通過 migrations、完整 tests/static、renders 與 canonical evidence smoke，但 live Worker 揭露 emulator client 錯用 TLS；該 defect 已由 `a37c1d4`、`e5b9c8e`、`077ed0b`、`07b22be` 修正並 review clean。
-- Attempt 4 的兩個 disposable DBs 已清理；Task 7 必須再次從 Safety Preflight／Step 1 全新重跑，不可沿用任何部分結果。
+- Task 7 attempt 6 fresh 通過八個 explicit migration gates、完整 tests/static、renders 與 canonical evidence smoke，但 live Backend 因 fresh acceptance DB 缺少 example config 指定的 enabled Grafana source 而正確 fail closed。
+- 根目錄 README 已要求 runtime 啟動前建立最小 local Grafana catalog，原 Task 7 Step 4 卻漏掉 seed；這個既有 plan 矛盾已修正並通過兩輪 independent review（final APPROVED）。
+- Attempt 6 的兩個 disposable DBs 已清理；Task 7 attempt 7 必須再次從 Safety Preflight／Step 1 全新重跑，不可沿用任何部分結果。
 
 ## Superpowers Plan
 
@@ -38,7 +39,7 @@
 
 `docs/superpowers/plans/2026-08-26-backend-runtime-simplification-implementation.md` 是較早的 implementation plan；目前 correction plan 已接管，不要回到舊計畫。
 
-目前執行位置：**Task 7 post-fix rerun，所有 disposable DBs 已清理，必須從 Step 1 全新重跑。**
+目前執行位置：**Task 7 attempt 7，catalog-seed procedure correction 已核准；所有 disposable DBs 已清理，必須從 Safety Preflight 全新重跑。**
 
 ## Completed
 
@@ -62,28 +63,28 @@
 
 ## In Progress
 
-### Task 7 — post-fix full release gate（attempt 4 被 live transport failure 停止）
+### Task 7 — post-fix full release gate（attempt 6 被缺漏的 catalog seed 停止）
 
-**attempt 4 fresh evidence（已清理，不可作為完成憑證）：**
+**attempt 6 fresh evidence（已清理，不可作為完成憑證）：**
 
 - Safety preflight ✅
 - Step 1：兩個 disposable DB 四 gate migration ✅（已清理）
-- Step 2 Backend 345 passed ✅
-- Step 2 Worker 430 passed、1 skipped ✅；contracts 56 passed ✅。
+- Step 2 Backend 352 passed ✅
+- Step 2 Worker 434 passed、1 skipped ✅；contracts 56 passed ✅。
 - Static、Compose/Kustomize/four Jobs、canonical evidence smoke ✅。
-- Live Worker ❌：TLS `WRONG_VERSION_NUMBER`；已路由 Task 4 follow-up 並由 `a37c1d4..07b22be` 修正、review clean。
+- Live Backend ❌：fresh DB 無 enabled source `50000000-0000-0000-0000-000000000001`；Task 7 Step 4 已補上限定 acceptance DB 的 idempotent seed 與 fail-closed exact catalog assertion，round-2 review APPROVED。
 
-**尚未執行（因 live Worker gate red 而正確停止）：**
+**尚未執行（因 live Backend startup gate red 而正確停止）：**
 
 - Step 6：Live request/recovery smoke
 - Step 7：Catalog 驗證（六 `r` + 六 `p`）
 - Step 8：Cleanup（此次已清理，下次亦需清理）
 
-**report 檔案目前狀態：** `.superpowers/sdd/2026-08-28-immutable-migration-rollout-correction/task-7-report.md` 已追加 attempt 2 的 NOT READY 與 cleanup 證據；下一次仍需以新的 fresh section 記錄完整 rerun。
+**report 檔案目前狀態：** `.superpowers/sdd/2026-08-28-immutable-migration-rollout-correction/task-7-report.md` 已追加 attempt 6 的 NOT READY、blocker 與 cleanup 證據；下一次仍需以新的 fresh section 記錄完整 rerun。
 
 ## Next Action
 
-下一個 AI 的第一件事是**從頭重跑 Task 7**，嚴格依 `task-7-rerun-brief.md`：
+下一個動作是**從頭重跑 Task 7 attempt 7**，嚴格依已修正的 `task-7-rerun-brief.md`；live runtime 前必須先執行其中限定 `sre_agent_release_acceptance` 的 catalog seed 與 assertion：
 
 ### Step 0：Safety Preflight
 
@@ -234,7 +235,7 @@ Verification 結果（本 handoff session fresh 執行）：
 ## Known Issues
 
 - Task 7 post-fix full release gate 尚未完成（不能宣稱 release ready）。
-- Task 7 必須在確認 release DBs 不存在後從 Step 1 全新重跑；attempt 2–4 的部分結果僅為歷史參考。
+- Task 7 必須在確認 release DBs 不存在後從 Safety Preflight 全新重跑；attempt 2–6 的部分結果僅為歷史參考。
 - Full Backend 有 40 個 Alembic `path_separator` deprecation warnings；是技術債，不是 failure。
 - 四 gate fixture 的獨立 report 缺失（minor process debt）。
 - `.superpowers/.../progress.md` 的 Task 7 段落有歷史「complete」記錄，但已被 reopening 條目明確推翻；以最新 reopening 與本 handoff 為準。
