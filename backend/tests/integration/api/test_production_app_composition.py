@@ -7,6 +7,7 @@ from uuid import UUID
 
 import httpx
 import pytest
+from google.api_core.retry import Retry
 from google.auth.credentials import AnonymousCredentials
 from pydantic import SecretStr
 from sqlalchemy import event, text
@@ -33,7 +34,8 @@ EXAMPLE = (
 
 
 class _PublishFuture:
-    def result(self) -> str:
+    def result(self, timeout: float | None = None) -> str:
+        assert timeout is not None and timeout > 0
         return "published-message"
 
 
@@ -50,7 +52,17 @@ class RecordingPublisherClient:
     def topic_path(self, project_id: str, topic_id: str) -> str:
         return f"projects/{project_id}/topics/{topic_id}"
 
-    def publish(self, topic: str, data: bytes, **attributes: str) -> _PublishFuture:
+    def publish(
+        self,
+        topic: str,
+        data: bytes,
+        *,
+        retry: Retry,
+        timeout: float,
+        **attributes: str,
+    ) -> _PublishFuture:
+        assert retry.timeout is not None and retry.timeout > 0
+        assert timeout > 0
         self.messages.append((topic, data, attributes))
         return _PublishFuture()
 

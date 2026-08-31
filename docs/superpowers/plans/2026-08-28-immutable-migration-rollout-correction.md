@@ -887,7 +887,7 @@
   task7_run_phase 'Step 4 start runtimes' task7_start_runtimes || true
   ```
 
-  In the retained verification terminal, prove Worker bootstrap and Backend readiness, capture pre-first counts, submit the canonical fixture with body plus status, parse the returned `deliveryId`, and follow that exact delivery through the actual schema joins. Do not establish the second-request baseline until the delivery-linked event is `PUBLISHED`, its job is `SUCCEEDED`, exactly one report exists, and that report has non-null `result_status`:
+  In the retained verification terminal, prove Worker bootstrap and Backend readiness, capture pre-first counts, submit the canonical fixture with body plus status, parse the returned `deliveryId`, and follow that exact delivery through the actual schema joins. Every mutating HTTP request has a two-second connection timeout and a 30-second overall timeout; this outer guard exceeds the Backend publisher's bounded 10-second retry/RPC and 15-second result wait while preventing the release terminal from hanging indefinitely. Do not establish the second-request baseline until the delivery-linked event is `PUBLISHED`, its job is `SUCCEEDED`, exactly one report exists, and that report has non-null `result_status`:
 
   ```bash
   task7_step4_first_request() {
@@ -918,6 +918,7 @@
     || { task7_fail 'unable to capture pre-first counts'; return 1; }
   IFS='|' read -r task7_deliveries_pre_first task7_outbox_pre_first task7_runs_pre_first task7_jobs_pre_first task7_reports_pre_first <<<"$task7_pre_first"
   task7_first_response=$(curl --fail-with-body --show-error --silent \
+    --connect-timeout 2 --max-time 30 \
     --write-out '\nHTTP_STATUS=%{http_code}\n' -X POST \
     'http://127.0.0.1:8000/webhooks/v1/grafana/50000000-0000-0000-0000-000000000001' \
     -H 'Authorization: Bearer replace-me' -H 'Content-Type: application/json' \
@@ -1018,6 +1019,7 @@
         | .message |= gsub("High CPU usage"; "High CPU usage recovery smoke")
       ' contracts/examples/grafana-firing-aws.json \
         | curl --fail-with-body --show-error --silent \
+            --connect-timeout 2 --max-time 30 \
             --write-out '\nHTTP_STATUS=%{http_code}\n' \
             -X POST 'http://127.0.0.1:8000/webhooks/v1/grafana/50000000-0000-0000-0000-000000000001' \
             -H 'Authorization: Bearer replace-me' \
@@ -1160,6 +1162,7 @@
     || { echo 'startup replayed the event or created duplicate work' >&2; task7_gate_failed='true'; return 1; }
 
   if ! task7_recovery_response=$(curl --fail-with-body --show-error --silent \
+    --connect-timeout 2 --max-time 30 \
     -X POST 'http://127.0.0.1:8000/api/v1/operations/outbox-events/retry-failed?limit=100' \
     -H 'Authorization: Bearer local-operator'); then
     echo 'protected manual recovery request failed' >&2

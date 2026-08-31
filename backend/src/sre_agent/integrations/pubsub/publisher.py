@@ -5,6 +5,8 @@ from collections.abc import Callable, Mapping
 from typing import NoReturn, Protocol
 
 import grpc
+from google.api_core import exceptions
+from google.api_core.retry import Retry, if_exception_type
 from google.auth.credentials import AnonymousCredentials
 from google.cloud import pubsub_v1  # pyright: ignore[reportAttributeAccessIssue]
 from google.pubsub_v1.services.publisher.transports.grpc import (  # pyright: ignore[reportMissingImports]
@@ -19,13 +21,39 @@ class MessagePublisher(Protocol):
 
 
 class PublishFuture(Protocol):
-    def result(self) -> str: ...
+    def result(self, timeout: float | None = None) -> str: ...
 
 
 class PubSubClient(Protocol):
     def publish(
-        self, topic: str, data: bytes, **attributes: str
+        self,
+        topic: str,
+        data: bytes,
+        *,
+        retry: Retry,
+        timeout: float,
+        **attributes: str,
     ) -> PublishFuture: ...
+
+
+_PUBLISH_RETRY_TIMEOUT_SECONDS = 10.0
+_PUBLISH_RPC_TIMEOUT_SECONDS = 10.0
+_PUBLISH_RESULT_TIMEOUT_SECONDS = 15.0
+_PUBLISH_RETRY = Retry(
+    predicate=if_exception_type(
+        exceptions.Aborted,
+        exceptions.Cancelled,
+        exceptions.DeadlineExceeded,
+        exceptions.InternalServerError,
+        exceptions.ResourceExhausted,
+        exceptions.ServiceUnavailable,
+        exceptions.Unknown,
+    ),
+    initial=0.1,
+    multiplier=4.0,
+    maximum=60.0,
+    timeout=_PUBLISH_RETRY_TIMEOUT_SECONDS,
+)
 
 
 def create_publisher_client(
@@ -74,7 +102,14 @@ class GooglePubSubPublisher:
     def publish(
         self, topic: str, data: bytes, attributes: Mapping[str, str]
     ) -> str:
-        return self._client.publish(topic, data, **dict(attributes)).result()
+        future = self._client.publish(
+            topic,
+            data,
+            retry=_PUBLISH_RETRY,
+            timeout=_PUBLISH_RPC_TIMEOUT_SECONDS,
+            **dict(attributes),
+        )
+        return future.result(timeout=_PUBLISH_RESULT_TIMEOUT_SECONDS)
 
 
 class FakeMessagePublisher:
