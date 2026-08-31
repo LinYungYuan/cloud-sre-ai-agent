@@ -144,20 +144,20 @@ def _block_after(text: str, heading: str) -> str:
 
 
 def test_authoritative_migration_procedure_is_four_gated_and_safe() -> None:
-    """受控維護窗口必須將四個明確 gate 與每一步雙版本檢查綁在一起。"""
-    procedure = _block_after(_text(SCHEMA_DOC), "## 維護窗口與四個 migration gate")
+    """受控維護窗口必須將四個明確關卡與每一步雙版本檢查綁在一起。"""
+    procedure = _block_after(_text(SCHEMA_DOC), "## 維護窗口與四個遷移關卡")
     positions = [procedure.index(command) for command in FOUR_MIGRATION_COMMANDS]
     assert positions == sorted(positions)
     assert procedure.count("SELECT version_num FROM alembic_version_backend;") >= 4
     assert procedure.count("SELECT version_num FROM alembic_version_rca_worker;") >= 4
     for required in (
-        "停止 Backend 與 RCA Worker 的所有 writes",
-        "Worker-0003 的 postcondition catalog checks",
-        "既有 Worker-0002 head",
-        "只執行 gate 3 與 gate 4",
-        "不得 stamp 或 replay",
-        "不得執行 Alembic downgrade",
-        "approved backup",
+        "停止 Backend 與 RCA Worker 的所有寫入",
+        "後置條件系統目錄檢查",
+        "Worker-0002 head",
+        "只執行關卡 3 與關卡 4",
+        "不得執行 `stamp` 或重新執行",
+        "不得執行 Alembic `downgrade`",
+        "經核准的備份",
     ):
         assert required in procedure
 
@@ -189,10 +189,10 @@ def test_root_operator_recovery_contract_names_all_protected_paths_and_policy() 
 
 
 def test_schema_doc_describes_one_final_uuid_only_runtime_schema() -> None:
-    """canonical schema must be ordinary UUID-only tables; partitions are legacy only."""
+    """正式資料庫結構只能使用一般 UUID 資料表；分割表僅供歷史保留。"""
     text = _text(SCHEMA_DOC)
-    runtime_schema = _block_after(text, "## Final UUID-only runtime schema").split(
-        "## Retained legacy partition parents", maxsplit=1
+    runtime_schema = _block_after(text, "## 最終僅使用 UUID 的執行期資料庫結構").split(
+        "## 保留的舊版分割式父資料表", maxsplit=1
     )[0]
     for table in (
         "webhook_deliveries",
@@ -210,14 +210,14 @@ def test_schema_doc_describes_one_final_uuid_only_runtime_schema() -> None:
         "content_hash",
         "result_status",
         "relkind = 'r'",
-        "historical rows are copied and validated before cutover",
+        "複製並驗證歷史資料列",
     ):
         assert required in runtime_schema
     assert "PARTITION BY" not in runtime_schema
     assert "partition_timestamp" not in runtime_schema
     assert "raw_result_reference" not in runtime_schema
 
-    legacy = _block_after(text, "## Retained legacy partition parents")
+    legacy = _block_after(text, "## 保留的舊版分割式父資料表")
     expected_legacy = (
         "webhook_deliveries__partitioned_legacy_0003",
         "alert_events__partitioned_legacy_0003",
