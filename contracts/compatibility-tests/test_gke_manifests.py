@@ -134,7 +134,7 @@ def test_base_contains_only_portable_application_resources() -> None:
         "ConfigMap": 1,
         "Deployment": 3,
         "Service": 2,
-        "ServiceAccount": 2,
+        "ServiceAccount": 3,
     }
     assert all("namespace" not in resource["metadata"] for resource in resources)
     assert not {"Secret", "Ingress", "Gateway"} & counts.keys()
@@ -151,6 +151,7 @@ def test_base_contains_only_portable_application_resources() -> None:
     # sre-agent-outbox ServiceAccount 已移除
     assert {resource["metadata"]["name"] for resource in service_accounts} == {
         "sre-agent-backend",
+        "sre-agent-migrator",
         "sre-agent-rca-worker",
     }
     assert all(not resource["metadata"].get("annotations") for resource in service_accounts)
@@ -380,69 +381,92 @@ def test_config_map_contains_only_approved_non_secret_defaults() -> None:
         assert sensitive_term not in serialized
 
 
-def test_migration_jobs_are_immutable_bounded_and_least_privilege() -> None:
-    expectations = {
-        "backend-migration-job.yaml": {
-            "generate_name": "sre-agent-backend-migration-",
-            "image": "sre-agent-backend:latest",
-            "service_account": "sre-agent-backend",
-        },
-        "worker-migration-job.yaml": {
-            "generate_name": "sre-agent-worker-migration-",
-            "image": "sre-agent-rca-worker:latest",
-            "service_account": "sre-agent-rca-worker",
-        },
+def test_single_migration_job_runs_all_gates_in_order_with_least_privilege() -> None:
+    assert {path.name for path in JOBS_DIR.glob("*.yaml")} == {"migration-job.yaml"}
+    path = JOBS_DIR / "migration-job.yaml"
+    assert path.is_file(), f"migration Job template does not exist: {path}"
+    documents = _load_yaml(path)
+    assert len(documents) == 1
+    job = documents[0]
+
+    assert job["apiVersion"] == "batch/v1"
+    assert job["kind"] == "Job"
+    assert job["metadata"]["generateName"] == "sre-agent-migration-"
+    assert "name" not in job["metadata"]
+    assert "namespace" not in job["metadata"]
+    assert "data" not in job and "stringData" not in job
+
+    assert job["spec"]["backoffLimit"] == 0
+    assert job["spec"]["activeDeadlineSeconds"] == 1800
+    assert job["spec"]["ttlSecondsAfterFinished"] == 86400
+
+    pod_spec = _pod_spec(job)
+    assert pod_spec["restartPolicy"] == "Never"
+    assert pod_spec["serviceAccountName"] == "sre-agent-migrator"
+    assert pod_spec["securityContext"] == {
+        "runAsNonRoot": True,
+        "runAsUser": 65532,
+        "runAsGroup": 65532,
+        "fsGroup": 65532,
+        "seccompProfile": {"type": "RuntimeDefault"},
     }
+
+    init_containers = pod_spec["initContainers"]
+    assert [container["name"] for container in init_containers] == [
+        "backend-0002",
+        "worker-0002",
+        "backend-0003",
+        "worker-0003",
+    ]
+    assert [container["image"] for container in init_containers] == [
+        "sre-agent-backend:latest",
+        "sre-agent-rca-worker:latest",
+        "sre-agent-backend:latest",
+        "sre-agent-rca-worker:latest",
+    ]
+    assert [container["command"] for container in init_containers] == [
+        ["alembic", "upgrade", "0002_grafana_normalization_v2"],
+        ["alembic", "upgrade", "0002_adk_specialist_analysis"],
+        ["alembic", "upgrade", "0003_non_partition_runtime_tables"],
+        ["alembic", "upgrade", "0003_validate_ordinary_runtime_tables"],
+    ]
+
     expected_resources = {
         "requests": {"cpu": "100m", "memory": "256Mi"},
         "limits": {"cpu": "1000m", "memory": "1Gi"},
     }
-
-    for filename, expected in expectations.items():
-        path = JOBS_DIR / filename
-        assert path.is_file(), f"migration Job template does not exist: {path}"
-        documents = _load_yaml(path)
-        assert len(documents) == 1
-        job = documents[0]
-
-        assert job["apiVersion"] == "batch/v1"
-        assert job["kind"] == "Job"
-        assert job["metadata"]["generateName"] == expected["generate_name"]
-        assert "name" not in job["metadata"]
-        assert "namespace" not in job["metadata"]
-        assert "data" not in job and "stringData" not in job
-
-        assert job["spec"]["backoffLimit"] == 0
-        assert job["spec"]["activeDeadlineSeconds"] == 900
-        assert job["spec"]["ttlSecondsAfterFinished"] == 86400
-
-        pod_spec = _pod_spec(job)
-        assert pod_spec["restartPolicy"] == "Never"
-        assert pod_spec["serviceAccountName"] == expected["service_account"]
-        assert pod_spec["securityContext"] == {
-            "runAsNonRoot": True,
-            "runAsUser": 65532,
-            "runAsGroup": 65532,
-            "fsGroup": 65532,
-            "seccompProfile": {"type": "RuntimeDefault"},
-        }
-
-        container = _container(job)
-        assert container["image"] == expected["image"]
-        assert container["command"] == ["alembic", "upgrade", "head"]
+    expected_security_context = {
+        "runAsNonRoot": True,
+        "runAsUser": 65532,
+        "runAsGroup": 65532,
+        "allowPrivilegeEscalation": False,
+        "readOnlyRootFilesystem": True,
+        "capabilities": {"drop": ["ALL"]},
+    }
+    for container in init_containers:
         environment = _environment(container)
         assert set(environment) == {"DATABASE_URL"}
         _assert_secret_reference(environment["DATABASE_URL"], "DATABASE_URL")
-        assert "configMapKeyRef" not in yaml.safe_dump(job)
-        assert container["securityContext"] == {
-            "runAsNonRoot": True,
-            "runAsUser": 65532,
-            "runAsGroup": 65532,
-            "allowPrivilegeEscalation": False,
-            "readOnlyRootFilesystem": True,
-            "capabilities": {"drop": ["ALL"]},
-        }
+        assert container["securityContext"] == expected_security_context
         assert container["resources"] == expected_resources
+
+    assert "upgrade\n    - head" not in yaml.safe_dump(job)
+    assert "configMapKeyRef" not in yaml.safe_dump(job)
+
+    completion = _container(job)
+    assert completion["name"] == "complete"
+    assert completion["image"] == "sre-agent-backend:latest"
+    assert completion["command"] == [
+        "python",
+        "-c",
+        "print('all migrations completed')",
+    ]
+    assert "env" not in completion and "envFrom" not in completion
+    assert completion["securityContext"] == expected_security_context
+    assert completion["resources"] == {
+        "requests": {"cpu": "10m", "memory": "32Mi"},
+        "limits": {"cpu": "100m", "memory": "128Mi"},
+    }
 
 
 def test_release_runbook_fails_fast_and_orders_migrations_before_rollouts() -> None:
@@ -457,16 +481,8 @@ def test_release_runbook_fails_fast_and_orders_migrations_before_rollouts() -> N
     ordered_commands = [
         "set -euo pipefail",
         "kubectl apply -f deploy/k8s/base/serviceaccounts.yaml",
-        (
-            "BACKEND_JOB=$(kubectl create -f "
-            "deploy/k8s/jobs/backend-migration-job.yaml"
-        ),
-        'kubectl wait --for=condition=complete --timeout=15m "job/${BACKEND_JOB}"',
-        (
-            "WORKER_JOB=$(kubectl create -f "
-            "deploy/k8s/jobs/worker-migration-job.yaml"
-        ),
-        'kubectl wait --for=condition=complete --timeout=15m "job/${WORKER_JOB}"',
+        ("MIGRATION_JOB=$(kubectl create -f deploy/k8s/jobs/migration-job.yaml"),
+        'kubectl wait --for=condition=complete --timeout=30m "job/${MIGRATION_JOB}"',
         "kubectl apply -k deploy/k8s/base",
         "kubectl rollout restart deployment/sre-agent-backend",
         "kubectl rollout restart deployment/sre-agent-frontend",

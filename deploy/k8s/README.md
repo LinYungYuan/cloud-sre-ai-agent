@@ -9,7 +9,7 @@ Terraform 管理的雲端資源。各環境的發布流程必須自行提供這�
 執行發布前，請確認 Terraform 或其他基礎設施流程已提供 Cloud SQL、RCA Pub/Sub
 topic 與 subscription、網路，以及必要的 Workload Identity 綁定。發布工具也必須
 準備該環境的 namespace、Gateway、registry image 與既有的
-`sre-agent-secrets` Secret。
+`sre-agent-secrets` Secret，以及只供 migration 使用的 Workload Identity 綁定。
 
 提交至儲存庫的 manifest 使用以 `:latest` 結尾的本機 image 名稱，但這些名稱只作為
 Kustomize transformation key。建立任一 migration Job 前，發布工具必須對 base 與
@@ -30,30 +30,31 @@ kubectl get secret sre-agent-secrets
 
 既有的 `sre-agent-secrets` 必須包含以下 key；不得列印或提交其值：
 
-- `DATABASE_URL`：兩條 migration、Backend 與 Worker 共用的 PostgreSQL connection URL。
+- `DATABASE_URL`：Backend、Worker 與合併 migration Job 共用的 PostgreSQL connection URL。
 - `GRAFANA_TOKENS`：Backend 使用的 Grafana Bearer Token catalog。
 
 KSA-to-GSA 綁定與 IAM role 由環境負責。請分離以下預期職責：
 
-- `sre-agent-backend`：供 Backend 與 Backend migration 使用的 Cloud SQL 連線能力，
-  以及 `DATABASE_URL` 所代表的資料庫權限，以及 RCA Pub/Sub topic 的發布權限。
+- `sre-agent-backend`：供 Backend 使用的 Cloud SQL 連線能力、`DATABASE_URL` 所代表的
+  應用程式資料庫權限，以及 RCA Pub/Sub topic 的發布權限。
+- `sre-agent-migrator`：只供合併 migration Job 使用的 Cloud SQL 連線能力，以及
+  `DATABASE_URL` 所代表的 migration DDL 權限；不授予 Pub/Sub、model 或 MCP 權限。
 - `sre-agent-rca-worker`：RCA subscription 的訂閱權限，以及正式環境整合所核准的
-  model／MCP 存取權。Worker migration 會使用此 KSA，因此環境也必須允許該
-  one-shot Job 存取 `DATABASE_URL` 所代表的資料庫。
+  model／MCP 存取權。
 
 ## 依序發布
 
-請從已產生的發布 bundle 根目錄執行以下命令。此順序具有約束力：任何命令失敗都必須
-立即停止。Backend migration 完成前不得建立 Worker migration；兩條 migration
-都完成前不得套用完整 base。
+請從已產生的發布 bundle 根目錄執行以下命令。合併 migration Job 會用四個
+init container 依序執行 Backend `0002`、Worker `0002`、Backend `0003` 與
+Worker `0003`；任何階段失敗，後續階段都不會執行。Job 完成前不得套用完整 base。
+若是既有環境，Backend `0003` 需要維護時段，開始前必須停止 Backend 與 Worker
+寫入並完成資料庫備份；全新且尚未提供服務的環境不需要停止 workload。
 
 ```bash
 set -euo pipefail
 kubectl apply -f deploy/k8s/base/serviceaccounts.yaml
-BACKEND_JOB=$(kubectl create -f deploy/k8s/jobs/backend-migration-job.yaml -o jsonpath='{.metadata.name}')
-kubectl wait --for=condition=complete --timeout=15m "job/${BACKEND_JOB}"
-WORKER_JOB=$(kubectl create -f deploy/k8s/jobs/worker-migration-job.yaml -o jsonpath='{.metadata.name}')
-kubectl wait --for=condition=complete --timeout=15m "job/${WORKER_JOB}"
+MIGRATION_JOB=$(kubectl create -f deploy/k8s/jobs/migration-job.yaml -o jsonpath='{.metadata.name}')
+kubectl wait --for=condition=complete --timeout=30m "job/${MIGRATION_JOB}"
 kubectl apply -k deploy/k8s/base
 kubectl rollout restart deployment/sre-agent-backend
 kubectl rollout restart deployment/sre-agent-frontend
@@ -63,15 +64,16 @@ kubectl rollout status deployment/sre-agent-frontend --timeout=5m
 kubectl rollout status deployment/sre-agent-rca-worker --timeout=5m
 ```
 
-每個 migration template 都使用 `generateName`，因此每次發布都會建立獨立且不可變的
-Job 紀錄。Kubernetes 會保留已完成的 Job 24 小時。若 Job 失敗，請先檢查，再建立
-新的 Job 重試：
+Migration template 使用 `generateName`，因此每次發布都會建立獨立且不可變的
+Job 紀錄。Kubernetes 會保留已完成的 Job 24 小時。若 Job 失敗，請依 init container
+名稱檢查失敗階段，再建立新的 Job 重試；已完成的 Alembic revision 會維持原狀：
 
 ```bash
-kubectl describe "job/${BACKEND_JOB}"
-kubectl logs "job/${BACKEND_JOB}"
-kubectl describe "job/${WORKER_JOB}"
-kubectl logs "job/${WORKER_JOB}"
+kubectl describe "job/${MIGRATION_JOB}"
+kubectl logs "job/${MIGRATION_JOB}" -c backend-0002
+kubectl logs "job/${MIGRATION_JOB}" -c worker-0002
+kubectl logs "job/${MIGRATION_JOB}" -c backend-0003
+kubectl logs "job/${MIGRATION_JOB}" -c worker-0003
 ```
 
 ## 路由與正式環境限制

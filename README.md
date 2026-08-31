@@ -151,7 +151,7 @@ Angular 啟動前，Frontend 會載入 `/config.json`。部署環境必須提供
 
 ## GKE 部署
 
-可攜式 Kubernetes base 與依序執行 Backend、Worker migration 的發布流程，記錄於
+可攜式 Kubernetes base 與透過單一 Job 依序執行四個 migration gate 的發布流程，記錄於
 [`deploy/k8s/README.md`](deploy/k8s/README.md)。Namespace、不可變 registry digest、
 Workload Identity 綁定、Secret 資料、Gateway 路由及 Terraform 管理的相依資源都是
 環境輸入，因此不會寫入 base。
