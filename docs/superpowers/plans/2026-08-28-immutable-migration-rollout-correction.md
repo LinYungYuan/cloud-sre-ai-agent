@@ -620,6 +620,12 @@
   task7_preflight() {
   task7_worktree_root=$(git rev-parse --show-toplevel) \
     || { task7_fail 'failed to resolve current worktree root'; return 1; }
+  task7_uv_cache="$task7_worktree_root/backend/.uv-cache"
+  mkdir -p "$task7_uv_cache" \
+    || { task7_fail 'failed to prepare repository-local uv cache'; return 1; }
+  test -w "$task7_uv_cache" \
+    || { task7_fail 'repository-local uv cache is not writable'; return 1; }
+  export UV_CACHE_DIR="$task7_uv_cache"
   task7_git_common_dir=$(git rev-parse --path-format=absolute --git-common-dir) \
     || { task7_fail 'failed to resolve absolute Git common directory'; return 1; }
   task7_main_checkout_root=$(dirname "$task7_git_common_dir")
@@ -1365,7 +1371,8 @@
   else
     printf 'read-only cleanup confirmation complete; no Task 7 mutation occurred\n'
   fi
-  test "$task7_cleanup_failed" = 'false'
+  test "$task7_gate_failed" = 'false' \
+    && test "$task7_cleanup_failed" = 'false'
   ```
 
   If no defect files changed, do not create a verification-only source commit. If a defect is found, return it to its owning Task 1–6 file list, commit with that task’s message family, rerun its focused suite, then restart this release gate from Step 1. Store non-secret command output with release evidence outside the repository.
