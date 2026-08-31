@@ -1,0 +1,235 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "SRE Agent 2.0 系統架構",
+    "output": "docs/architecture/sre-agent-architecture.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "ingestion-flow",
+        "label": "告警接收與入庫",
+        "focus": ["alertmanager", "backend_api", "postgres"],
+        "note": "Grafana 告警透過 Webhook 進入 FastAPI，完成事件正規化並寫入 PostgreSQL 與 Outbox 表。"
+      },
+      {
+        "id": "operator-flow",
+        "label": "維運介面查詢",
+        "focus": ["operator", "frontend", "backend_api", "postgres"],
+        "note": "維運人員透過 Angular 22 繁中介面與 REST API 查詢事件進度與 RCA 分析報告。"
+      },
+      {
+        "id": "rca-orchestration",
+        "label": "非同步 RCA 分析",
+        "focus": ["outbox_publisher", "pubsub", "rca_worker", "gemini_llm", "postgres"],
+        "note": "Outbox Publisher 發布任務至 Pub/Sub，RCA Worker 透過 ADK/MCP 調度 Gemini 進行多步驟根因推論。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "alertmanager",
+      "type": "external",
+      "label": "Grafana / Alertmanager",
+      "sublabel": "Webhook / Bearer Token",
+      "pos": [40, 160],
+      "size": [160, 64],
+      "tag": "事件來源"
+    },
+    {
+      "id": "operator",
+      "type": "external",
+      "label": "SRE 維運工程師",
+      "sublabel": "Web 瀏覽器",
+      "pos": [40, 380],
+      "size": [160, 64],
+      "tag": "操作人員"
+    },
+    {
+      "id": "frontend",
+      "type": "frontend",
+      "label": "Angular 操作介面",
+      "sublabel": "Angular 22 / 繁體中文",
+      "pos": [270, 380],
+      "size": [160, 64],
+      "tag": "Web UI"
+    },
+    {
+      "id": "backend_api",
+      "type": "backend",
+      "label": "FastAPI 後端",
+      "sublabel": "Webhook & Operator API",
+      "pos": [500, 160],
+      "size": [160, 64],
+      "tag": "ASGI :8000"
+    },
+    {
+      "id": "outbox_publisher",
+      "type": "backend",
+      "label": "Outbox 發布服務",
+      "sublabel": "Transactional Publisher",
+      "pos": [500, 380],
+      "size": [160, 64],
+      "tag": "可靠投遞"
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "Cloud SQL PostgreSQL",
+      "sublabel": "PostgreSQL 18 / Outbox",
+      "pos": [770, 160],
+      "size": [160, 64],
+      "tag": "共用儲存"
+    },
+    {
+      "id": "pubsub",
+      "type": "messagebus",
+      "label": "Cloud Pub/Sub",
+      "sublabel": "Incident & RCA Topics",
+      "pos": [770, 380],
+      "size": [160, 64],
+      "tag": "非同步佇列"
+    },
+    {
+      "id": "gemini_llm",
+      "type": "cloud",
+      "label": "Gemini 核心模型",
+      "sublabel": "Vertex AI / 推理引擎",
+      "pos": [1040, 160],
+      "size": [160, 64],
+      "tag": "AI 推理"
+    },
+    {
+      "id": "rca_worker",
+      "type": "backend",
+      "label": "RCA Worker",
+      "sublabel": "ADK & MCP 編排",
+      "pos": [1040, 380],
+      "size": [160, 64],
+      "tag": "根因分析"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Google Cloud Platform (GCP) / GKE 叢集",
+      "wraps": [
+        "backend_api",
+        "outbox_publisher",
+        "postgres",
+        "pubsub",
+        "rca_worker",
+        "gemini_llm"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "conn-alert-backend",
+      "from": "alertmanager",
+      "to": "backend_api",
+      "label": "Webhook POST",
+      "variant": "emphasis"
+    },
+    {
+      "id": "conn-op-frontend",
+      "from": "operator",
+      "to": "frontend",
+      "label": "HTTPS 瀏覽",
+      "variant": "default"
+    },
+    {
+      "id": "conn-frontend-backend",
+      "from": "frontend",
+      "to": "backend_api",
+      "label": "REST /api/v1",
+      "variant": "default"
+    },
+    {
+      "id": "conn-backend-db",
+      "from": "backend_api",
+      "to": "postgres",
+      "label": "寫入事件 / Outbox",
+      "variant": "default"
+    },
+    {
+      "id": "conn-outbox-db",
+      "from": "outbox_publisher",
+      "to": "postgres",
+      "label": "輪詢待發事件",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "conn-outbox-pubsub",
+      "from": "outbox_publisher",
+      "to": "pubsub",
+      "label": "發布任務",
+      "variant": "default"
+    },
+    {
+      "id": "conn-pubsub-worker",
+      "from": "pubsub",
+      "to": "rca_worker",
+      "label": "消費任務",
+      "variant": "default"
+    },
+    {
+      "id": "conn-worker-llm",
+      "from": "rca_worker",
+      "to": "gemini_llm",
+      "label": "ADK 推理調度",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "right",
+      "via": [
+        [1240, 412],
+        [1240, 192]
+      ]
+    },
+    {
+      "id": "conn-worker-db",
+      "from": "rca_worker",
+      "to": "postgres",
+      "label": "回寫報告與證據",
+      "variant": "default",
+      "fromSide": "top",
+      "toSide": "right",
+      "via": [
+        [1120, 310],
+        [980, 310],
+        [980, 192]
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "事件接入與操作 (Ingestion & UI)",
+      "items": [
+        "Grafana / Alertmanager 透過 Bearer Token 傳遞 Webhook",
+        "FastAPI 進行事件正規化與 Incident Identity v2 比對",
+        "Angular 22 提供繁中操作介面與 REST API 查詢"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "事務 Outbox 與非同步佇列",
+      "items": [
+        "Transactional Outbox Pattern 保證資料庫與發布原子性",
+        "Outbox Publisher 輪詢並可靠投遞至 GCP Cloud Pub/Sub",
+        "多消費者訂閱解耦長時間運行的 RCA 診斷任務"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "AI RCA 智慧根因分析 (ADK & MCP)",
+      "items": [
+        "RCA Worker 透過 ADK 與 MCP 自動採集 Log 與 Metrics",
+        "調度 Gemini 模型執行多階段根因推理",
+        "分析報告與調查證據回寫 Cloud SQL PostgreSQL"
+      ]
+    }
+  ]
+}

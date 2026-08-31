@@ -26,6 +26,8 @@
 - Frontend runtime config 與操作範圍：`frontend/README.md`
 - GKE 發布順序：`deploy/k8s/README.md`
 - 資料庫與四個 migration gate：`docs/database/postgresql-schema.md`
+- 整體架構與端到端資料流：`docs/architecture/`
+- RCA Worker 架構與 Specialist 流程：`docs/diagrams/`
 - 最近完成事項與接手檢查：`docs/HANDOFF.md`
 
 同一主題若有多份說明，以最接近實作的文件為準；資料庫操作以
@@ -138,4 +140,7 @@ Runner 會依相同順序建立四個獨立 Job、逐一等待完成，並在失
 - 禁止未經明確授權執行 destructive Git 操作、force push 或刪除 branch／worktree。
 - 功能、契約或操作方式改變時，同步更新測試與權威文件；不要修改歷史 plan/spec
   來假裝當時設計已不同。
+- 服務邊界、資料流或部署流程改變時，同步更新 `docs/architecture/` 與
+  `docs/diagrams/` 中受影響的架構圖；HTML 是閱讀入口，JSON 與 visual-check 檔案是
+  對應來源及驗證紀錄。
 - Commit 與 PR 應保持單一目的，說明實際執行的測試與未執行項目。

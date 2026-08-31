@@ -57,7 +57,13 @@ git rev-parse HEAD origin/main
 - `contracts/`：三個服務共用的版本化格式與相容性測試，不部署成服務。
 - `deploy/k8s/`：GKE application base、四個 migration Job 與發布 runner。
 
-完整說明請先閱讀 `README.md` 與 `AGENTS.md`，再依任務閱讀各服務 README。
+完整說明請先閱讀 `README.md` 與 `AGENTS.md`，再依任務閱讀各服務 README。架構圖入口：
+
+- `docs/architecture/sre-agent-whole-project-architecture.html`：整體專案架構。
+- `docs/architecture/sre-agent-end-to-end-dataflow.html`：端到端資料流。
+- `docs/architecture/sre-agent-architecture.html`：系統架構總覽。
+- `docs/diagrams/rca-worker-architecture-flow.html`：RCA Worker 完整架構與流程。
+- `docs/diagrams/rca-worker-adk-specialist-architecture-flow.html`：ADK Specialist 流程。
 
 ## Migration 與部署現況
 
@@ -100,9 +106,9 @@ Workload Identity、Cloud SQL、Pub/Sub 與 Gateway。資料庫備份、每個 g
 
 ## 本機工作目錄注意事項
 
-建立本文件時，`docs/architecture/` 與 `docs/diagrams/` 在目前工作目錄中是未追蹤的
-使用者資料。若接手時仍存在，禁止刪除、覆寫、加入 commit 或當成暫存資料清理，
-除非使用者明確要求處理。
+`docs/architecture/` 與 `docs/diagrams/` 已納入版本控制。架構或流程改變時，需同步更新
+對應 HTML、來源 JSON 與 visual-check 驗證紀錄，並確認圖中的服務邊界、migration 順序
+及部署流程仍與權威文件一致。
 
 其他 worktree／branch 也可能存在。不要因看起來過時就刪除；先確認 ownership 與
 使用者意圖。
