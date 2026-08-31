@@ -24,6 +24,7 @@
 - Tasks 1–6 全部完成；Task 6 round 4 文件修正與 Task 4 Pub/Sub emulator transport follow-up 均已通過 independent review。
 - Task 7 attempt 7 fresh 通過 migrations、完整 tests/static/renders/evidence、catalog seed 與第一筆 live 202/PUBLISHED/SUCCEEDED；第二個既有 AWS fixture 因與第一筆共用 source + folder + alert name identity 而沒有建立新 outbox/run/job，故在 recovery 前正確停止。
 - Task 7 procedure 已改為記憶體內產生 distinct recovery alert，並補齊 exact container ownership、fail-closed phase dispatcher、delivery-linked assertions、direct runtime PID ownership 與 bounded INT→TERM cleanup；final independent review APPROVED。
+- Final-gate preflight attempt 8 在 mutation 前拒絕 main-checkout Compose label；procedure 已限縮接受同一 Git repository 的 worktree/main 兩個精確路徑並捕捉實際 label，independent review APPROVED。
 - Attempt 7 的兩個 disposable DBs 與 runtimes 已清理；下一次必須從 Safety Preflight 全新重跑，不可沿用任何部分結果。
 
 ## Superpowers Plan

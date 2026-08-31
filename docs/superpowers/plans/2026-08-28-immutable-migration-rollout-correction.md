@@ -517,7 +517,7 @@
 
 - [ ] **Step 1: Establish a fresh disposable acceptance database with explicit revisions (2–5 minutes)**
 
-  Open and retain one Bash terminal named `Task 7 verification`; all task-specific variables below live in that terminal through Step 6. Discover running containers by their exact published host ports, not by an implicit Compose project. Zero or multiple candidates for either port is a hard stop. Inspect and validate the candidates against the repository's Postgres/Pub/Sub service signatures, record their exact names, bindings, and shared database OID, and never substitute a different container later. The Postgres validation deliberately accepts the inspected standalone project container without requiring Compose labels; the image, command, environment, writable data mount, binding, and database catalog together are its ownership proof. Pub/Sub must carry this repository's exact Compose service/config-file labels and expected emulator command.
+  Open and retain one Bash terminal named `Task 7 verification`; all task-specific variables below live in that terminal through Step 6. Discover running containers by their exact published host ports, not by an implicit Compose project. Zero or multiple candidates for either port is a hard stop. Inspect and validate the candidates against the repository's Postgres/Pub/Sub service signatures, record their exact names, bindings, and shared database OID, and never substitute a different container later. The Postgres validation deliberately accepts the inspected standalone project container without requiring Compose labels; the image, command, environment, writable data mount, binding, and database catalog together are its ownership proof. Pub/Sub must carry the expected emulator command and exact Compose service label. Its config-file label must equal either the current worktree's Compose file or the main-checkout Compose file derived from this worktree's absolute Git common directory; capture the accepted exact label and require that same value later. Do not accept a parent/prefix match, a symlink-resolved substitute, or any other path.
 
   ```bash
   # Run this block in Bash and keep this named terminal open through cleanup.
@@ -525,6 +525,16 @@
   set -o pipefail
   task7_gate_failed='false'
   task7_cleanup_failed='false'
+  task7_mutation_started='false'
+  task7_preflight_complete='false'
+  task7_postgres_container=''
+  task7_postgres_id=''
+  task7_postgres_binding=''
+  task7_shared_oid_before=''
+  task7_pubsub_container=''
+  task7_pubsub_id=''
+  task7_pubsub_binding=''
+  task7_pubsub_compose_file=''
   task7_fail() {
     echo "$1" >&2
     task7_gate_failed='true'
@@ -608,7 +618,15 @@
   }
 
   task7_preflight() {
-  task7_repo_compose="$PWD/docker-compose.yml"
+  task7_worktree_root=$(git rev-parse --show-toplevel) \
+    || { task7_fail 'failed to resolve current worktree root'; return 1; }
+  task7_git_common_dir=$(git rev-parse --path-format=absolute --git-common-dir) \
+    || { task7_fail 'failed to resolve absolute Git common directory'; return 1; }
+  task7_main_checkout_root=$(dirname "$task7_git_common_dir")
+  task7_repo_compose="$task7_worktree_root/docker-compose.yml"
+  task7_main_repo_compose="$task7_main_checkout_root/docker-compose.yml"
+  test -f "$task7_repo_compose" && test -f "$task7_main_repo_compose" \
+    || { task7_fail 'repository-owned Compose file is absent'; return 1; }
   task7_postgres_candidates=''
   task7_pubsub_candidates=''
   for task7_candidate_id in $(docker ps -q); do
@@ -634,6 +652,24 @@
     || { task7_fail 'failed to capture Postgres identity'; return 1; }
   task7_pubsub_id=$(docker inspect "$task7_pubsub_container" --format '{{.Id}}') \
     || { task7_fail 'failed to capture Pub/Sub identity'; return 1; }
+  task7_postgres_binding=$(docker inspect "$task7_postgres_container" \
+    | jq -ce '.[0].HostConfig.PortBindings["5432/tcp"]') \
+    || { task7_fail 'failed to capture Postgres binding'; return 1; }
+  task7_pubsub_binding=$(docker inspect "$task7_pubsub_container" \
+    | jq -ce '.[0].HostConfig.PortBindings["8085/tcp"]') \
+    || { task7_fail 'failed to capture Pub/Sub binding'; return 1; }
+  task7_pubsub_compose_file=$(docker inspect "$task7_pubsub_container" \
+    --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}') \
+    || { task7_fail 'failed to capture Pub/Sub Compose config-file label'; return 1; }
+  case "$task7_pubsub_compose_file" in
+    "$task7_repo_compose"|"$task7_main_repo_compose") ;;
+    *) task7_fail 'host 58085 container has an unrelated Compose config-file label'; return 1 ;;
+  esac
+  task7_shared_oid_before=$(docker exec "$task7_postgres_container" \
+    psql -U postgres -d postgres -v ON_ERROR_STOP=1 -Atc "SELECT oid FROM pg_database WHERE datname = 'sre_agent'") \
+    || { task7_fail 'failed to capture shared database OID'; return 1; }
+  test -n "$task7_shared_oid_before" \
+    || { task7_fail 'shared sre_agent database is absent'; return 1; }
 
   docker inspect "$task7_postgres_container" | jq -e '
     .[0] as $container
@@ -645,7 +681,7 @@
       and ($container.Mounts | any(.Destination == "/var/lib/postgresql" and .RW == true))
       and ($container.State.Status == "running")' >/dev/null \
     || { task7_fail 'host 5432 container does not match inspected project Postgres service'; return 1; }
-  docker inspect "$task7_pubsub_container" | jq -e --arg compose "$task7_repo_compose" '
+  docker inspect "$task7_pubsub_container" | jq -e --arg compose "$task7_pubsub_compose_file" '
     .[0] as $container
     | $container.Config.Image == "google/cloud-sdk:578.0.0-emulators"
       and ($container.Config.Cmd | index("--project=sre-agent-local") != null)
@@ -655,28 +691,19 @@
       and ($container.State.Status == "running")' >/dev/null \
     || { task7_fail 'host 58085 container does not match this repository Pub/Sub service'; return 1; }
 
-  task7_postgres_binding=$(docker inspect "$task7_postgres_container" \
-    | jq -ce '.[0].HostConfig.PortBindings["5432/tcp"]') \
-    || { task7_fail 'failed to capture Postgres binding'; return 1; }
-  task7_pubsub_binding=$(docker inspect "$task7_pubsub_container" \
-    | jq -ce '.[0].HostConfig.PortBindings["8085/tcp"]') \
-    || { task7_fail 'failed to capture Pub/Sub binding'; return 1; }
-  task7_shared_oid_before=$(docker exec "$task7_postgres_container" \
-    psql -U postgres -d postgres -v ON_ERROR_STOP=1 -Atc "SELECT oid FROM pg_database WHERE datname = 'sre_agent'") \
-    || { task7_fail 'failed to capture shared database OID'; return 1; }
-  test -n "$task7_shared_oid_before" \
-    || { task7_fail 'shared sre_agent database is absent'; return 1; }
   test "$(docker exec "$task7_postgres_container" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -Atc \
     "SELECT count(*) FROM pg_database WHERE datname IN ('sre_agent_release_acceptance','sre_agent_release_tests')")" -eq 0 \
     || { task7_fail 'release database already exists'; return 1; }
-  printf 'postgres=%s binding=%s shared_oid=%s\npubsub=%s binding=%s\n' \
+  task7_preflight_complete='true'
+  printf 'postgres=%s binding=%s shared_oid=%s\npubsub=%s binding=%s compose_file=%s\n' \
     "$task7_postgres_container" "$task7_postgres_binding" "$task7_shared_oid_before" \
-    "$task7_pubsub_container" "$task7_pubsub_binding"
+    "$task7_pubsub_container" "$task7_pubsub_binding" "$task7_pubsub_compose_file"
 
   }
 
   task7_step1_migrate_acceptance() {
   task7_require_open_gate 'Step 1 acceptance migrations' || return 1
+  task7_mutation_started='true'
   docker exec "$task7_postgres_container" createdb -U postgres sre_agent_release_acceptance \
     || { task7_fail 'acceptance database creation failed; enter Step 6 cleanup'; return 1; }
   docker exec "$task7_postgres_container" createdb -U postgres sre_agent_release_tests \
@@ -960,7 +987,7 @@
   test "$(docker inspect "$task7_pubsub_container" --format '{{.State.Status}}')" = 'running' \
     && test "$(docker inspect "$task7_pubsub_container" --format '{{.Id}}')" = "$task7_pubsub_id" \
     && test "$(docker inspect "$task7_pubsub_container" | jq -ce '.[0].HostConfig.PortBindings["8085/tcp"]')" = "$task7_pubsub_binding" \
-    && docker inspect "$task7_pubsub_container" | jq -e --arg compose "$task7_repo_compose" '
+    && docker inspect "$task7_pubsub_container" | jq -e --arg compose "$task7_pubsub_compose_file" '
          .[0].Config.Image == "google/cloud-sdk:578.0.0-emulators"
          and (.[0].Config.Cmd | index("--project=sre-agent-local") != null)
          and (.[0].Config.Cmd | index("--host-port=0.0.0.0:8085") != null)
@@ -1049,7 +1076,7 @@
   test "$(docker inspect "$task7_pubsub_container" --format '{{.State.Status}}')" = 'exited' \
     && test "$(docker inspect "$task7_pubsub_container" --format '{{.Id}}')" = "$task7_pubsub_id" \
     && test "$(docker inspect "$task7_pubsub_container" | jq -ce '.[0].HostConfig.PortBindings["8085/tcp"]')" = "$task7_pubsub_binding" \
-    && docker inspect "$task7_pubsub_container" | jq -e --arg compose "$task7_repo_compose" '
+    && docker inspect "$task7_pubsub_container" | jq -e --arg compose "$task7_pubsub_compose_file" '
          .[0].Config.Image == "google/cloud-sdk:578.0.0-emulators"
          and (.[0].Config.Cmd | index("--project=sre-agent-local") != null)
          and (.[0].Config.Cmd | index("--host-port=0.0.0.0:8085") != null)
@@ -1215,96 +1242,129 @@
 
 - [ ] **Step 6: Clean disposable databases and commit only task-owned defect fixes (2–5 minutes)**
 
-  This is a mandatory `finally` path after success or any failure in Steps 1–5, including a partially created database or a failed transformed request. Return to the still-open `Task 7 verification` terminal; never discard or reconstruct its captured names/bindings/OID/PIDs. Set `task7_cleanup_failed='false'` and attempt every cleanup subsection even if an earlier cleanup assertion fails, recording `task7_cleanup_failed='true'` instead of exiting. Use the initialization helper to signal only non-empty run-owned Backend/Worker PIDs with bounded INT-then-TERM shutdown, then boundedly require port 8000 to be clear. Never use `pkill`, `killall`, a name pattern, `SIGKILL`, or terminate an unrelated process.
+  This is a mandatory `finally` path after success or any failure in Steps 1–5, including a partially created database or a failed transformed request. Return to the still-open `Task 7 verification` terminal; never discard or reconstruct its captured names/bindings/OID/PIDs. Set `task7_cleanup_failed='false'` and attempt every applicable cleanup subsection even if an earlier cleanup assertion fails, recording `task7_cleanup_failed='true'` instead of exiting. If preflight failed before `task7_mutation_started` became true, take the bounded, read-only branch below: confirm any already captured identities are unchanged, confirm no release database exists, check Pub/Sub health once, and skip the mutation-only cleanup blocks. Any failure after the first database mutation must still take every full cleanup subsection. For full cleanup, use the initialization helper to signal only non-empty run-owned Backend/Worker PIDs with bounded INT-then-TERM shutdown, then boundedly require port 8000 to be clear. Never use `pkill`, `killall`, a name pattern, `SIGKILL`, or terminate an unrelated process.
 
   ```bash
   task7_cleanup_failed='false'
-  if task7_shutdown_exact_pid "${task7_backend_pid:-}" 'Backend'; then
-    task7_backend_pid=''
-  else
-    echo 'failed to stop exact Task 7 Backend PID during cleanup' >&2
-    task7_cleanup_failed='true'
-  fi
-  if task7_shutdown_exact_pid "${task7_worker_pid:-}" 'Worker'; then
-    task7_worker_pid=''
-  else
-    echo 'failed to stop exact Task 7 Worker PID during cleanup' >&2
-    task7_cleanup_failed='true'
-  fi
-  task7_backend_clear='false'
-  for task7_attempt in {1..30}; do
-    if ! lsof -nP -iTCP:8000 -sTCP:LISTEN >/dev/null; then
-      task7_backend_clear='true'
-      break
+  if [ "${task7_mutation_started:-false}" = 'false' ]; then
+    printf 'preflight ended before mutation; performing read-only final-state confirmation\n'
+    if [ -n "${task7_postgres_container:-}" ]; then
+      test "$(docker inspect "$task7_postgres_container" --format '{{.State.Status}}')" = 'running' \
+        && test "$(docker inspect "$task7_postgres_container" --format '{{.Id}}')" = "$task7_postgres_id" \
+        && test "$(docker inspect "$task7_postgres_container" | jq -ce '.[0].HostConfig.PortBindings["5432/tcp"]')" = "$task7_postgres_binding" \
+        && test "$(docker exec "$task7_postgres_container" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -Atc \
+          "SELECT count(*) FROM pg_database WHERE datname IN ('sre_agent_release_acceptance','sre_agent_release_tests')")" -eq 0 \
+        && { [ -z "${task7_shared_oid_before:-}" ] \
+          || test "$(docker exec "$task7_postgres_container" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -Atc \
+            "SELECT oid FROM pg_database WHERE datname = 'sre_agent'")" = "$task7_shared_oid_before"; } \
+        || { echo 'read-only Postgres final-state confirmation failed' >&2; task7_cleanup_failed='true'; }
+    else
+      printf 'preflight failed before Postgres identity capture; no Task 7 mutation was attempted\n'
     fi
-    sleep 1
-  done
-  test "$task7_backend_clear" = 'true' \
-    || { echo 'the exact Task 7 Backend process has not released port 8000' >&2; task7_cleanup_failed='true'; }
+    if [ -n "${task7_pubsub_container:-}" ]; then
+      test "$(docker inspect "$task7_pubsub_container" --format '{{.State.Status}}')" = 'running' \
+        && test "$(docker inspect "$task7_pubsub_container" --format '{{.Id}}')" = "$task7_pubsub_id" \
+        && test "$(docker inspect "$task7_pubsub_container" | jq -ce '.[0].HostConfig.PortBindings["8085/tcp"]')" = "$task7_pubsub_binding" \
+        && test "$(docker inspect "$task7_pubsub_container" --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}')" = "$task7_pubsub_compose_file" \
+        && curl -fsS 'http://127.0.0.1:58085/v1/projects/sre-agent-local/topics' >/dev/null \
+        || { echo 'read-only Pub/Sub final-state confirmation failed' >&2; task7_cleanup_failed='true'; }
+    else
+      printf 'preflight failed before Pub/Sub identity capture; no Task 7 mutation was attempted\n'
+    fi
+  else
+    if task7_shutdown_exact_pid "${task7_backend_pid:-}" 'Backend'; then
+      task7_backend_pid=''
+    else
+      echo 'failed to stop exact Task 7 Backend PID during cleanup' >&2
+      task7_cleanup_failed='true'
+    fi
+    if task7_shutdown_exact_pid "${task7_worker_pid:-}" 'Worker'; then
+      task7_worker_pid=''
+    else
+      echo 'failed to stop exact Task 7 Worker PID during cleanup' >&2
+      task7_cleanup_failed='true'
+    fi
+    task7_backend_clear='false'
+    for task7_attempt in {1..30}; do
+      if ! lsof -nP -iTCP:8000 -sTCP:LISTEN >/dev/null; then
+        task7_backend_clear='true'
+        break
+      fi
+      sleep 1
+    done
+    test "$task7_backend_clear" = 'true' \
+      || { echo 'the exact Task 7 Backend process has not released port 8000' >&2; task7_cleanup_failed='true'; }
+  fi
   ```
 
   Require the originally captured Postgres container to be running and unchanged, list only the shared/release catalog, then drop only the two literal release database names through that container. `--if-exists` makes this safe for partial-failure cleanup; it does not broaden the target.
 
   ```bash
-  task7_postgres_safe='true'
-  test "$(docker inspect "$task7_postgres_container" --format '{{.State.Status}}')" = 'running' \
-    || { echo 'captured Postgres container is not running; do not substitute another container' >&2; task7_postgres_safe='false'; task7_cleanup_failed='true'; }
-  test "$(docker inspect "$task7_postgres_container" --format '{{.Id}}')" = "$task7_postgres_id" \
-    || { echo 'captured Postgres container identity changed' >&2; task7_postgres_safe='false'; task7_cleanup_failed='true'; }
-  test "$(docker inspect "$task7_postgres_container" | jq -ce '.[0].HostConfig.PortBindings["5432/tcp"]')" = "$task7_postgres_binding" \
-    || { echo 'captured Postgres binding changed' >&2; task7_postgres_safe='false'; task7_cleanup_failed='true'; }
-  if [ "$task7_postgres_safe" = 'true' ]; then
-    docker exec "$task7_postgres_container" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c \
-      "SELECT datname, oid FROM pg_database WHERE datname IN ('sre_agent','sre_agent_release_acceptance','sre_agent_release_tests') ORDER BY datname" \
-      || { echo 'failed to list exact Task 7 database catalog' >&2; task7_cleanup_failed='true'; }
-    docker exec "$task7_postgres_container" dropdb -U postgres --if-exists --force sre_agent_release_acceptance \
-      || { echo 'failed to drop exact acceptance database' >&2; task7_cleanup_failed='true'; }
-    docker exec "$task7_postgres_container" dropdb -U postgres --if-exists --force sre_agent_release_tests \
-      || { echo 'failed to drop exact test database' >&2; task7_cleanup_failed='true'; }
-    task7_final_catalog=$(docker exec "$task7_postgres_container" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -AtF '|' -c \
-      "SELECT datname, oid FROM pg_database WHERE datname IN ('sre_agent','sre_agent_release_acceptance','sre_agent_release_tests') ORDER BY datname") \
-      || { echo 'failed to read final Task 7 database catalog' >&2; task7_cleanup_failed='true'; }
-    test "$task7_final_catalog" = "sre_agent|$task7_shared_oid_before" \
-      || { echo 'release databases remain or shared sre_agent OID changed' >&2; task7_cleanup_failed='true'; }
-  else
-    echo 'skipping database cleanup because captured Postgres ownership changed' >&2
+  if [ "$task7_mutation_started" = 'true' ]; then
+    task7_postgres_safe='true'
+    test "$(docker inspect "$task7_postgres_container" --format '{{.State.Status}}')" = 'running' \
+      || { echo 'captured Postgres container is not running; do not substitute another container' >&2; task7_postgres_safe='false'; task7_cleanup_failed='true'; }
+    test "$(docker inspect "$task7_postgres_container" --format '{{.Id}}')" = "$task7_postgres_id" \
+      || { echo 'captured Postgres container identity changed' >&2; task7_postgres_safe='false'; task7_cleanup_failed='true'; }
+    test "$(docker inspect "$task7_postgres_container" | jq -ce '.[0].HostConfig.PortBindings["5432/tcp"]')" = "$task7_postgres_binding" \
+      || { echo 'captured Postgres binding changed' >&2; task7_postgres_safe='false'; task7_cleanup_failed='true'; }
+    if [ "$task7_postgres_safe" = 'true' ]; then
+      docker exec "$task7_postgres_container" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c \
+        "SELECT datname, oid FROM pg_database WHERE datname IN ('sre_agent','sre_agent_release_acceptance','sre_agent_release_tests') ORDER BY datname" \
+        || { echo 'failed to list exact Task 7 database catalog' >&2; task7_cleanup_failed='true'; }
+      docker exec "$task7_postgres_container" dropdb -U postgres --if-exists --force sre_agent_release_acceptance \
+        || { echo 'failed to drop exact acceptance database' >&2; task7_cleanup_failed='true'; }
+      docker exec "$task7_postgres_container" dropdb -U postgres --if-exists --force sre_agent_release_tests \
+        || { echo 'failed to drop exact test database' >&2; task7_cleanup_failed='true'; }
+      task7_final_catalog=$(docker exec "$task7_postgres_container" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -AtF '|' -c \
+        "SELECT datname, oid FROM pg_database WHERE datname IN ('sre_agent','sre_agent_release_acceptance','sre_agent_release_tests') ORDER BY datname") \
+        || { echo 'failed to read final Task 7 database catalog' >&2; task7_cleanup_failed='true'; }
+      test "$task7_final_catalog" = "sre_agent|$task7_shared_oid_before" \
+        || { echo 'release databases remain or shared sre_agent OID changed' >&2; task7_cleanup_failed='true'; }
+    else
+      echo 'skipping database cleanup because captured Postgres ownership changed' >&2
+    fi
   fi
   ```
 
   Finally, restore only the originally captured Pub/Sub container if the failure path left it stopped, then boundedly require the same exact name, original binding, repository ownership labels, and health endpoint. This cleanup restoration is not permission to continue a failed recovery phase.
 
   ```bash
-  task7_pubsub_safe='true'
-  task7_pubsub_status=$(docker inspect "$task7_pubsub_container" --format '{{.State.Status}}') \
-    || { echo 'failed to inspect captured Pub/Sub container during cleanup' >&2; task7_pubsub_safe='false'; task7_cleanup_failed='true'; }
-  test "$(docker inspect "$task7_pubsub_container" | jq -ce '.[0].HostConfig.PortBindings["8085/tcp"]')" = "$task7_pubsub_binding" \
-    || { echo 'captured Pub/Sub binding changed' >&2; task7_pubsub_safe='false'; task7_cleanup_failed='true'; }
-  test "$(docker inspect "$task7_pubsub_container" --format '{{.Id}}')" = "$task7_pubsub_id" \
-    || { echo 'captured Pub/Sub container identity changed' >&2; task7_pubsub_safe='false'; task7_cleanup_failed='true'; }
-  docker inspect "$task7_pubsub_container" | jq -e --arg compose "$task7_repo_compose" '
-    .[0].Config.Image == "google/cloud-sdk:578.0.0-emulators"
-    and (.[0].Config.Cmd | index("--project=sre-agent-local") != null)
-    and (.[0].Config.Cmd | index("--host-port=0.0.0.0:8085") != null)
-    and .[0].Config.Labels["com.docker.compose.service"] == "pubsub-emulator"
-    and .[0].Config.Labels["com.docker.compose.project.config_files"] == $compose' >/dev/null \
-    || { echo 'captured Pub/Sub ownership changed' >&2; task7_pubsub_safe='false'; task7_cleanup_failed='true'; }
-  if [ "$task7_pubsub_safe" = 'true' ] && [ "$task7_pubsub_status" != 'running' ]; then
-    docker start "$task7_pubsub_id" >/dev/null \
-      || { echo 'failed to restore captured Pub/Sub container during cleanup' >&2; task7_cleanup_failed='true'; }
-  fi
-  task7_cleanup_pubsub_ready='false'
-  for task7_attempt in {1..30}; do
-    if [ "$task7_pubsub_safe" = 'true' ] \
-      && curl -fsS 'http://127.0.0.1:58085/v1/projects/sre-agent-local/topics' >/dev/null; then
-      task7_cleanup_pubsub_ready='true'
-      break
+  if [ "$task7_mutation_started" = 'true' ]; then
+    task7_pubsub_safe='true'
+    task7_pubsub_status=$(docker inspect "$task7_pubsub_container" --format '{{.State.Status}}') \
+      || { echo 'failed to inspect captured Pub/Sub container during cleanup' >&2; task7_pubsub_safe='false'; task7_cleanup_failed='true'; }
+    test "$(docker inspect "$task7_pubsub_container" | jq -ce '.[0].HostConfig.PortBindings["8085/tcp"]')" = "$task7_pubsub_binding" \
+      || { echo 'captured Pub/Sub binding changed' >&2; task7_pubsub_safe='false'; task7_cleanup_failed='true'; }
+    test "$(docker inspect "$task7_pubsub_container" --format '{{.Id}}')" = "$task7_pubsub_id" \
+      || { echo 'captured Pub/Sub container identity changed' >&2; task7_pubsub_safe='false'; task7_cleanup_failed='true'; }
+    docker inspect "$task7_pubsub_container" | jq -e --arg compose "$task7_pubsub_compose_file" '
+      .[0].Config.Image == "google/cloud-sdk:578.0.0-emulators"
+      and (.[0].Config.Cmd | index("--project=sre-agent-local") != null)
+      and (.[0].Config.Cmd | index("--host-port=0.0.0.0:8085") != null)
+      and .[0].Config.Labels["com.docker.compose.service"] == "pubsub-emulator"
+      and .[0].Config.Labels["com.docker.compose.project.config_files"] == $compose' >/dev/null \
+      || { echo 'captured Pub/Sub ownership changed' >&2; task7_pubsub_safe='false'; task7_cleanup_failed='true'; }
+    if [ "$task7_pubsub_safe" = 'true' ] && [ "$task7_pubsub_status" != 'running' ]; then
+      docker start "$task7_pubsub_id" >/dev/null \
+        || { echo 'failed to restore captured Pub/Sub container during cleanup' >&2; task7_cleanup_failed='true'; }
     fi
-    sleep 1
-  done
-  test "$task7_cleanup_pubsub_ready" = 'true' \
-    || { echo 'captured Pub/Sub container is not healthy after cleanup' >&2; task7_cleanup_failed='true'; }
-  printf 'cleanup preserved postgres=%s shared_oid=%s pubsub=%s binding=%s\n' \
-    "$task7_postgres_container" "$task7_shared_oid_before" "$task7_pubsub_container" "$task7_pubsub_binding"
+    task7_cleanup_pubsub_ready='false'
+    for task7_attempt in {1..30}; do
+      if [ "$task7_pubsub_safe" = 'true' ] \
+        && curl -fsS 'http://127.0.0.1:58085/v1/projects/sre-agent-local/topics' >/dev/null; then
+        task7_cleanup_pubsub_ready='true'
+        break
+      fi
+      sleep 1
+    done
+    test "$task7_cleanup_pubsub_ready" = 'true' \
+      || { echo 'captured Pub/Sub container is not healthy after cleanup' >&2; task7_cleanup_failed='true'; }
+    printf 'cleanup preserved postgres=%s shared_oid=%s pubsub=%s binding=%s compose_file=%s\n' \
+      "$task7_postgres_container" "$task7_shared_oid_before" "$task7_pubsub_container" "$task7_pubsub_binding" "$task7_pubsub_compose_file"
+  else
+    printf 'read-only cleanup confirmation complete; no Task 7 mutation occurred\n'
+  fi
   test "$task7_cleanup_failed" = 'false'
   ```
 
