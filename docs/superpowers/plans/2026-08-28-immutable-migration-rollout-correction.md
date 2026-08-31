@@ -557,7 +557,8 @@
       return 1
     }
   }
-  task7_shutdown_poll_attempts=15
+  task7_shutdown_term_poll_attempts=35
+  task7_shutdown_fallback_poll_attempts=5
   task7_shutdown_poll_seconds=1
   task7_exact_job_active() {
     local task7_job_pid=${1:-}
@@ -582,6 +583,7 @@
     local task7_shutdown_label=${2:-runtime}
     local task7_shutdown_signal
     local task7_shutdown_attempt
+    local task7_shutdown_attempt_limit
     local task7_shutdown_active_status
     [ -n "$task7_shutdown_pid" ] || return 0
     task7_exact_job_active "$task7_shutdown_pid"
@@ -591,7 +593,18 @@
       1) task7_reap_exact_job "$task7_shutdown_pid" "$task7_shutdown_label"; return 0 ;;
       *) return 1 ;;
     esac
-    for task7_shutdown_signal in INT TERM; do
+    for task7_shutdown_signal in TERM INT; do
+      task7_exact_job_active "$task7_shutdown_pid"
+      task7_shutdown_active_status=$?
+      case "$task7_shutdown_active_status" in
+        0) ;;
+        1) task7_reap_exact_job "$task7_shutdown_pid" "$task7_shutdown_label"; return 0 ;;
+        *) return 1 ;;
+      esac
+      case "$task7_shutdown_signal" in
+        TERM) task7_shutdown_attempt_limit=$task7_shutdown_term_poll_attempts ;;
+        *) task7_shutdown_attempt_limit=$task7_shutdown_fallback_poll_attempts ;;
+      esac
       kill -"$task7_shutdown_signal" "$task7_shutdown_pid" 2>/dev/null || {
         task7_exact_job_active "$task7_shutdown_pid"
         task7_shutdown_active_status=$?
@@ -601,7 +614,7 @@
         return 1
       }
       task7_shutdown_attempt=0
-      while [ "$task7_shutdown_attempt" -lt "$task7_shutdown_poll_attempts" ]; do
+      while [ "$task7_shutdown_attempt" -lt "$task7_shutdown_attempt_limit" ]; do
         task7_exact_job_active "$task7_shutdown_pid"
         task7_shutdown_active_status=$?
         case "$task7_shutdown_active_status" in
@@ -612,8 +625,15 @@
         sleep "$task7_shutdown_poll_seconds"
         task7_shutdown_attempt=$((task7_shutdown_attempt + 1))
       done
+      task7_exact_job_active "$task7_shutdown_pid"
+      task7_shutdown_active_status=$?
+      case "$task7_shutdown_active_status" in
+        0) ;;
+        1) task7_reap_exact_job "$task7_shutdown_pid" "$task7_shutdown_label"; return 0 ;;
+        *) return 1 ;;
+      esac
     done
-    echo "exact $task7_shutdown_label PID $task7_shutdown_pid remained alive after bounded INT and TERM shutdown" >&2
+    echo "exact $task7_shutdown_label PID $task7_shutdown_pid remained alive after bounded TERM and INT shutdown" >&2
     return 1
   }
 
@@ -1252,7 +1272,7 @@
 
 - [ ] **Step 6: Clean disposable databases and commit only task-owned defect fixes (2–5 minutes)**
 
-  This is a mandatory `finally` path after success or any failure in Steps 1–5, including a partially created database or a failed transformed request. Return to the still-open `Task 7 verification` terminal; never discard or reconstruct its captured names/bindings/OID/PIDs. Set `task7_cleanup_failed='false'` and attempt every applicable cleanup subsection even if an earlier cleanup assertion fails, recording `task7_cleanup_failed='true'` instead of exiting. If preflight failed before `task7_mutation_started` became true, take the bounded, read-only branch below: confirm any already captured identities are unchanged, confirm no release database exists, check Pub/Sub health once, and skip the mutation-only cleanup blocks. Any failure after the first database mutation must still take every full cleanup subsection. For full cleanup, use the initialization helper to signal only non-empty run-owned Backend/Worker PIDs with bounded INT-then-TERM shutdown, then boundedly require port 8000 to be clear. Never use `pkill`, `killall`, a name pattern, `SIGKILL`, or terminate an unrelated process.
+  This is a mandatory `finally` path after success or any failure in Steps 1–5, including a partially created database or a failed transformed request. Return to the still-open `Task 7 verification` terminal; never discard or reconstruct its captured names/bindings/OID/PIDs. Set `task7_cleanup_failed='false'` and attempt every applicable cleanup subsection even if an earlier cleanup assertion fails, recording `task7_cleanup_failed='true'` instead of exiting. If preflight failed before `task7_mutation_started` became true, take the bounded, read-only branch below: confirm any already captured identities are unchanged, confirm no release database exists, check Pub/Sub health once, and skip the mutation-only cleanup blocks. Any failure after the first database mutation must still take every full cleanup subsection. For full cleanup, use the initialization helper to signal only non-empty run-owned Backend/Worker PIDs with bounded TERM-then-INT shutdown, then boundedly require port 8000 to be clear. TERM receives a 35-second window because the Worker can be inside a 30-second subscriber pull; the five-second INT fallback remains bounded and does not broaden PID ownership. Never use `pkill`, `killall`, a name pattern, `SIGKILL`, or terminate an unrelated process.
 
   ```bash
   task7_cleanup_failed='false'

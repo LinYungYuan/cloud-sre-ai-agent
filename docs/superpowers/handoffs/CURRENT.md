@@ -30,7 +30,9 @@
 - 聚焦 TDD 修正保留 pinned Pub/Sub 七種 transient errors 與原 backoff，只將 retry/RPC/result wait 分別限制為 10/10/15 秒；三個 release POST 另有 2 秒 connect、30 秒 overall hard stop。15 個相關測試、完整 Backend Ruff/Pyright、Task 7 Bash syntax 與 diff check 全綠，independent re-review APPROVED。
 - Final-gate attempt 11 證明 bounded outage／FAILED event／no-auto-replay／manual recovery／terminal no-duplicate 全部成功；最後只因 Step 5 錯把 top-level partitioned parent 的 `relispartition` 預期為 true 而停止。實際 PostgreSQL 與 migration tests 均證明正確 tuple 是 `relkind='p'`, `relispartition=false`。
 - Step 5 已限縮 `public` schema 並改為六 canonical `r/f`、六 legacy parents `p/f`、總數 12；新增 design-consistency regression。11 個文件合約測試、Ruff、Pyright、Task 7 Bash syntax 與 diff check 全綠，independent review APPROVED；frozen migrations 未修改。
-- Attempt 11 的兩個 disposable DBs 與 runtimes 已清理；目前只剩 shared `sre_agent|16384`，port 8000 clear，下一次必須從 Safety Preflight 全新重跑，不可沿用任何部分結果。
+- Final-gate attempt 12 再度通過所有 pre-live gates，並建立第二個 bounded `FAILED` event；但 shutdown helper 先等 INT 15 秒、再給 TERM 15 秒，與 Worker 的 30 秒 subscriber pull 在邊界競態，第一次誤判仍存活，mandatory cleanup 隨即成功 reap 同一 PID。
+- Shutdown helper 已改為 TERM first 35 秒、INT fallback 5 秒，且每次 signal 前與每個最後 sleep 後都重驗 exact retained job ownership；合成 boundary test 證明 final-sleep exit 會成功 reap 且不誤送 INT。13 個 design-consistency tests、Ruff、Pyright、Bash syntax 與 diff check 全綠，independent re-review APPROVED。
+- Attempt 12 的兩個 disposable DBs 與 runtimes 已清理；目前只剩 shared `sre_agent|16384`，port 8000 clear，下一次必須從 Safety Preflight 全新重跑，不可沿用任何部分結果。
 
 ## Superpowers Plan
 
@@ -45,7 +47,7 @@
 
 `docs/superpowers/plans/2026-08-26-backend-runtime-simplification-implementation.md` 是較早的 implementation plan；目前 correction plan 已接管，不要回到舊計畫。
 
-目前執行位置：**Task 7 final fresh rerun；bounded publish 與 catalog assertion blockers 均已修正並通過 independent review，所有 disposable DBs 已清理，必須從 Safety Preflight 全新重跑。**
+目前執行位置：**Task 7 final fresh rerun；bounded publish、catalog assertion 與 shutdown-boundary blockers 均已修正並通過 independent review，所有 disposable DBs 已清理，必須從 Safety Preflight 全新重跑。**
 
 ## Completed
 
@@ -69,9 +71,9 @@
 
 ## In Progress
 
-### Task 7 — post-fix full release gate（attempt 11 被錯誤 catalog predicate 停止）
+### Task 7 — post-fix full release gate（attempt 12 被 Worker shutdown boundary race 停止）
 
-**attempt 11 fresh evidence（已清理，不可作為完成憑證）：**
+**attempt 12 fresh evidence（已清理，不可作為完成憑證）：**
 
 - Safety preflight ✅
 - Step 1：兩個 disposable DB 四 gate migration ✅（已清理）
@@ -79,15 +81,15 @@
 - Step 2 Worker 434 passed、1 skipped ✅；contracts 56 passed ✅。
 - Static、Compose/Kustomize/four Jobs、canonical evidence smoke ✅。
 - Catalog seed/assertion ✅；第一筆 live 202/PUBLISHED/SUCCEEDED/PARTIAL ✅。
-- 第二筆 live/recovery ✅：bounded `FAILED` event、restart no-auto-replay、manual recovery、terminal report/no-duplicate 全部通過。
-- Catalog ❌：procedure 使用錯誤的 legacy `relispartition=true` predicate；已改為 public-schema `p/f` 並新增 regression，independent review APPROVED。
+- 第二筆 bounded `FAILED` event ✅；shutdown ❌：TERM 僅剩 15 秒，與 30 秒 pull 邊界競態。已改為 TERM 35 秒 + INT 5 秒、signal 前/最後 sleep 後重新確認 exact job，synthetic regression 與 independent re-review APPROVED。
 
-**尚未完成（因 catalog predicate 與 PostgreSQL 語意矛盾而正確停止）：**
+**尚未完成（因 Worker shutdown boundary race 而正確停止）：**
 
-- Step 5：以修正後 predicate fresh 驗證 catalog（六 `r/f` + 六 `p/f`）。
+- Step 4：restart/no-auto-replay/manual recovery/terminal processing。
+- Step 5：fresh 驗證 catalog（六 `r/f` + 六 `p/f`）。
 - Step 6：Cleanup（此次已清理，下次亦需清理）。
 
-**report 檔案目前狀態：** `.superpowers/sdd/2026-08-28-immutable-migration-rollout-correction/task-7-report.md` 已追加 attempt 11 的 NOT READY、catalog blocker 與 cleanup 證據；下一次仍需以新的 fresh section 記錄完整 rerun。
+**report 檔案目前狀態：** `.superpowers/sdd/2026-08-28-immutable-migration-rollout-correction/task-7-report.md` 已追加 attempt 12 的 NOT READY、shutdown-boundary blocker 與 cleanup 證據；下一次仍需以新的 fresh section 記錄完整 rerun。
 
 ## Next Action
 

@@ -1,3 +1,5 @@
+import subprocess
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -259,6 +261,85 @@ def test_task7_catalog_gate_checks_public_top_level_legacy_parents() -> None:
     assert "$3 == \"t\"" not in task7_catalog
     assert task7_catalog.count("')\" -eq 6") == 2
     assert task7_catalog.count("')\" -eq 12") == 1
+
+
+def test_task7_shutdown_is_term_first_bounded_and_retained_job_only() -> None:
+    """Task 7 must give a blocked subscriber one full pull window to stop."""
+    shutdown = _block_after(
+        _text(ROLLOUT_PLAN), "task7_shutdown_term_poll_attempts=35"
+    ).split("task7_preflight() {", maxsplit=1)[0]
+
+    assert "task7_shutdown_fallback_poll_attempts=5" in shutdown
+    assert "task7_shutdown_poll_seconds=1" in shutdown
+    assert "for task7_shutdown_signal in TERM INT; do" in shutdown
+    assert (
+        "TERM) task7_shutdown_attempt_limit=$task7_shutdown_term_poll_attempts"
+        in shutdown
+    )
+    assert (
+        "*) task7_shutdown_attempt_limit=$task7_shutdown_fallback_poll_attempts"
+        in shutdown
+    )
+    ownership_check = shutdown.index(
+        'task7_exact_job_active "$task7_shutdown_pid"'
+    )
+    signal_loop = shutdown.index("for task7_shutdown_signal in TERM INT; do")
+    assert ownership_check < signal_loop
+    assert 'jobs -pr | grep -Fx "$task7_job_pid"' in shutdown
+    assert 'jobs -ps | grep -Fx "$task7_job_pid"' in shutdown
+    assert (
+        'kill -"$task7_shutdown_signal" "$task7_shutdown_pid"' in shutdown
+    )
+    assert (
+        "for task7_shutdown_signal in TERM INT; do\n"
+        '      task7_exact_job_active "$task7_shutdown_pid"'
+        in shutdown
+    )
+    assert (
+        "task7_shutdown_attempt=$((task7_shutdown_attempt + 1))\n"
+        "      done\n"
+        '      task7_exact_job_active "$task7_shutdown_pid"'
+        in shutdown
+    )
+    for forbidden in ("pkill", "killall", "kill -KILL", "SIGKILL"):
+        assert forbidden not in shutdown
+
+
+def test_task7_shutdown_reaps_child_exiting_during_final_poll_sleep() -> None:
+    """The post-window ownership check must observe the final sleep exit."""
+    shutdown = _block_after(
+        _text(ROLLOUT_PLAN), "task7_shutdown_term_poll_attempts=35"
+    ).split("task7_preflight() {", maxsplit=1)[0]
+    script = f"""
+set +e
+{shutdown}
+task7_shutdown_term_poll_attempts=1
+task7_shutdown_fallback_poll_attempts=1
+task7_shutdown_poll_seconds=0.2
+(
+  trap 'printf "unexpected INT\\n" >&2; exit 99' INT
+  trap '' TERM
+  printf 'ready\\n' > "$1"
+  sleep 0.1
+) &
+probe_pid=$!
+while [ ! -s "$1" ]; do sleep 0.01; done
+task7_shutdown_exact_pid "$probe_pid" 'synthetic-final-sleep'
+"""
+    with tempfile.TemporaryDirectory() as directory:
+        ready = Path(directory) / "ready"
+        result = subprocess.run(
+            ["bash", "-c", script, "task7-shutdown-regression", str(ready)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert "synthetic-final-sleep PID" in result.stdout
+    assert "reaped with status 0" in result.stdout
+    assert "unexpected INT" not in result.stderr
 
 
 def test_docs_do_not_reference_removed_runtime_commands() -> None:
