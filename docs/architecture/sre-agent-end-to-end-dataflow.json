@@ -1,0 +1,288 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "SRE Agent 2.0 端到端資料流",
+    "output": "docs/architecture/sre-agent-end-to-end-dataflow.html",
+    "quality_profile": "showcase",
+    "viewBox": [1080, 630],
+    "views": [
+      {
+        "id": "durable-ingestion",
+        "label": "可持久化接收",
+        "focus": ["grafana_payload", "ingestion", "incident_outbox", "pubsub_job"],
+        "note": "原始告警與正規化資料先落庫；只有 transaction commit 後才把 RCA 工作送入 Pub/Sub。"
+      },
+      {
+        "id": "evidence-first",
+        "label": "Evidence-first 分析",
+        "focus": ["worker_gate", "mcp_telemetry", "evidence_store", "specialists", "root_rca"],
+        "note": "安全範圍與 capability 由 deterministic Python 驗證，完整 evidence 先保存再提供受限 chunks。"
+      },
+      {
+        "id": "operator-consumption",
+        "label": "報告查閱",
+        "focus": ["rca_report", "operator_api", "angular_ui"],
+        "note": "Operator API 從 PostgreSQL read model 回傳 Incident、RCA report 與 trace waterfall。"
+      }
+    ]
+  },
+  "stages": [
+    {"label": "告警來源"},
+    {"label": "接收與正規化"},
+    {"label": "交易與派送"},
+    {"label": "證據與推理"},
+    {"label": "報告與查閱"}
+  ],
+  "nodes": [
+    {
+      "id": "grafana_payload",
+      "type": "external",
+      "label": "Grafana Webhook",
+      "sublabel": "raw JSON alerts",
+      "stage": 0,
+      "row": 0,
+      "width": 112,
+      "tag": "不可信輸入"
+    },
+    {
+      "id": "ingestion",
+      "type": "security",
+      "label": "驗證與正規化",
+      "sublabel": "token / dedup / identity v2",
+      "stage": 1,
+      "row": 0,
+      "width": 170,
+      "tag": "bounded body"
+    },
+    {
+      "id": "incident_outbox",
+      "type": "database",
+      "label": "Incident + RCA work + Outbox",
+      "sublabel": "同一 PostgreSQL transaction",
+      "stage": 2,
+      "row": 0,
+      "width": 190,
+      "tag": "durable commit"
+    },
+    {
+      "id": "pubsub_job",
+      "type": "messagebus",
+      "label": "RCA_RUN_REQUESTED",
+      "sublabel": "Cloud Pub/Sub rca-jobs",
+      "stage": 2,
+      "row": 1,
+      "width": 180,
+      "yOffset": -22,
+      "tag": "commit 後發布"
+    },
+    {
+      "id": "worker_gate",
+      "type": "security",
+      "label": "Worker 安全與能力路由",
+      "sublabel": "scope / manifest / schema / budget",
+      "stage": 3,
+      "row": 0,
+      "width": 180,
+      "tag": "deterministic Python"
+    },
+    {
+      "id": "mcp_telemetry",
+      "type": "external",
+      "label": "唯讀 MCP Telemetry",
+      "sublabel": "metrics / traces / logs",
+      "stage": 3,
+      "row": 1,
+      "width": 170,
+      "yOffset": -22,
+      "tag": "endpoint-bound"
+    },
+    {
+      "id": "evidence_store",
+      "type": "database",
+      "label": "Evidence records",
+      "sublabel": "raw + structured JSON",
+      "stage": 3,
+      "row": 2,
+      "width": 170,
+      "yOffset": -44,
+      "tag": "先 commit 後 receipt"
+    },
+    {
+      "id": "specialists",
+      "type": "backend",
+      "label": "ADK Specialists",
+      "sublabel": "Metrics / Trace / Log",
+      "stage": 3,
+      "row": 3,
+      "width": 170,
+      "yOffset": -66,
+      "tag": "validated observations"
+    },
+    {
+      "id": "root_rca",
+      "type": "cloud",
+      "label": "Root RCA synthesis",
+      "sublabel": "tools=[] / opaque references",
+      "stage": 3,
+      "row": 4,
+      "width": 170,
+      "yOffset": -88,
+      "tag": "structured report"
+    },
+    {
+      "id": "rca_report",
+      "type": "database",
+      "label": "RCA report + audit",
+      "sublabel": "PostgreSQL read model",
+      "stage": 4,
+      "row": 4,
+      "width": 180,
+      "yOffset": -88,
+      "tag": "COMPLETE / PARTIAL / FAILED"
+    },
+    {
+      "id": "operator_api",
+      "type": "backend",
+      "label": "Operator REST API",
+      "sublabel": "incident / report / trace waterfall",
+      "stage": 4,
+      "row": 2,
+      "width": 180,
+      "yOffset": -44,
+      "tag": "/api/v1"
+    },
+    {
+      "id": "angular_ui",
+      "type": "frontend",
+      "label": "Angular 維運介面",
+      "sublabel": "繁體中文 / 手動重新整理",
+      "stage": 4,
+      "row": 0,
+      "width": 180,
+      "tag": "SRE 消費端"
+    }
+  ],
+  "flows": [
+    {
+      "id": "webhook_body",
+      "from": "grafana_payload",
+      "to": "ingestion",
+      "label": "POST body + Bearer Token",
+      "classification": "untrusted",
+      "variant": "security",
+      "labelAt": [208, 200]
+    },
+    {
+      "id": "canonical_alerts",
+      "from": "ingestion",
+      "to": "incident_outbox",
+      "label": "alert records",
+      "classification": "raw + canonical",
+      "variant": "emphasis",
+      "labelAt": [423, 200]
+    },
+    {
+      "id": "outbox_message",
+      "from": "incident_outbox",
+      "to": "pubsub_job",
+      "label": "RcaJobMessage v1",
+      "classification": "after commit",
+      "variant": "emphasis",
+      "labelAt": [530, 200]
+    },
+    {
+      "id": "worker_delivery",
+      "from": "pubsub_job",
+      "to": "worker_gate",
+      "label": "job delivery",
+      "classification": "at-least-once",
+      "variant": "emphasis",
+      "labelAt": [638, 200]
+    },
+    {
+      "id": "approved_query",
+      "from": "worker_gate",
+      "to": "mcp_telemetry",
+      "label": "read-only query",
+      "classification": "safe scope",
+      "variant": "security",
+      "route": "straight",
+      "labelAt": [745, 200]
+    },
+    {
+      "id": "persist_telemetry",
+      "from": "mcp_telemetry",
+      "to": "evidence_store",
+      "label": "bounded raw + structured evidence",
+      "classification": "max 2 MiB",
+      "variant": "emphasis",
+      "route": "straight",
+      "labelDy": 24
+    },
+    {
+      "id": "evidence_chunks",
+      "from": "evidence_store",
+      "to": "specialists",
+      "label": "opaque receipt + run-owned chunks",
+      "classification": "citation bound",
+      "variant": "security",
+      "route": "straight",
+      "labelDy": 24
+    },
+    {
+      "id": "validated_observations",
+      "from": "specialists",
+      "to": "root_rca",
+      "label": "validated observations + references",
+      "classification": "no raw telemetry",
+      "variant": "emphasis",
+      "labelAt": [745, 478]
+    },
+    {
+      "id": "persist_report",
+      "from": "root_rca",
+      "to": "rca_report",
+      "label": "RCA report draft + audit",
+      "classification": "durable",
+      "variant": "emphasis",
+      "labelAt": [850, 570]
+    },
+    {
+      "id": "report_read_model",
+      "from": "rca_report",
+      "to": "operator_api",
+      "label": "report / evidence projection",
+      "classification": "read-only",
+      "variant": "default"
+    },
+    {
+      "id": "rest_response",
+      "from": "operator_api",
+      "to": "angular_ui",
+      "label": "REST JSON response",
+      "classification": "operator view",
+      "variant": "default"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Durable 接收與派送",
+      "items": [
+        "Webhook 先完成 PostgreSQL commit",
+        "Outbox 發布失敗可由 Operator API 補送",
+        "dedup key 防止建立重複 RCA 工作"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Evidence-first 安全分析",
+      "items": [
+        "Worker 固定 endpoint、tool、scope、window、query 與 retry policy",
+        "Evidence 保存一次；chunks 由 structured JSON 重建",
+        "Root 只接收 validated observations 與 opaque references"
+      ]
+    }
+  ]
+}

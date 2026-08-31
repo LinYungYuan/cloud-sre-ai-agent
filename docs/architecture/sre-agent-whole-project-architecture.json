@@ -1,0 +1,265 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "SRE Agent 2.0 整體專案架構",
+    "output": "docs/architecture/sre-agent-whole-project-architecture.html",
+    "quality_profile": "showcase",
+    "viewBox": [1360, 720],
+    "repository": {
+      "url": "https://github.com/LinYungYuan/cloud-sre-ai-agent.git",
+      "revision": "2ddb50878400ff380e9416cd3af9a3f5a3718e0a"
+    },
+    "views": [
+      {
+        "id": "alert-ingestion",
+        "label": "告警接收與持久化",
+        "focus": ["grafana", "backend", "postgres"],
+        "note": "Grafana Webhook 經驗證與正規化後，在同一交易建立 Incident、RCA 工作與 Outbox event。"
+      },
+      {
+        "id": "async-rca",
+        "label": "非同步 RCA 分析",
+        "focus": ["backend", "pubsub", "worker", "telemetry_mcp", "gemini", "postgres"],
+        "note": "交易 commit 後即時發布 Pub/Sub；Worker 以唯讀 MCP 證據與受控模型流程產生 RCA。"
+      },
+      {
+        "id": "operator-read",
+        "label": "維運查詢路徑",
+        "focus": ["operator", "frontend", "backend", "postgres"],
+        "note": "Angular 介面只透過 Operator REST API 查詢事件、RCA 報告與 trace waterfall。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "grafana",
+      "type": "external",
+      "label": "Grafana",
+      "sublabel": "Alert Webhook 來源",
+      "pos": [40, 150],
+      "size": [170, 68],
+      "tag": "Bearer Token"
+    },
+    {
+      "id": "operator",
+      "type": "external",
+      "label": "SRE 維運人員",
+      "sublabel": "瀏覽器",
+      "pos": [40, 510],
+      "size": [170, 68]
+    },
+    {
+      "id": "frontend",
+      "type": "frontend",
+      "label": "Angular 操作介面",
+      "sublabel": "Angular 22 / zh-TW",
+      "pos": [290, 510],
+      "size": [180, 68],
+      "tag": "手動重新整理",
+      "sources": [
+        {
+          "path": "frontend/src/app/core/api/operator-api.client.ts",
+          "label": "Operator API client"
+        }
+      ]
+    },
+    {
+      "id": "backend",
+      "type": "backend",
+      "label": "FastAPI Backend",
+      "sublabel": "Webhook + Operator REST API",
+      "pos": [540, 300],
+      "size": [190, 76],
+      "tag": "ASGI :8000",
+      "sources": [
+        {
+          "path": "backend/src/sre_agent/api/main.py",
+          "label": "ASGI 入口"
+        },
+        {
+          "path": "backend/src/sre_agent/application/alerts/ingest_grafana_alerts.py",
+          "label": "告警接收"
+        },
+        {
+          "path": "backend/src/sre_agent/application/outbox/publish_events.py",
+          "label": "Outbox 發布"
+        }
+      ]
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "Cloud SQL PostgreSQL",
+      "sublabel": "事件、工作、證據與報告",
+      "pos": [800, 100],
+      "size": [200, 76],
+      "tag": "PostgreSQL 18",
+      "sources": [
+        {
+          "path": "contracts/database/table-ownership.yaml",
+          "label": "資料表所有權"
+        }
+      ]
+    },
+    {
+      "id": "pubsub",
+      "type": "messagebus",
+      "label": "Cloud Pub/Sub",
+      "sublabel": "rca-jobs topic / subscription",
+      "pos": [800, 300],
+      "size": [200, 76],
+      "tag": "至少一次投遞"
+    },
+    {
+      "id": "worker",
+      "type": "backend",
+      "label": "RCA Worker",
+      "sublabel": "Deterministic coordinator + ADK",
+      "pos": [1070, 300],
+      "size": [210, 76],
+      "tag": "Metrics / Trace / Log / Root",
+      "sources": [
+        {
+          "path": "rca-worker/src/sre_rca_worker/workers/rca_worker.py",
+          "label": "Pub/Sub worker"
+        },
+        {
+          "path": "rca-worker/src/sre_rca_worker/application/rca/processor.py",
+          "label": "RCA coordinator"
+        },
+        {
+          "path": "rca-worker/src/sre_rca_worker/application/rca/evidence_tools.py",
+          "label": "Evidence tools"
+        }
+      ]
+    },
+    {
+      "id": "telemetry_mcp",
+      "type": "external",
+      "label": "Telemetry MCP 端點",
+      "sublabel": "Metrics / Trace / Log",
+      "pos": [1070, 100],
+      "size": [210, 76],
+      "tag": "唯讀 allowlist"
+    },
+    {
+      "id": "gemini",
+      "type": "cloud",
+      "label": "Gemini 模型",
+      "sublabel": "Specialist + Root synthesis",
+      "pos": [1070, 510],
+      "size": [210, 76],
+      "tag": "結構化輸出"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "GCP 執行與受管服務邊界",
+      "wraps": ["frontend", "backend", "postgres", "pubsub", "worker", "gemini"]
+    },
+    {
+      "kind": "security-group",
+      "label": "Worker 唯讀分析邊界",
+      "wraps": ["worker", "telemetry_mcp", "gemini"]
+    }
+  ],
+  "connections": [
+    {
+      "id": "grafana_webhook",
+      "from": "grafana",
+      "to": "backend",
+      "label": "POST Webhook + Bearer Token",
+      "variant": "security"
+    },
+    {
+      "id": "operator_browser",
+      "from": "operator",
+      "to": "frontend",
+      "label": "HTTPS",
+      "variant": "default"
+    },
+    {
+      "id": "frontend_rest",
+      "from": "frontend",
+      "to": "backend",
+      "label": "REST /api/v1",
+      "variant": "default"
+    },
+    {
+      "id": "backend_database",
+      "from": "backend",
+      "to": "postgres",
+      "label": "transactional write + read model",
+      "variant": "emphasis"
+    },
+    {
+      "id": "backend_pubsub",
+      "from": "backend",
+      "to": "pubsub",
+      "label": "commit 後發布 RCA_RUN_REQUESTED",
+      "variant": "emphasis",
+      "labelAt": [765, 390]
+    },
+    {
+      "id": "pubsub_worker",
+      "from": "pubsub",
+      "to": "worker",
+      "label": "RCA job message",
+      "variant": "emphasis",
+      "labelAt": [1035, 390]
+    },
+    {
+      "id": "worker_database",
+      "from": "worker",
+      "to": "postgres",
+      "label": "claim job；保存 evidence / report",
+      "variant": "default"
+    },
+    {
+      "id": "worker_mcp",
+      "from": "worker",
+      "to": "telemetry_mcp",
+      "label": "endpoint-bound 唯讀查詢與 telemetry",
+      "variant": "security"
+    },
+    {
+      "id": "worker_gemini",
+      "from": "worker",
+      "to": "gemini",
+      "label": "受控 context / validated JSON",
+      "variant": "default",
+      "labelAt": [1175, 390]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "三個獨立部署套件",
+      "items": [
+        "frontend、backend、rca-worker 可獨立建置與發布",
+        "contracts 只保存版本化 API、message 與資料庫契約",
+        "套件不得互相匯入原始碼"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "可靠非同步邊界",
+      "items": [
+        "Incident、RCA work 與 Outbox event 在同一 PostgreSQL transaction 建立",
+        "Backend 在 request transaction commit 後即時發布 Pub/Sub",
+        "失敗事件由受保護的 Operator operations endpoint 明確補送"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Evidence-first RCA",
+      "items": [
+        "Worker 決定 endpoint、tool、scope、window 與 retry policy",
+        "模型只能呼叫 run-scoped collect_evidence 與 read_evidence_chunk",
+        "Root 只接收已驗證 observations 與 opaque evidence references"
+      ]
+    }
+  ]
+}
