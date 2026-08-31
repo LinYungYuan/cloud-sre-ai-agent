@@ -12,6 +12,7 @@ BASE_DIR = REPOSITORY_ROOT / "deploy" / "k8s" / "base"
 JOBS_DIR = REPOSITORY_ROOT / "deploy" / "k8s" / "jobs"
 DEPLOYMENT_RUNBOOK = REPOSITORY_ROOT / "deploy" / "k8s" / "README.md"
 COMPOSE_ENV_EXAMPLE = REPOSITORY_ROOT / ".env.compose.example"
+MIGRATION_RUNNER = REPOSITORY_ROOT / "deploy" / "k8s" / "run-migrations.sh"
 
 # outbox-deployment.yaml 與 partition-cronjob.yaml 已移除
 EXPECTED_RESOURCE_FILES = {
@@ -128,6 +129,109 @@ def _published_port(service: dict[str, Any]) -> tuple[str, int]:
     ports = service["ports"]
     assert len(ports) == 1
     return ports[0]["published"], ports[0]["target"]
+
+
+def _fake_kubectl(tmp_path: Path) -> tuple[Path, Path]:
+    log_path = tmp_path / "kubectl.log"
+    fake_path = tmp_path / "kubectl"
+    fake_path.write_text(
+        """#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "$KUBECTL_LOG"
+last_arg=''
+for argument in "$@"; do
+  last_arg="$argument"
+done
+if [ "$1" = "wait" ] && [ "${KUBECTL_FAIL_JOB:-}" = "$last_arg" ]; then
+  exit 42
+fi
+if [ "$1" = "create" ]; then
+  case "$3" in
+    *backend-0002*) printf 'backend-0002-job' ;;
+    *worker-0002*) printf 'worker-0002-job' ;;
+    *backend-0003*) printf 'backend-0003-job' ;;
+    *worker-0003*) printf 'worker-0003-job' ;;
+    *) exit 64 ;;
+  esac
+fi
+""",
+        encoding="utf-8",
+    )
+    fake_path.chmod(0o755)
+    return fake_path, log_path
+
+
+def test_migration_runner_creates_and_waits_for_all_four_gates_in_order(
+    tmp_path: Path,
+) -> None:
+    assert MIGRATION_RUNNER.is_file()
+    fake_kubectl, log_path = _fake_kubectl(tmp_path)
+    environment = {
+        **os.environ,
+        "KUBECTL_BIN": str(fake_kubectl),
+        "KUBECTL_LOG": str(log_path),
+        "MIGRATION_JOB_TIMEOUT": "9m",
+    }
+
+    completed = subprocess.run(
+        [str(MIGRATION_RUNNER)],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    calls = log_path.read_text(encoding="utf-8").replace(
+        str(REPOSITORY_ROOT), "<ROOT>"
+    ).splitlines()
+    assert calls == [
+        "apply -f <ROOT>/deploy/k8s/base/serviceaccounts.yaml",
+        "create -f <ROOT>/deploy/k8s/jobs/backend-0002-migration-job.yaml -o jsonpath={.metadata.name}",
+        "wait --for=condition=complete --timeout=9m job/backend-0002-job",
+        "create -f <ROOT>/deploy/k8s/jobs/worker-0002-migration-job.yaml -o jsonpath={.metadata.name}",
+        "wait --for=condition=complete --timeout=9m job/worker-0002-job",
+        "create -f <ROOT>/deploy/k8s/jobs/backend-0003-migration-job.yaml -o jsonpath={.metadata.name}",
+        "wait --for=condition=complete --timeout=9m job/backend-0003-job",
+        "create -f <ROOT>/deploy/k8s/jobs/worker-0003-migration-job.yaml -o jsonpath={.metadata.name}",
+        "wait --for=condition=complete --timeout=9m job/worker-0003-job",
+    ]
+
+
+def test_migration_runner_stops_and_reports_the_failed_gate(tmp_path: Path) -> None:
+    assert MIGRATION_RUNNER.is_file()
+    fake_kubectl, log_path = _fake_kubectl(tmp_path)
+    environment = {
+        **os.environ,
+        "KUBECTL_BIN": str(fake_kubectl),
+        "KUBECTL_LOG": str(log_path),
+        "KUBECTL_FAIL_JOB": "job/worker-0002-job",
+    }
+
+    completed = subprocess.run(
+        [str(MIGRATION_RUNNER)],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    calls = log_path.read_text(encoding="utf-8").replace(
+        str(REPOSITORY_ROOT), "<ROOT>"
+    ).splitlines()
+    assert calls == [
+        "apply -f <ROOT>/deploy/k8s/base/serviceaccounts.yaml",
+        "create -f <ROOT>/deploy/k8s/jobs/backend-0002-migration-job.yaml -o jsonpath={.metadata.name}",
+        "wait --for=condition=complete --timeout=15m job/backend-0002-job",
+        "create -f <ROOT>/deploy/k8s/jobs/worker-0002-migration-job.yaml -o jsonpath={.metadata.name}",
+        "wait --for=condition=complete --timeout=15m job/worker-0002-job",
+        "describe job/worker-0002-job",
+        "logs job/worker-0002-job",
+    ]
+    assert "Worker 0002" in completed.stderr
 
 
 def test_compose_env_file_controls_local_host_ports() -> None:
@@ -534,32 +638,9 @@ def test_release_runbook_fails_fast_and_orders_migrations_before_rollouts() -> N
     release_commands = ordered_release.split("```bash", maxsplit=1)[1].split(
         "```", maxsplit=1
     )[0]
-    gate_pairs = (
-        (
-            "BACKEND_0002_JOB=$(kubectl create -f "
-            "deploy/k8s/jobs/backend-0002-migration-job.yaml",
-            'kubectl wait --for=condition=complete --timeout=15m "job/${BACKEND_0002_JOB}"',
-        ),
-        (
-            "WORKER_0002_JOB=$(kubectl create -f "
-            "deploy/k8s/jobs/worker-0002-migration-job.yaml",
-            'kubectl wait --for=condition=complete --timeout=15m "job/${WORKER_0002_JOB}"',
-        ),
-        (
-            "BACKEND_0003_JOB=$(kubectl create -f "
-            "deploy/k8s/jobs/backend-0003-migration-job.yaml",
-            'kubectl wait --for=condition=complete --timeout=15m "job/${BACKEND_0003_JOB}"',
-        ),
-        (
-            "WORKER_0003_JOB=$(kubectl create -f "
-            "deploy/k8s/jobs/worker-0003-migration-job.yaml",
-            'kubectl wait --for=condition=complete --timeout=15m "job/${WORKER_0003_JOB}"',
-        ),
-    )
     ordered_commands = [
         "set -euo pipefail",
-        "kubectl apply -f deploy/k8s/base/serviceaccounts.yaml",
-        *(command for pair in gate_pairs for command in pair),
+        "deploy/k8s/run-migrations.sh",
         "kubectl apply -k deploy/k8s/base",
         "kubectl rollout restart deployment/sre-agent-backend",
         "kubectl rollout restart deployment/sre-agent-frontend",
@@ -577,6 +658,7 @@ def test_release_runbook_fails_fast_and_orders_migrations_before_rollouts() -> N
     for forbidden in (
         "backend-migration-job.yaml",
         "worker-migration-job.yaml",
+        "kubectl create -f deploy/k8s/jobs/",
         "upgrade head",
         "alembic stamp",
     ):

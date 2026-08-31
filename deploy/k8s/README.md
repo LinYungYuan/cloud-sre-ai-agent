@@ -43,23 +43,15 @@ KSA-to-GSA 綁定與 IAM role 由環境負責。請分離以下預期職責：
 
 ## 依序發布
 
-請從已產生的發布 bundle 根目錄執行以下命令。此順序具有約束力：任何命令失敗都必須
-立即停止。開始前停止 Backend、Worker 與所有 writes。每一個 Job 完成後，依
-[`docs/database/postgresql-schema.md`](../../docs/database/postgresql-schema.md) 的唯讀
-version-table query 確認兩條 stream，才可建立下一個 Job。第四個 Job 的 catalog
-postcondition 通過前，不得套用 base 或啟動任何 runtime。
+請從已產生的發布 bundle 根目錄執行以下命令。開始前停止 Backend、Worker 與所有
+writes。`run-migrations.sh` 是單一操作入口；它會套用 ServiceAccount，並依序建立及
+等待 Backend `0002`、Worker `0002`、Backend `0003`、Worker `0003` 四個獨立 Job。
+任何 Job 失敗時，runner 會立即停止、輸出該 Job 的 describe 與 log，且不會建立後續
+Job。第四個 Job 的 catalog postcondition 通過前，不得套用 base 或啟動任何 runtime。
 
 ```bash
 set -euo pipefail
-kubectl apply -f deploy/k8s/base/serviceaccounts.yaml
-BACKEND_0002_JOB=$(kubectl create -f deploy/k8s/jobs/backend-0002-migration-job.yaml -o jsonpath='{.metadata.name}')
-kubectl wait --for=condition=complete --timeout=15m "job/${BACKEND_0002_JOB}"
-WORKER_0002_JOB=$(kubectl create -f deploy/k8s/jobs/worker-0002-migration-job.yaml -o jsonpath='{.metadata.name}')
-kubectl wait --for=condition=complete --timeout=15m "job/${WORKER_0002_JOB}"
-BACKEND_0003_JOB=$(kubectl create -f deploy/k8s/jobs/backend-0003-migration-job.yaml -o jsonpath='{.metadata.name}')
-kubectl wait --for=condition=complete --timeout=15m "job/${BACKEND_0003_JOB}"
-WORKER_0003_JOB=$(kubectl create -f deploy/k8s/jobs/worker-0003-migration-job.yaml -o jsonpath='{.metadata.name}')
-kubectl wait --for=condition=complete --timeout=15m "job/${WORKER_0003_JOB}"
+deploy/k8s/run-migrations.sh
 kubectl apply -k deploy/k8s/base
 kubectl rollout restart deployment/sre-agent-backend
 kubectl rollout restart deployment/sre-agent-frontend
@@ -69,15 +61,15 @@ kubectl rollout status deployment/sre-agent-frontend --timeout=5m
 kubectl rollout status deployment/sre-agent-rca-worker --timeout=5m
 ```
 
-每個 migration template 都使用 `generateName`，因此每次發布都會建立獨立且不可變的
-Job 紀錄。Kubernetes 會保留已完成的 Job 24 小時。若 Job 失敗，請先檢查，再建立
-新的 Job 重試：
+每個 migration template 都使用 `generateName`，因此每次發布仍會保留四筆獨立且
+不可變的 Job 紀錄。Kubernetes 會保留已完成的 Job 24 小時。Runner 預設每個 Job
+等待 15 分鐘，可透過 `MIGRATION_JOB_TIMEOUT` 調整；若失敗，可使用 runner 已輸出的
+Job 名稱再次檢查，處理原因後重新執行同一個 runner：
 
 ```bash
-for job in "$BACKEND_0002_JOB" "$WORKER_0002_JOB" "$BACKEND_0003_JOB" "$WORKER_0003_JOB"; do
-  kubectl describe "job/${job}"
-  kubectl logs "job/${job}"
-done
+kubectl describe "job/<失敗的 Job 名稱>"
+kubectl logs "job/<失敗的 Job 名稱>"
+deploy/k8s/run-migrations.sh
 ```
 
 ## 路由與正式環境限制
