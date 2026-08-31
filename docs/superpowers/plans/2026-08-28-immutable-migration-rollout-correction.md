@@ -517,30 +517,216 @@
 
 - [ ] **Step 1: Establish a fresh disposable acceptance database with explicit revisions (2–5 minutes)**
 
-  Run each command separately. The two fixed names below are test-only targets; `createdb` must fail and the release gate must stop if either already exists. Never reuse, truncate, migrate, or drop the shared `sre_agent` database.
+  Open and retain one Bash terminal named `Task 7 verification`; all task-specific variables below live in that terminal through Step 6. Discover running containers by their exact published host ports, not by an implicit Compose project. Zero or multiple candidates for either port is a hard stop. Inspect and validate the candidates against the repository's Postgres/Pub/Sub service signatures, record their exact names, bindings, and shared database OID, and never substitute a different container later. The Postgres validation deliberately accepts the inspected standalone project container without requiring Compose labels; the image, command, environment, writable data mount, binding, and database catalog together are its ownership proof. Pub/Sub must carry this repository's exact Compose service/config-file labels and expected emulator command.
 
   ```bash
-  docker compose --env-file .env.compose.example up -d postgres pubsub-emulator
-  docker compose --env-file .env.compose.example exec -T postgres createdb -U postgres sre_agent_release_acceptance
-  docker compose --env-file .env.compose.example exec -T postgres createdb -U postgres sre_agent_release_tests
-  (cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_acceptance BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0002_grafana_normalization_v2)
-  (cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_acceptance RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0002_adk_specialist_analysis)
-  (cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_acceptance BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0003_non_partition_runtime_tables)
-  (cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_acceptance RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0003_validate_ordinary_runtime_tables)
+  # Run this block in Bash and keep this named terminal open through cleanup.
+  set +e
+  set -o pipefail
+  task7_gate_failed='false'
+  task7_cleanup_failed='false'
+  task7_fail() {
+    echo "$1" >&2
+    task7_gate_failed='true'
+    return 1
+  }
+  task7_require_open_gate() {
+    if [ "$task7_gate_failed" != 'false' ]; then
+      echo "refusing Task 7 phase $1 because an earlier phase failed; enter Step 6 cleanup" >&2
+      return 1
+    fi
+  }
+  task7_run_phase() {
+    task7_phase_name=$1
+    shift
+    task7_require_open_gate "$task7_phase_name" || return 1
+    "$@" || {
+      if [ "$task7_gate_failed" = 'false' ]; then
+        task7_fail "Task 7 phase failed: $task7_phase_name"
+      fi
+      return 1
+    }
+  }
+  task7_shutdown_poll_attempts=15
+  task7_shutdown_poll_seconds=1
+  task7_exact_job_active() {
+    local task7_job_pid=${1:-}
+    [ -n "$task7_job_pid" ] || return 1
+    kill -0 "$task7_job_pid" 2>/dev/null || return 1
+    jobs -pr | grep -Fx "$task7_job_pid" >/dev/null && return 0
+    jobs -ps | grep -Fx "$task7_job_pid" >/dev/null && return 0
+    echo "PID $task7_job_pid is live but is not a retained Bash job; refusing to signal it" >&2
+    return 2
+  }
+  task7_reap_exact_job() {
+    local task7_reap_pid=$1
+    local task7_reap_label=$2
+    local task7_reap_status
+    wait "$task7_reap_pid" 2>/dev/null
+    task7_reap_status=$?
+    printf '%s PID %s reaped with status %s\n' "$task7_reap_label" "$task7_reap_pid" "$task7_reap_status"
+    return 0
+  }
+  task7_shutdown_exact_pid() {
+    local task7_shutdown_pid=${1:-}
+    local task7_shutdown_label=${2:-runtime}
+    local task7_shutdown_signal
+    local task7_shutdown_attempt
+    local task7_shutdown_active_status
+    [ -n "$task7_shutdown_pid" ] || return 0
+    task7_exact_job_active "$task7_shutdown_pid"
+    task7_shutdown_active_status=$?
+    case "$task7_shutdown_active_status" in
+      0) ;;
+      1) task7_reap_exact_job "$task7_shutdown_pid" "$task7_shutdown_label"; return 0 ;;
+      *) return 1 ;;
+    esac
+    for task7_shutdown_signal in INT TERM; do
+      kill -"$task7_shutdown_signal" "$task7_shutdown_pid" 2>/dev/null || {
+        task7_exact_job_active "$task7_shutdown_pid"
+        task7_shutdown_active_status=$?
+        [ "$task7_shutdown_active_status" -eq 1 ] \
+          && { task7_reap_exact_job "$task7_shutdown_pid" "$task7_shutdown_label"; return 0; }
+        echo "failed to signal exact $task7_shutdown_label PID $task7_shutdown_pid with $task7_shutdown_signal" >&2
+        return 1
+      }
+      task7_shutdown_attempt=0
+      while [ "$task7_shutdown_attempt" -lt "$task7_shutdown_poll_attempts" ]; do
+        task7_exact_job_active "$task7_shutdown_pid"
+        task7_shutdown_active_status=$?
+        case "$task7_shutdown_active_status" in
+          0) ;;
+          1) task7_reap_exact_job "$task7_shutdown_pid" "$task7_shutdown_label"; return 0 ;;
+          *) return 1 ;;
+        esac
+        sleep "$task7_shutdown_poll_seconds"
+        task7_shutdown_attempt=$((task7_shutdown_attempt + 1))
+      done
+    done
+    echo "exact $task7_shutdown_label PID $task7_shutdown_pid remained alive after bounded INT and TERM shutdown" >&2
+    return 1
+  }
+
+  task7_preflight() {
+  task7_repo_compose="$PWD/docker-compose.yml"
+  task7_postgres_candidates=''
+  task7_pubsub_candidates=''
+  for task7_candidate_id in $(docker ps -q); do
+    task7_candidate_name=$(docker inspect "$task7_candidate_id" --format '{{.Name}}') \
+      || { task7_fail 'failed to inspect candidate container'; return 1; }
+    task7_candidate_name=${task7_candidate_name#/}
+    if docker inspect "$task7_candidate_id" \
+      | jq -e '.[0].HostConfig.PortBindings["5432/tcp"] // [] | any(.HostPort == "5432")' >/dev/null; then
+      task7_postgres_candidates="${task7_postgres_candidates}${task7_candidate_name}"$'\n'
+    fi
+    if docker inspect "$task7_candidate_id" \
+      | jq -e '.[0].HostConfig.PortBindings["8085/tcp"] // [] | any(.HostPort == "58085")' >/dev/null; then
+      task7_pubsub_candidates="${task7_pubsub_candidates}${task7_candidate_name}"$'\n'
+    fi
+  done
+  test "$(printf '%s' "$task7_postgres_candidates" | awk 'NF { count++ } END { print count + 0 }')" -eq 1 \
+    || { task7_fail 'expected exactly one running container publishing host 5432'; return 1; }
+  test "$(printf '%s' "$task7_pubsub_candidates" | awk 'NF { count++ } END { print count + 0 }')" -eq 1 \
+    || { task7_fail 'expected exactly one running container publishing host 58085'; return 1; }
+  task7_postgres_container=$(printf '%s' "$task7_postgres_candidates" | awk 'NF { print; exit }')
+  task7_pubsub_container=$(printf '%s' "$task7_pubsub_candidates" | awk 'NF { print; exit }')
+  task7_postgres_id=$(docker inspect "$task7_postgres_container" --format '{{.Id}}') \
+    || { task7_fail 'failed to capture Postgres identity'; return 1; }
+  task7_pubsub_id=$(docker inspect "$task7_pubsub_container" --format '{{.Id}}') \
+    || { task7_fail 'failed to capture Pub/Sub identity'; return 1; }
+
+  docker inspect "$task7_postgres_container" | jq -e '
+    .[0] as $container
+    | $container.Config.Image == "postgres:18"
+      and $container.Config.Cmd == ["postgres"]
+      and ($container.Config.Env | index("POSTGRES_DB=sre_agent") != null)
+      and ($container.Config.Env | index("POSTGRES_USER=postgres") != null)
+      and ($container.Config.Env | index("POSTGRES_HOST_AUTH_METHOD=trust") != null)
+      and ($container.Mounts | any(.Destination == "/var/lib/postgresql" and .RW == true))
+      and ($container.State.Status == "running")' >/dev/null \
+    || { task7_fail 'host 5432 container does not match inspected project Postgres service'; return 1; }
+  docker inspect "$task7_pubsub_container" | jq -e --arg compose "$task7_repo_compose" '
+    .[0] as $container
+    | $container.Config.Image == "google/cloud-sdk:578.0.0-emulators"
+      and ($container.Config.Cmd | index("--project=sre-agent-local") != null)
+      and ($container.Config.Cmd | index("--host-port=0.0.0.0:8085") != null)
+      and $container.Config.Labels["com.docker.compose.service"] == "pubsub-emulator"
+      and $container.Config.Labels["com.docker.compose.project.config_files"] == $compose
+      and ($container.State.Status == "running")' >/dev/null \
+    || { task7_fail 'host 58085 container does not match this repository Pub/Sub service'; return 1; }
+
+  task7_postgres_binding=$(docker inspect "$task7_postgres_container" \
+    | jq -ce '.[0].HostConfig.PortBindings["5432/tcp"]') \
+    || { task7_fail 'failed to capture Postgres binding'; return 1; }
+  task7_pubsub_binding=$(docker inspect "$task7_pubsub_container" \
+    | jq -ce '.[0].HostConfig.PortBindings["8085/tcp"]') \
+    || { task7_fail 'failed to capture Pub/Sub binding'; return 1; }
+  task7_shared_oid_before=$(docker exec "$task7_postgres_container" \
+    psql -U postgres -d postgres -v ON_ERROR_STOP=1 -Atc "SELECT oid FROM pg_database WHERE datname = 'sre_agent'") \
+    || { task7_fail 'failed to capture shared database OID'; return 1; }
+  test -n "$task7_shared_oid_before" \
+    || { task7_fail 'shared sre_agent database is absent'; return 1; }
+  test "$(docker exec "$task7_postgres_container" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -Atc \
+    "SELECT count(*) FROM pg_database WHERE datname IN ('sre_agent_release_acceptance','sre_agent_release_tests')")" -eq 0 \
+    || { task7_fail 'release database already exists'; return 1; }
+  printf 'postgres=%s binding=%s shared_oid=%s\npubsub=%s binding=%s\n' \
+    "$task7_postgres_container" "$task7_postgres_binding" "$task7_shared_oid_before" \
+    "$task7_pubsub_container" "$task7_pubsub_binding"
+
+  }
+
+  task7_step1_migrate_acceptance() {
+  task7_require_open_gate 'Step 1 acceptance migrations' || return 1
+  docker exec "$task7_postgres_container" createdb -U postgres sre_agent_release_acceptance \
+    || { task7_fail 'acceptance database creation failed; enter Step 6 cleanup'; return 1; }
+  docker exec "$task7_postgres_container" createdb -U postgres sre_agent_release_tests \
+    || { task7_fail 'test database creation failed; enter Step 6 cleanup'; return 1; }
+  (cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_acceptance BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0002_grafana_normalization_v2) \
+    || { task7_fail 'acceptance Backend 0002 failed'; return 1; }
+  test "$(docker exec "$task7_postgres_container" psql -U postgres -d sre_agent_release_acceptance -v ON_ERROR_STOP=1 -Atc "SELECT version_num FROM alembic_version_backend")" = '0002_grafana_normalization_v2' \
+    && test "$(docker exec "$task7_postgres_container" psql -U postgres -d sre_agent_release_acceptance -v ON_ERROR_STOP=1 -Atc "SELECT to_regclass('public.alembic_version_rca_worker')")" = '' \
+    || { task7_fail 'acceptance versions after Backend 0002 are wrong'; return 1; }
+  (cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_acceptance RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0002_adk_specialist_analysis) \
+    || { task7_fail 'acceptance Worker 0002 failed'; return 1; }
+  test "$(docker exec "$task7_postgres_container" psql -U postgres -d sre_agent_release_acceptance -v ON_ERROR_STOP=1 -AtF '|' -c "SELECT (SELECT version_num FROM alembic_version_backend), (SELECT version_num FROM alembic_version_rca_worker)")" = '0002_grafana_normalization_v2|0002_adk_specialist_analysis' \
+    || { task7_fail 'acceptance versions after Worker 0002 are wrong'; return 1; }
+  (cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_acceptance BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0003_non_partition_runtime_tables) \
+    || { task7_fail 'acceptance Backend 0003 failed'; return 1; }
+  test "$(docker exec "$task7_postgres_container" psql -U postgres -d sre_agent_release_acceptance -v ON_ERROR_STOP=1 -AtF '|' -c "SELECT (SELECT version_num FROM alembic_version_backend), (SELECT version_num FROM alembic_version_rca_worker)")" = '0003_non_partition_runtime_tables|0002_adk_specialist_analysis' \
+    || { task7_fail 'acceptance versions after Backend 0003 are wrong'; return 1; }
+  (cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_acceptance RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0003_validate_ordinary_runtime_tables) \
+    || { task7_fail 'acceptance Worker 0003 failed'; return 1; }
+  test "$(docker exec "$task7_postgres_container" psql -U postgres -d sre_agent_release_acceptance -v ON_ERROR_STOP=1 -AtF '|' -c "SELECT (SELECT version_num FROM alembic_version_backend), (SELECT version_num FROM alembic_version_rca_worker)")" = '0003_non_partition_runtime_tables|0003_validate_ordinary_runtime_tables' \
+    || { task7_fail 'acceptance final versions are wrong'; return 1; }
+  }
+
+  task7_run_phase 'preflight' task7_preflight || true
+  task7_run_phase 'Step 1 acceptance migrations' task7_step1_migrate_acceptance || true
   ```
 
-  After every migration command, query both version tables in `sre_agent_release_acceptance` and compare them with the expected current gate before continuing. Expected: all commands succeed; never replace a command with `upgrade head`.
+  Run each mutation or verification block separately and inspect its exit status before pasting the next block. After the first `createdb`, any non-zero result sets `task7_gate_failed='true'`; do not `exit`, close, or replace the named verification terminal, because Step 6 requires its captured container names, bindings, and shared OID. Skip all remaining Step 1-5 actions and go directly to Step 6. After every migration command, query both version tables through `docker exec "$task7_postgres_container" psql ... --dbname=sre_agent_release_acceptance` and compare them with the expected current gate before continuing. Expected: all commands succeed; never replace a command with `upgrade head`. From this point, every Task 7 `createdb`, `psql`, and `dropdb` command must use the captured Postgres container; every emulator outage/restart must use the captured Pub/Sub container. Never run `docker compose up/exec/stop` in Task 7.
 
 - [ ] **Step 2: Run migration, Backend, Worker, and contract suites (2–5 minutes each command)**
 
   ```bash
-  (cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0002_grafana_normalization_v2)
-  (cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0002_adk_specialist_analysis)
-  (cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0003_non_partition_runtime_tables)
-  (cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0003_validate_ordinary_runtime_tables)
-  (cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests uv run pytest tests -v)
-  (cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests uv run pytest tests -v)
-  uv run --project backend pytest contracts/compatibility-tests -v
+  task7_step2_tests() {
+  task7_require_open_gate 'Step 2 tests' || return 1
+  (cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0002_grafana_normalization_v2) \
+    || { task7_fail 'test database Backend 0002 failed'; return 1; }
+  (cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0002_adk_specialist_analysis) \
+    || { task7_fail 'test database Worker 0002 failed'; return 1; }
+  (cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0003_non_partition_runtime_tables) \
+    || { task7_fail 'test database Backend 0003 failed'; return 1; }
+  (cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests RCA_WORKER_MIGRATION_ENV_FILE=../.env.rca-worker-migration.example uv run alembic upgrade 0003_validate_ordinary_runtime_tables) \
+    || { task7_fail 'test database Worker 0003 failed'; return 1; }
+  (cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests uv run pytest tests -v) \
+    || { task7_fail 'Backend full tests failed'; return 1; }
+  (cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests uv run pytest tests -v) \
+    || { task7_fail 'Worker full tests failed'; return 1; }
+  uv run --project backend pytest contracts/compatibility-tests -v \
+    || { task7_fail 'compatibility tests failed'; return 1; }
+  }
+  task7_run_phase 'Step 2 tests' task7_step2_tests || true
   ```
 
   Expected: PASS. A test failure is routed to the owning task and that task repeats its own RED/GREEN evidence before this gate is restarted.
@@ -548,19 +734,92 @@
 - [ ] **Step 3: Run full static checks (2–5 minutes each command)**
 
   ```bash
-  (cd backend && uv run ruff check . && uv run pyright)
-  (cd rca-worker && uv run ruff check . && uv run pyright)
-  git diff --check
+  task7_step3_static() {
+  task7_require_open_gate 'Step 3 static checks' || return 1
+  (cd backend && uv run ruff check . && uv run pyright) \
+    || { task7_fail 'Backend static checks failed'; return 1; }
+  (cd rca-worker && uv run ruff check . && uv run pyright) \
+    || { task7_fail 'Worker static checks failed'; return 1; }
+  git diff --check || { task7_fail 'git diff --check failed'; return 1; }
+  }
+  task7_run_phase 'Step 3 static checks' task7_step3_static || true
   ```
 
   Expected: zero Ruff and Pyright errors for both complete projects. A pre-existing error is not waived at this gate: route it to the owning task (or add a narrowly scoped defect task), fix it with RED/GREEN evidence, and restart the release gate.
+
+  Render and parse the deployment surfaces and rerun the canonical evidence smoke before any live runtime starts. These are read-only render/test operations, but they use the same dispatcher and therefore cannot run after an earlier gate failure:
+
+  ```bash
+  task7_step3_render_deployments() {
+  task7_require_open_gate 'Step 3 deployment renders' || return 1
+  task7_compose_default=$(docker compose --env-file .env.compose.example config --format json) \
+    || { task7_fail 'default Compose JSON render failed'; return 1; }
+  printf '%s\n' "$task7_compose_default" | jq -e '
+    (.services | keys) == ["postgres", "pubsub-emulator"]
+    and (.services | all(has("env_file") | not))
+    and (.services.postgres.ports == [{"mode":"ingress","target":5432,"published":"5432","protocol":"tcp"}])
+    and (.services["pubsub-emulator"].ports == [{"mode":"ingress","target":8085,"published":"58085","protocol":"tcp"}])' >/dev/null \
+    || { task7_fail 'default Compose services/ports/env_file assertion failed'; return 1; }
+  task7_compose_custom=$(POSTGRES_HOST_PORT=15432 PUBSUB_HOST_PORT=18085 \
+    docker compose --env-file .env.compose.example config --format json) \
+    || { task7_fail 'custom Compose JSON render failed'; return 1; }
+  printf '%s\n' "$task7_compose_custom" | jq -e '
+    (.services | keys) == ["postgres", "pubsub-emulator"]
+    and (.services | all(has("env_file") | not))
+    and (.services.postgres.ports[0].published == "15432")
+    and (.services["pubsub-emulator"].ports[0].published == "18085")' >/dev/null \
+    || { task7_fail 'custom Compose services/ports/env_file assertion failed'; return 1; }
+
+  task7_kustomize_names=$(kubectl kustomize deploy/k8s/base \
+    | kubectl create --dry-run=client -f - -o name) \
+    || { task7_fail 'Kustomize base render/parse failed'; return 1; }
+  test "$(printf '%s\n' "$task7_kustomize_names" | awk '/^deployment.apps\// { print }' | sort)" = \
+    $'deployment.apps/sre-agent-backend\ndeployment.apps/sre-agent-frontend\ndeployment.apps/sre-agent-rca-worker' \
+    || { task7_fail 'Kustomize base does not retain exactly Backend/Frontend/Worker deployments'; return 1; }
+  }
+
+  task7_step3_render_jobs() {
+  task7_require_open_gate 'Step 3 migration Job renders' || return 1
+  for task7_job_spec in \
+    'deploy/k8s/jobs/backend-0002-migration-job.yaml|sre-agent-backend-0002-migration-|sre-agent-backend:latest|0002_grafana_normalization_v2' \
+    'deploy/k8s/jobs/backend-0003-migration-job.yaml|sre-agent-backend-0003-migration-|sre-agent-backend:latest|0003_non_partition_runtime_tables' \
+    'deploy/k8s/jobs/worker-0002-migration-job.yaml|sre-agent-worker-0002-migration-|sre-agent-rca-worker:latest|0002_adk_specialist_analysis' \
+    'deploy/k8s/jobs/worker-0003-migration-job.yaml|sre-agent-worker-0003-migration-|sre-agent-rca-worker:latest|0003_validate_ordinary_runtime_tables'; do
+    IFS='|' read -r task7_job_file task7_job_name task7_job_image task7_job_revision <<<"$task7_job_spec"
+    task7_job_json=$(kubectl create --dry-run=client -f "$task7_job_file" -o json) \
+      || { task7_fail "failed to parse exact Job $task7_job_file"; return 1; }
+    printf '%s\n' "$task7_job_json" | jq -e \
+      --arg name "$task7_job_name" --arg image "$task7_job_image" --arg revision "$task7_job_revision" '
+      .kind == "Job"
+      and .metadata.generateName == $name
+      and .spec.template.spec.containers == [(.spec.template.spec.containers[0])]
+      and .spec.template.spec.containers[0].image == $image
+      and .spec.template.spec.containers[0].command == ["alembic", "upgrade", $revision]
+      and ([.spec.template.spec.containers[0].command[]] | index("head") == null and index("stamp") == null)' >/dev/null \
+      || { task7_fail "Job target is not the exact explicit revision: $task7_job_file"; return 1; }
+  done
+  }
+
+  task7_step3_canonical_evidence() {
+  task7_require_open_gate 'Step 3 canonical evidence smoke' || return 1
+  (cd rca-worker && env MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests \
+    uv run pytest tests/integration/persistence/test_four_stage_conversion.py::test_clean_and_existing_paths_finish_with_identical_catalog_and_data -v) \
+    || { task7_fail 'canonical four-gate evidence smoke failed'; return 1; }
+  }
+
+  task7_run_phase 'Step 3 deployment renders' task7_step3_render_deployments || true
+  task7_run_phase 'Step 3 migration Job renders' task7_step3_render_jobs || true
+  task7_run_phase 'Step 3 canonical evidence smoke' task7_step3_canonical_evidence || true
+  ```
 
 - [ ] **Step 4: Run request/recovery and evidence end-to-end smoke (2–5 minutes per phase)**
 
   Before starting either runtime, seed the exact source configured by `.env.backend-api.example` into the disposable acceptance database. The explicit database argument and first fail-closed assertion are both required; abort if `current_database()` is not exactly `sre_agent_release_acceptance`. Never adapt this command to, or run it against, the shared `sre_agent` database.
 
   ```bash
-  docker compose --env-file .env.compose.example exec -T postgres psql -U postgres --dbname=sre_agent_release_acceptance \
+  task7_step4_seed() {
+  task7_require_open_gate 'Step 4 catalog seed' || return 1
+  docker exec "$task7_postgres_container" psql -U postgres --dbname=sre_agent_release_acceptance \
     -v ON_ERROR_STOP=1 \
     -c "DO \$\$ BEGIN IF current_database() <> 'sre_agent_release_acceptance' THEN RAISE EXCEPTION 'refusing catalog seed in database %', current_database(); END IF; END \$\$;" \
     -c "INSERT INTO teams (id, name) VALUES ('10000000-0000-0000-0000-000000000001', 'Local Team') ON CONFLICT DO NOTHING" \
@@ -568,40 +827,368 @@
     -c "INSERT INTO environments (id, project_id, name) VALUES ('30000000-0000-0000-0000-000000000001', '20000000-0000-0000-0000-000000000001', 'local') ON CONFLICT DO NOTHING" \
     -c "INSERT INTO grafana_sources (id, project_id, environment_id, name) VALUES ('50000000-0000-0000-0000-000000000001', '20000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000001', 'local-grafana') ON CONFLICT DO NOTHING" \
     -c "DO \$\$ BEGIN IF (SELECT count(*) FROM grafana_sources AS source JOIN projects AS project ON project.id = source.project_id JOIN teams AS team ON team.id = project.team_id JOIN environments AS environment ON environment.id = source.environment_id AND environment.project_id = source.project_id WHERE source.id = '50000000-0000-0000-0000-000000000001' AND source.name = 'local-grafana' AND source.enabled IS TRUE AND source.project_id = '20000000-0000-0000-0000-000000000001' AND source.environment_id = '30000000-0000-0000-0000-000000000001' AND project.id = '20000000-0000-0000-0000-000000000001' AND project.name = 'local-project' AND project.team_id = '10000000-0000-0000-0000-000000000001' AND team.id = '10000000-0000-0000-0000-000000000001' AND team.name = 'Local Team' AND environment.id = '30000000-0000-0000-0000-000000000001' AND environment.name = 'local' AND environment.project_id = '20000000-0000-0000-0000-000000000001') <> 1 THEN RAISE EXCEPTION 'acceptance Grafana catalog does not exactly match the required enabled source and relationships'; END IF; END \$\$;" \
-    -c "SELECT source.id AS source_id, source.name AS source_name, source.enabled, source.project_id, project.name AS project_name, project.team_id, team.name AS team_name, source.environment_id, environment.name AS environment_name, environment.project_id AS environment_project_id FROM grafana_sources AS source JOIN projects AS project ON project.id = source.project_id JOIN teams AS team ON team.id = project.team_id JOIN environments AS environment ON environment.id = source.environment_id AND environment.project_id = source.project_id WHERE source.id = '50000000-0000-0000-0000-000000000001'"
+    -c "SELECT source.id AS source_id, source.name AS source_name, source.enabled, source.project_id, project.name AS project_name, project.team_id, team.name AS team_name, source.environment_id, environment.name AS environment_name, environment.project_id AS environment_project_id FROM grafana_sources AS source JOIN projects AS project ON project.id = source.project_id JOIN teams AS team ON team.id = project.team_id JOIN environments AS environment ON environment.id = source.environment_id AND environment.project_id = source.project_id WHERE source.id = '50000000-0000-0000-0000-000000000001'" \
+    || { task7_fail 'Task 7 catalog seed/assertion failed'; return 1; }
+  }
+  task7_run_phase 'Step 4 catalog seed' task7_step4_seed || true
   ```
 
   Expected: the assertion succeeds only when exactly one row has all four exact names and UUIDs, `enabled=true`, and the exact team/project/environment relationships shown above; otherwise `ON_ERROR_STOP` aborts before Backend startup. The final query records the asserted row as readable evidence.
 
-  Start the processes in separate terminals with OS `DATABASE_URL` overriding only their own example file:
+  Start the named Backend and Worker as run-owned background jobs from the retained verification shell. Capture their exact PIDs and logs globally; cleanup may signal only those PIDs. A launch failure sets the global gate flag, and all subsequent phases refuse to run:
 
   ```bash
-  (cd backend && DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_acceptance BACKEND_ENV_FILE=../.env.backend-api.example uv run uvicorn sre_agent.api.main:app --host 127.0.0.1 --port 8000)
-  (cd rca-worker && DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_acceptance RCA_WORKER_ENV_FILE=../.env.rca-worker.example uv run sre-agent-rca-worker)
+  task7_start_runtimes() {
+  task7_require_open_gate 'Step 4 start runtimes' || return 1
+  task7_runtime_log_dir=$(mktemp -d /tmp/task7-runtime.XXXXXX) \
+    || { task7_fail 'unable to create Task 7 runtime log directory'; return 1; }
+  (cd backend && exec env DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_acceptance BACKEND_ENV_FILE=../.env.backend-api.example .venv/bin/uvicorn sre_agent.api.main:app --host 127.0.0.1 --port 8000) \
+    >"$task7_runtime_log_dir/backend.log" 2>&1 &
+  task7_backend_pid=$!
+  (cd rca-worker && exec env DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_acceptance RCA_WORKER_ENV_FILE=../.env.rca-worker.example .venv/bin/sre-agent-rca-worker) \
+    >"$task7_runtime_log_dir/worker.log" 2>&1 &
+  task7_worker_pid=$!
+  test -n "$task7_backend_pid" && test -n "$task7_worker_pid" \
+    || { task7_fail 'failed to capture run-owned runtime PIDs'; return 1; }
+  }
+  task7_run_phase 'Step 4 start runtimes' task7_start_runtimes || true
   ```
 
-  Submit the first example and record the HTTP status/body:
+  In the retained verification terminal, prove Worker bootstrap and Backend readiness, capture pre-first counts, submit the canonical fixture with body plus status, parse the returned `deliveryId`, and follow that exact delivery through the actual schema joins. Do not establish the second-request baseline until the delivery-linked event is `PUBLISHED`, its job is `SUCCEEDED`, exactly one report exists, and that report has non-null `result_status`:
 
   ```bash
-  curl -fsS -X POST 'http://127.0.0.1:8000/webhooks/v1/grafana/50000000-0000-0000-0000-000000000001' -H 'Authorization: Bearer replace-me' -H 'Content-Type: application/json' --data-binary @contracts/examples/grafana-firing.json
+  task7_step4_first_request() {
+  task7_require_open_gate 'Step 4 first request' || return 1
+  task7_worker_bootstrapped='false'
+  task7_backend_ready='false'
+  for task7_attempt in {1..30}; do
+    if curl -fsS 'http://127.0.0.1:58085/v1/projects/sre-agent-local/topics/rca-jobs' >/dev/null \
+      && curl -fsS 'http://127.0.0.1:58085/v1/projects/sre-agent-local/subscriptions/rca-jobs-local-sub' >/dev/null; then
+      task7_worker_bootstrapped='true'; break
+    fi
+    sleep 1
+  done
+  test "$task7_worker_bootstrapped" = 'true' \
+    || { task7_fail 'Worker did not bootstrap exact topic/subscription before first request'; return 1; }
+  for task7_attempt in {1..30}; do
+    if curl -fsS 'http://127.0.0.1:8000/health/ready' >/dev/null; then
+      task7_backend_ready='true'; break
+    fi
+    sleep 1
+  done
+  test "$task7_backend_ready" = 'true' \
+    || { task7_fail 'Backend did not become ready before first request'; return 1; }
+
+  task7_pre_first=$(docker exec "$task7_postgres_container" psql -U postgres -d sre_agent_release_acceptance -v ON_ERROR_STOP=1 -AtF '|' -c \
+    "SELECT (SELECT count(*) FROM webhook_deliveries), (SELECT count(*) FROM outbox_events),
+            (SELECT count(*) FROM rca_runs), (SELECT count(*) FROM worker_jobs), (SELECT count(*) FROM rca_reports)") \
+    || { task7_fail 'unable to capture pre-first counts'; return 1; }
+  IFS='|' read -r task7_deliveries_pre_first task7_outbox_pre_first task7_runs_pre_first task7_jobs_pre_first task7_reports_pre_first <<<"$task7_pre_first"
+  task7_first_response=$(curl --fail-with-body --show-error --silent \
+    --write-out '\nHTTP_STATUS=%{http_code}\n' -X POST \
+    'http://127.0.0.1:8000/webhooks/v1/grafana/50000000-0000-0000-0000-000000000001' \
+    -H 'Authorization: Bearer replace-me' -H 'Content-Type: application/json' \
+    --data-binary @contracts/examples/grafana-firing.json) \
+    || { task7_fail 'first canonical request failed'; return 1; }
+  task7_first_status=${task7_first_response##*HTTP_STATUS=}
+  task7_first_body=${task7_first_response%$'\n'HTTP_STATUS=*}
+  test "$task7_first_status" = '202' \
+    || { task7_fail 'first canonical request did not return HTTP 202'; return 1; }
+  task7_first_delivery_id=$(printf '%s\n' "$task7_first_body" | jq -er '.deliveryId') \
+    || { task7_fail 'first response has no valid deliveryId'; return 1; }
+
+  task7_first_complete='false'
+  for task7_attempt in {1..120}; do
+    task7_first_tuple=$(docker exec "$task7_postgres_container" psql -U postgres -d sre_agent_release_acceptance -v ON_ERROR_STOP=1 -AtF '|' -c \
+      "SELECT event.id, event.status, run.id, job.id, job.status,
+              count(report.id), count(report.id) FILTER (WHERE report.result_status IS NOT NULL)
+         FROM webhook_deliveries AS delivery
+         JOIN alert_events AS alert ON alert.delivery_id = delivery.id
+         JOIN incident_alerts AS link ON link.alert_event_id = alert.id
+         JOIN rca_runs AS run ON run.incident_id = link.incident_id
+         JOIN worker_jobs AS job ON job.rca_run_id = run.id
+         JOIN outbox_events AS event ON event.payload->>'rcaRunId' = run.id::text
+         LEFT JOIN rca_reports AS report ON report.rca_run_id = run.id
+        WHERE delivery.id = '$task7_first_delivery_id'
+        GROUP BY event.id, event.status, run.id, job.id, job.status") \
+      || { task7_fail 'unable to query first delivery-linked state'; return 1; }
+    if [ "$(printf '%s\n' "$task7_first_tuple" | awk 'NF { n++ } END { print n + 0 }')" -eq 1 ]; then
+      IFS='|' read -r task7_first_event_id task7_first_event_status task7_first_run_id task7_first_job_id task7_first_job_status task7_first_report_count task7_first_result_count <<<"$task7_first_tuple"
+      if [ "$task7_first_event_status" = 'PUBLISHED' ] \
+        && [ "$task7_first_job_status" = 'SUCCEEDED' ] \
+        && [ "$task7_first_report_count" = '1' ] \
+        && [ "$task7_first_result_count" = '1' ]; then
+        task7_first_complete='true'; break
+      fi
+    fi
+    sleep 1
+  done
+  test "$task7_first_complete" = 'true' \
+    || { task7_fail 'first delivery did not reach one PUBLISHED event, SUCCEEDED job, and non-null-status report'; return 1; }
+  task7_post_first=$(docker exec "$task7_postgres_container" psql -U postgres -d sre_agent_release_acceptance -v ON_ERROR_STOP=1 -AtF '|' -c \
+    "SELECT (SELECT count(*) FROM webhook_deliveries), (SELECT count(*) FROM outbox_events),
+            (SELECT count(*) FROM rca_runs), (SELECT count(*) FROM worker_jobs), (SELECT count(*) FROM rca_reports)") \
+    || { task7_fail 'unable to capture post-first counts'; return 1; }
+  IFS='|' read -r task7_deliveries_post_first task7_outbox_before task7_runs_before task7_jobs_before task7_reports_post_first <<<"$task7_post_first"
+  test "$task7_deliveries_post_first" -eq $((task7_deliveries_pre_first + 1)) \
+    && test "$task7_outbox_before" -eq $((task7_outbox_pre_first + 1)) \
+    && test "$task7_runs_before" -eq $((task7_runs_pre_first + 1)) \
+    && test "$task7_jobs_before" -eq $((task7_jobs_pre_first + 1)) \
+    && test "$task7_reports_post_first" -eq $((task7_reports_pre_first + 1)) \
+    || { task7_fail 'first request did not increase every delivery/work/report count exactly once'; return 1; }
+  }
+  task7_run_phase 'Step 4 first request' task7_step4_first_request || true
   ```
 
   Expected: HTTP `202`; exactly one outbox event reaches `PUBLISHED`; Worker claims its job and persists a report with non-null `result_status`. Query `outbox_events`, `worker_jobs`, and `rca_reports` in `sre_agent_release_acceptance` for the returned delivery/run IDs. The example Worker env intentionally sets `SPECIALIST_ANALYSIS_MODE=DISABLED`, so this live phase does not assert that evidence exists; exact non-UTF-8 `raw_result`, provenance `metadata`, content hash, and UUID-only `hypothesis_evidence` are proven by the canonical four-gate persistence smoke executed in Step 2 and its output must be included in release evidence.
 
-  Stop only `pubsub-emulator`, submit `contracts/examples/grafana-firing-aws.json`, and verify another HTTP `202` plus one `FAILED` outbox event. Stop Backend, restart the emulator and Worker (so local topic/subscription bootstrap runs), then restart Backend with the same command. Before recovery, query that the failed event is still `FAILED`; startup must not publish it. Invoke manual recovery:
+  Keep the original named `Task 7 verification` terminal open for the rest of this phase. The preceding function has established the only valid post-first baseline. The second-request/recovery function below is one fail-closed phase; every failure returns immediately, and the dispatcher refuses every later phase once the global flag is set.
 
   ```bash
-  docker compose --env-file .env.compose.example stop pubsub-emulator
-  curl -fsS -X POST 'http://127.0.0.1:8000/webhooks/v1/grafana/50000000-0000-0000-0000-000000000001' -H 'Authorization: Bearer replace-me' -H 'Content-Type: application/json' --data-binary @contracts/examples/grafana-firing-aws.json
-  docker compose --env-file .env.compose.example up -d pubsub-emulator
-  curl -fsS -X POST 'http://127.0.0.1:8000/api/v1/operations/outbox-events/retry-failed?limit=100' -H 'Authorization: Bearer local-operator'
+  task7_step4_recovery() {
+  task7_require_open_gate 'Step 4 recovery' || return 1
+  printf 'post-first baseline outbox=%s runs=%s jobs=%s\n' "$task7_outbox_before" "$task7_runs_before" "$task7_jobs_before"
+  }
+  task7_run_phase 'Step 4 recovery preflight' task7_step4_recovery || true
   ```
 
-  Expected: recovery returns a non-zero `selected`/`published` count without payload overrides; at-least-once processing produces no duplicate RCA run/job for an already accepted delivery.
+  Stop only the captured `pubsub-emulator`, then stream a deterministic transformation of `contracts/examples/grafana-firing-aws.json` into the second request from the `Task 7 verification` terminal. Preserve the canonical fixture on disk. The transformed request must use the distinct alert name `High CPU usage recovery smoke` consistently in the alert labels, grouping envelope, title/message, and a distinct deterministic fingerprint. This is required because incident identity v2 groups by exact source + folder + alert name; changing provider detection or fingerprint alone does not create a second incident/run. The explicit guarded pipeline makes either `jq` or `curl` failure stop the phase while retaining the terminal variables needed by Step 6.
+
+  ```bash
+  task7_step4_create_failed_event() {
+  task7_require_open_gate 'Step 4 create failed event' || return 1
+  test "$(docker inspect "$task7_pubsub_container" --format '{{.State.Status}}')" = 'running' \
+    && test "$(docker inspect "$task7_pubsub_container" --format '{{.Id}}')" = "$task7_pubsub_id" \
+    && test "$(docker inspect "$task7_pubsub_container" | jq -ce '.[0].HostConfig.PortBindings["8085/tcp"]')" = "$task7_pubsub_binding" \
+    && docker inspect "$task7_pubsub_container" | jq -e --arg compose "$task7_repo_compose" '
+         .[0].Config.Image == "google/cloud-sdk:578.0.0-emulators"
+         and (.[0].Config.Cmd | index("--project=sre-agent-local") != null)
+         and (.[0].Config.Cmd | index("--host-port=0.0.0.0:8085") != null)
+         and .[0].Config.Labels["com.docker.compose.service"] == "pubsub-emulator"
+         and .[0].Config.Labels["com.docker.compose.project.config_files"] == $compose' >/dev/null \
+    || { echo 'captured Pub/Sub container is not the original running binding' >&2; task7_gate_failed='true'; return 1; }
+  docker stop "$task7_pubsub_id" >/dev/null \
+    || { echo 'failed to stop captured Pub/Sub container' >&2; task7_gate_failed='true'; return 1; }
+  test "$(docker inspect "$task7_pubsub_container" --format '{{.State.Status}}')" = 'exited' \
+    && test "$(docker inspect "$task7_pubsub_container" --format '{{.Id}}')" = "$task7_pubsub_id" \
+    || { echo 'captured Pub/Sub container did not stop' >&2; task7_gate_failed='true'; return 1; }
+  if ! task7_second_response=$(
+    set -o pipefail
+    jq -e -c '
+        .alerts |= map(
+          .labels.alertname = "High CPU usage recovery smoke"
+          | .fingerprint = "c6eadffa33fcdf38"
+        )
+        | .groupLabels.alertname = "High CPU usage recovery smoke"
+        | .groupKey = "{}:{alertname=\"High CPU usage recovery smoke\"}"
+        | .title = "[FIRING:1] High CPU usage recovery smoke"
+        | .message |= gsub("High CPU usage"; "High CPU usage recovery smoke")
+      ' contracts/examples/grafana-firing-aws.json \
+        | curl --fail-with-body --show-error --silent \
+            --write-out '\nHTTP_STATUS=%{http_code}\n' \
+            -X POST 'http://127.0.0.1:8000/webhooks/v1/grafana/50000000-0000-0000-0000-000000000001' \
+            -H 'Authorization: Bearer replace-me' \
+            -H 'Content-Type: application/json' \
+            --data-binary @-
+  ); then
+    echo 'Task 7 transformed request failed; recovery is forbidden' >&2
+    task7_gate_failed='true'
+    return 1
+  fi
+  printf '%s\n' "$task7_second_response"
+  case "$task7_second_response" in
+    *'HTTP_STATUS=202') ;;
+    *) echo 'Task 7 transformed request did not return HTTP 202' >&2; task7_gate_failed='true'; return 1 ;;
+  esac
+  }
+  task7_run_phase 'Step 4 create failed event' task7_step4_create_failed_event || true
+  ```
+
+  Still in `Task 7 verification`, assert that the transaction added exactly one run, job, and outbox row; capture that new event/run/job tuple and require the event to be `FAILED`. Do not stop or restart a runtime until this passes.
+
+  ```bash
+  task7_step4_capture_failed_event() {
+  task7_require_open_gate 'Step 4 capture failed event' || return 1
+  task7_after_second=$(docker exec "$task7_postgres_container" psql -U postgres -d sre_agent_release_acceptance -v ON_ERROR_STOP=1 -AtF '|' -c \
+    "SELECT (SELECT count(*) FROM outbox_events), (SELECT count(*) FROM rca_runs), (SELECT count(*) FROM worker_jobs)") \
+    || { echo 'unable to query post-request counts' >&2; task7_gate_failed='true'; return 1; }
+  IFS='|' read -r task7_outbox_after task7_runs_after task7_jobs_after <<<"$task7_after_second"
+  test "$task7_outbox_after" -eq $((task7_outbox_before + 1)) \
+    && test "$task7_runs_after" -eq $((task7_runs_before + 1)) \
+    && test "$task7_jobs_after" -eq $((task7_jobs_before + 1)) \
+    || { echo 'second request did not add exactly one outbox/run/job' >&2; task7_gate_failed='true'; return 1; }
+
+  task7_failed_tuple=$(docker exec "$task7_postgres_container" psql -U postgres -d sre_agent_release_acceptance -v ON_ERROR_STOP=1 -AtF '|' -c \
+    "SELECT event.id, event.status, event.payload->>'rcaRunId', job.id
+       FROM outbox_events AS event
+       JOIN worker_jobs AS job ON job.rca_run_id = (event.payload->>'rcaRunId')::uuid
+      ORDER BY event.created_at DESC, event.id DESC LIMIT 1") \
+    || { echo 'unable to capture failed event tuple' >&2; task7_gate_failed='true'; return 1; }
+  IFS='|' read -r task7_failed_event_id task7_failed_status task7_failed_run_id task7_failed_job_id <<<"$task7_failed_tuple"
+  test "$task7_failed_status" = 'FAILED' \
+    && test -n "$task7_failed_event_id" \
+    && test -n "$task7_failed_run_id" \
+    && test -n "$task7_failed_job_id" \
+    || { echo 'new outbox tuple is absent or not FAILED' >&2; task7_gate_failed='true'; return 1; }
+  printf 'failed event=%s run=%s job=%s\n' "$task7_failed_event_id" "$task7_failed_run_id" "$task7_failed_job_id"
+  }
+  task7_run_phase 'Step 4 capture failed event' task7_step4_capture_failed_event || true
+  ```
+
+  Stop only the exact run-owned PIDs and wait for both, then restart the immutable emulator by ID. Never use `pkill`, `killall`, or a name pattern:
+
+  ```bash
+  task7_step4_restart_emulator() {
+  task7_require_open_gate 'Step 4 restart emulator' || return 1
+  task7_shutdown_exact_pid "$task7_backend_pid" 'Backend' \
+    || { task7_fail 'exact Backend process did not stop within the bounded shutdown'; return 1; }
+  task7_backend_pid=''
+  task7_shutdown_exact_pid "$task7_worker_pid" 'Worker' \
+    || { task7_fail 'exact Worker process did not stop within the bounded shutdown'; return 1; }
+  task7_worker_pid=''
+  test "$(docker inspect "$task7_pubsub_container" --format '{{.State.Status}}')" = 'exited' \
+    && test "$(docker inspect "$task7_pubsub_container" --format '{{.Id}}')" = "$task7_pubsub_id" \
+    && test "$(docker inspect "$task7_pubsub_container" | jq -ce '.[0].HostConfig.PortBindings["8085/tcp"]')" = "$task7_pubsub_binding" \
+    && docker inspect "$task7_pubsub_container" | jq -e --arg compose "$task7_repo_compose" '
+         .[0].Config.Image == "google/cloud-sdk:578.0.0-emulators"
+         and (.[0].Config.Cmd | index("--project=sre-agent-local") != null)
+         and (.[0].Config.Cmd | index("--host-port=0.0.0.0:8085") != null)
+         and .[0].Config.Labels["com.docker.compose.service"] == "pubsub-emulator"
+         and .[0].Config.Labels["com.docker.compose.project.config_files"] == $compose' >/dev/null \
+    || { echo 'captured Pub/Sub container is not the original stopped binding' >&2; task7_gate_failed='true'; return 1; }
+  docker start "$task7_pubsub_id" >/dev/null \
+    || { echo 'failed to restart captured Pub/Sub container' >&2; task7_gate_failed='true'; return 1; }
+  task7_emulator_ready='false'
+  for task7_attempt in {1..30}; do
+    if task7_topics=$(curl -fsS 'http://127.0.0.1:58085/v1/projects/sre-agent-local/topics'); then
+      task7_emulator_ready='true'
+      printf 'emulator ready: %s\n' "$task7_topics"
+      break
+    fi
+    sleep 1
+  done
+  test "$task7_emulator_ready" = 'true' \
+    || { echo 'Pub/Sub emulator did not become ready within 30 seconds' >&2; task7_gate_failed='true'; return 1; }
+  }
+  task7_run_phase 'Step 4 restart emulator' task7_step4_restart_emulator || true
+  ```
+
+  Restart Worker first and Backend second as new run-owned jobs, recapturing both exact PIDs before readiness checks:
+
+  ```bash
+  task7_step4_restart_runtimes() {
+  task7_require_open_gate 'Step 4 restart runtimes' || return 1
+  (cd rca-worker && exec env DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_acceptance RCA_WORKER_ENV_FILE=../.env.rca-worker.example .venv/bin/sre-agent-rca-worker) \
+    >>"$task7_runtime_log_dir/worker.log" 2>&1 &
+  task7_worker_pid=$!
+  task7_worker_bootstrapped='false'
+  for task7_attempt in {1..30}; do
+    if curl -fsS 'http://127.0.0.1:58085/v1/projects/sre-agent-local/topics/rca-jobs' >/dev/null \
+      && curl -fsS 'http://127.0.0.1:58085/v1/projects/sre-agent-local/subscriptions/rca-jobs-local-sub' >/dev/null; then
+      task7_worker_bootstrapped='true'
+      break
+    fi
+    sleep 1
+  done
+  test "$task7_worker_bootstrapped" = 'true' \
+    || { echo 'Worker did not bootstrap topic/subscription within 30 seconds' >&2; task7_gate_failed='true'; return 1; }
+
+  (cd backend && exec env DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_acceptance BACKEND_ENV_FILE=../.env.backend-api.example .venv/bin/uvicorn sre_agent.api.main:app --host 127.0.0.1 --port 8000) \
+    >>"$task7_runtime_log_dir/backend.log" 2>&1 &
+  task7_backend_pid=$!
+  task7_backend_ready='false'
+  for task7_attempt in {1..30}; do
+    if curl -fsS 'http://127.0.0.1:8000/health/ready' >/dev/null; then
+      task7_backend_ready='true'
+      break
+    fi
+    sleep 1
+  done
+  test "$task7_backend_ready" = 'true' \
+    || { echo 'Backend did not become ready within 30 seconds' >&2; task7_gate_failed='true'; return 1; }
+  }
+  task7_run_phase 'Step 4 restart runtimes' task7_step4_restart_runtimes || true
+  ```
+
+  Before recovery, require the same captured event to remain `FAILED` and all three counts to remain unchanged. This proves startup did not auto-replay and did not create a duplicate run/job/outbox. Only after this assertion may the protected manual recovery call run. Require a non-zero `selected` and `published` response with no publish failure:
+
+  ```bash
+  task7_step4_manual_recovery() {
+  task7_require_open_gate 'Step 4 manual recovery' || return 1
+  task7_pre_recovery=$(docker exec "$task7_postgres_container" psql -U postgres -d sre_agent_release_acceptance -v ON_ERROR_STOP=1 -AtF '|' -c \
+    "SELECT (SELECT status FROM outbox_events WHERE id = '$task7_failed_event_id'),
+            (SELECT count(*) FROM outbox_events), (SELECT count(*) FROM rca_runs), (SELECT count(*) FROM worker_jobs)") \
+    || { echo 'unable to query pre-recovery state' >&2; task7_gate_failed='true'; return 1; }
+  IFS='|' read -r task7_pre_status task7_pre_outbox task7_pre_runs task7_pre_jobs <<<"$task7_pre_recovery"
+  test "$task7_pre_status" = 'FAILED' \
+    && test "$task7_pre_outbox" -eq "$task7_outbox_after" \
+    && test "$task7_pre_runs" -eq "$task7_runs_after" \
+    && test "$task7_pre_jobs" -eq "$task7_jobs_after" \
+    || { echo 'startup replayed the event or created duplicate work' >&2; task7_gate_failed='true'; return 1; }
+
+  if ! task7_recovery_response=$(curl --fail-with-body --show-error --silent \
+    -X POST 'http://127.0.0.1:8000/api/v1/operations/outbox-events/retry-failed?limit=100' \
+    -H 'Authorization: Bearer local-operator'); then
+    echo 'protected manual recovery request failed' >&2
+    task7_gate_failed='true'
+    return 1
+  fi
+  printf '%s\n' "$task7_recovery_response"
+  printf '%s\n' "$task7_recovery_response" \
+    | jq -e '.selected > 0 and .published > 0 and .failed == 0' >/dev/null \
+    || { echo 'manual recovery did not publish the selected failed event' >&2; task7_gate_failed='true'; return 1; }
+  }
+  task7_run_phase 'Step 4 manual recovery' task7_step4_manual_recovery || true
+  ```
+
+  Finally, boundedly wait for the captured job to succeed and persist a report, then require the same event to be `PUBLISHED` and all counts still equal the post-second-request values. This is the terminal-processing and no-duplicate assertion; it must pass before Step 5.
+
+  ```bash
+  task7_step4_terminal_processing() {
+  task7_require_open_gate 'Step 4 terminal processing' || return 1
+  task7_processing_complete='false'
+  for task7_attempt in {1..120}; do
+    if ! task7_job_state=$(docker exec "$task7_postgres_container" psql -U postgres -d sre_agent_release_acceptance -v ON_ERROR_STOP=1 -AtF '|' -c \
+      "SELECT job.status, count(report.id)
+         FROM worker_jobs AS job
+         LEFT JOIN rca_reports AS report ON report.rca_run_id = job.rca_run_id
+        WHERE job.id = '$task7_failed_job_id'
+        GROUP BY job.status"); then
+      echo 'unable to query recovered Worker job state' >&2
+      task7_gate_failed='true'
+      break
+    fi
+    if [ "$task7_job_state" = 'SUCCEEDED|1' ]; then
+      task7_processing_complete='true'
+      break
+    fi
+    sleep 1
+  done
+  test "$task7_processing_complete" = 'true' \
+    || { echo 'recovered Worker job did not succeed with one report within 120 seconds' >&2; task7_gate_failed='true'; return 1; }
+
+  task7_final_state=$(docker exec "$task7_postgres_container" psql -U postgres -d sre_agent_release_acceptance -v ON_ERROR_STOP=1 -AtF '|' -c \
+    "SELECT (SELECT status FROM outbox_events WHERE id = '$task7_failed_event_id'),
+            (SELECT count(*) FROM outbox_events), (SELECT count(*) FROM rca_runs), (SELECT count(*) FROM worker_jobs)") \
+    || { echo 'unable to query terminal recovery state' >&2; task7_gate_failed='true'; return 1; }
+  IFS='|' read -r task7_final_status task7_final_outbox task7_final_runs task7_final_jobs <<<"$task7_final_state"
+  test "$task7_final_status" = 'PUBLISHED' \
+    && test "$task7_final_outbox" -eq "$task7_outbox_after" \
+    && test "$task7_final_runs" -eq "$task7_runs_after" \
+    && test "$task7_final_jobs" -eq "$task7_jobs_after" \
+    || { echo 'terminal recovery state is not published and duplicate-free' >&2; task7_gate_failed='true'; return 1; }
+  }
+  task7_run_phase 'Step 4 terminal processing' task7_step4_terminal_processing || true
+  ```
+
+  Expected: the streamed payload reports HTTP `202` and creates a distinct incident/run because its source + folder + alert name identity differs from the first request; its new outbox event is `FAILED` while the emulator is unavailable. Restart does not auto-replay it. Protected recovery returns non-zero `selected`/`published` without payload overrides, the captured Worker job succeeds with one report, and at-least-once processing creates no duplicate RCA run/job/outbox.
 
 - [ ] **Step 5: Capture catalog and rollback-policy evidence (2–5 minutes)**
 
-  ```sql
+  ```bash
+  task7_step5_catalog() {
+  task7_require_open_gate 'Step 5 catalog' || return 1
+  task7_catalog=$(docker exec "$task7_postgres_container" psql -U postgres -d sre_agent_release_acceptance -v ON_ERROR_STOP=1 -AtF '|' -c "
   SELECT c.relname, c.relkind, c.relispartition
   FROM pg_class AS c
   WHERE c.relname IN (
@@ -613,19 +1200,112 @@
       'incident_messages__partitioned_legacy_0003',
       'incident_timeline_events__partitioned_legacy_0003',
       'audit_events__partitioned_legacy_0003'
-  ) ORDER BY c.relname;
+  ) ORDER BY c.relname") \
+    || { task7_fail 'unable to capture Task 7 relation catalog'; return 1; }
+  test "$(printf '%s\n' "$task7_catalog" | awk -F '|' '$1 !~ /__partitioned_legacy_0003$/ && $2 == "r" && $3 == "f" { n++ } END { print n + 0 }')" -eq 6 \
+    && test "$(printf '%s\n' "$task7_catalog" | awk -F '|' '$1 ~ /__partitioned_legacy_0003$/ && $2 == "p" && $3 == "t" { n++ } END { print n + 0 }')" -eq 6 \
+    && test "$(printf '%s\n' "$task7_catalog" | awk 'NF { n++ } END { print n + 0 }')" -eq 12 \
+    || { task7_fail 'catalog must be six canonical ordinary tables plus six retained legacy partitioned parents'; return 1; }
+  printf '%s\n' "$task7_catalog"
+  }
+  task7_run_phase 'Step 5 catalog' task7_step5_catalog || true
   ```
 
-  Expected: six canonical `relkind='r'`/`relispartition=false` relations and six retained legacy partition parents. Record that no automatic downgrade or legacy cleanup has been executed.
+  Expected: exactly six canonical `relkind='r'`/`relispartition=false` relations and exactly six retained `__partitioned_legacy_0003` parents with `relkind='p'`/`relispartition=true`, total twelve. Record that no automatic downgrade or legacy cleanup has been executed.
 
 - [ ] **Step 6: Clean disposable databases and commit only task-owned defect fixes (2–5 minutes)**
 
-  First list the exact two test databases and confirm neither name is `sre_agent`, then remove only those two explicit targets:
+  This is a mandatory `finally` path after success or any failure in Steps 1–5, including a partially created database or a failed transformed request. Return to the still-open `Task 7 verification` terminal; never discard or reconstruct its captured names/bindings/OID/PIDs. Set `task7_cleanup_failed='false'` and attempt every cleanup subsection even if an earlier cleanup assertion fails, recording `task7_cleanup_failed='true'` instead of exiting. Use the initialization helper to signal only non-empty run-owned Backend/Worker PIDs with bounded INT-then-TERM shutdown, then boundedly require port 8000 to be clear. Never use `pkill`, `killall`, a name pattern, `SIGKILL`, or terminate an unrelated process.
 
   ```bash
-  docker compose --env-file .env.compose.example exec -T postgres psql -U postgres -d postgres -c "SELECT datname FROM pg_database WHERE datname IN ('sre_agent_release_acceptance','sre_agent_release_tests') ORDER BY datname"
-  docker compose --env-file .env.compose.example exec -T postgres dropdb -U postgres --force sre_agent_release_acceptance
-  docker compose --env-file .env.compose.example exec -T postgres dropdb -U postgres --force sre_agent_release_tests
+  task7_cleanup_failed='false'
+  if task7_shutdown_exact_pid "${task7_backend_pid:-}" 'Backend'; then
+    task7_backend_pid=''
+  else
+    echo 'failed to stop exact Task 7 Backend PID during cleanup' >&2
+    task7_cleanup_failed='true'
+  fi
+  if task7_shutdown_exact_pid "${task7_worker_pid:-}" 'Worker'; then
+    task7_worker_pid=''
+  else
+    echo 'failed to stop exact Task 7 Worker PID during cleanup' >&2
+    task7_cleanup_failed='true'
+  fi
+  task7_backend_clear='false'
+  for task7_attempt in {1..30}; do
+    if ! lsof -nP -iTCP:8000 -sTCP:LISTEN >/dev/null; then
+      task7_backend_clear='true'
+      break
+    fi
+    sleep 1
+  done
+  test "$task7_backend_clear" = 'true' \
+    || { echo 'the exact Task 7 Backend process has not released port 8000' >&2; task7_cleanup_failed='true'; }
+  ```
+
+  Require the originally captured Postgres container to be running and unchanged, list only the shared/release catalog, then drop only the two literal release database names through that container. `--if-exists` makes this safe for partial-failure cleanup; it does not broaden the target.
+
+  ```bash
+  task7_postgres_safe='true'
+  test "$(docker inspect "$task7_postgres_container" --format '{{.State.Status}}')" = 'running' \
+    || { echo 'captured Postgres container is not running; do not substitute another container' >&2; task7_postgres_safe='false'; task7_cleanup_failed='true'; }
+  test "$(docker inspect "$task7_postgres_container" --format '{{.Id}}')" = "$task7_postgres_id" \
+    || { echo 'captured Postgres container identity changed' >&2; task7_postgres_safe='false'; task7_cleanup_failed='true'; }
+  test "$(docker inspect "$task7_postgres_container" | jq -ce '.[0].HostConfig.PortBindings["5432/tcp"]')" = "$task7_postgres_binding" \
+    || { echo 'captured Postgres binding changed' >&2; task7_postgres_safe='false'; task7_cleanup_failed='true'; }
+  if [ "$task7_postgres_safe" = 'true' ]; then
+    docker exec "$task7_postgres_container" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c \
+      "SELECT datname, oid FROM pg_database WHERE datname IN ('sre_agent','sre_agent_release_acceptance','sre_agent_release_tests') ORDER BY datname" \
+      || { echo 'failed to list exact Task 7 database catalog' >&2; task7_cleanup_failed='true'; }
+    docker exec "$task7_postgres_container" dropdb -U postgres --if-exists --force sre_agent_release_acceptance \
+      || { echo 'failed to drop exact acceptance database' >&2; task7_cleanup_failed='true'; }
+    docker exec "$task7_postgres_container" dropdb -U postgres --if-exists --force sre_agent_release_tests \
+      || { echo 'failed to drop exact test database' >&2; task7_cleanup_failed='true'; }
+    task7_final_catalog=$(docker exec "$task7_postgres_container" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -AtF '|' -c \
+      "SELECT datname, oid FROM pg_database WHERE datname IN ('sre_agent','sre_agent_release_acceptance','sre_agent_release_tests') ORDER BY datname") \
+      || { echo 'failed to read final Task 7 database catalog' >&2; task7_cleanup_failed='true'; }
+    test "$task7_final_catalog" = "sre_agent|$task7_shared_oid_before" \
+      || { echo 'release databases remain or shared sre_agent OID changed' >&2; task7_cleanup_failed='true'; }
+  else
+    echo 'skipping database cleanup because captured Postgres ownership changed' >&2
+  fi
+  ```
+
+  Finally, restore only the originally captured Pub/Sub container if the failure path left it stopped, then boundedly require the same exact name, original binding, repository ownership labels, and health endpoint. This cleanup restoration is not permission to continue a failed recovery phase.
+
+  ```bash
+  task7_pubsub_safe='true'
+  task7_pubsub_status=$(docker inspect "$task7_pubsub_container" --format '{{.State.Status}}') \
+    || { echo 'failed to inspect captured Pub/Sub container during cleanup' >&2; task7_pubsub_safe='false'; task7_cleanup_failed='true'; }
+  test "$(docker inspect "$task7_pubsub_container" | jq -ce '.[0].HostConfig.PortBindings["8085/tcp"]')" = "$task7_pubsub_binding" \
+    || { echo 'captured Pub/Sub binding changed' >&2; task7_pubsub_safe='false'; task7_cleanup_failed='true'; }
+  test "$(docker inspect "$task7_pubsub_container" --format '{{.Id}}')" = "$task7_pubsub_id" \
+    || { echo 'captured Pub/Sub container identity changed' >&2; task7_pubsub_safe='false'; task7_cleanup_failed='true'; }
+  docker inspect "$task7_pubsub_container" | jq -e --arg compose "$task7_repo_compose" '
+    .[0].Config.Image == "google/cloud-sdk:578.0.0-emulators"
+    and (.[0].Config.Cmd | index("--project=sre-agent-local") != null)
+    and (.[0].Config.Cmd | index("--host-port=0.0.0.0:8085") != null)
+    and .[0].Config.Labels["com.docker.compose.service"] == "pubsub-emulator"
+    and .[0].Config.Labels["com.docker.compose.project.config_files"] == $compose' >/dev/null \
+    || { echo 'captured Pub/Sub ownership changed' >&2; task7_pubsub_safe='false'; task7_cleanup_failed='true'; }
+  if [ "$task7_pubsub_safe" = 'true' ] && [ "$task7_pubsub_status" != 'running' ]; then
+    docker start "$task7_pubsub_id" >/dev/null \
+      || { echo 'failed to restore captured Pub/Sub container during cleanup' >&2; task7_cleanup_failed='true'; }
+  fi
+  task7_cleanup_pubsub_ready='false'
+  for task7_attempt in {1..30}; do
+    if [ "$task7_pubsub_safe" = 'true' ] \
+      && curl -fsS 'http://127.0.0.1:58085/v1/projects/sre-agent-local/topics' >/dev/null; then
+      task7_cleanup_pubsub_ready='true'
+      break
+    fi
+    sleep 1
+  done
+  test "$task7_cleanup_pubsub_ready" = 'true' \
+    || { echo 'captured Pub/Sub container is not healthy after cleanup' >&2; task7_cleanup_failed='true'; }
+  printf 'cleanup preserved postgres=%s shared_oid=%s pubsub=%s binding=%s\n' \
+    "$task7_postgres_container" "$task7_shared_oid_before" "$task7_pubsub_container" "$task7_pubsub_binding"
+  test "$task7_cleanup_failed" = 'false'
   ```
 
   If no defect files changed, do not create a verification-only source commit. If a defect is found, return it to its owning Task 1–6 file list, commit with that task’s message family, rerun its focused suite, then restart this release gate from Step 1. Store non-secret command output with release evidence outside the repository.
