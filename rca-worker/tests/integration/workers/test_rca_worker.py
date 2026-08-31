@@ -47,6 +47,13 @@ async def test_production_runner_passes_configured_worker_identity_to_job_handle
         pass
 
     class FakePublisher:
+        class Transport:
+            def close(self) -> None:
+                return None
+
+        def __init__(self) -> None:
+            self.transport = self.Transport()
+
         def stop(self) -> None:
             return None
 

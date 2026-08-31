@@ -130,11 +130,30 @@ schema 的權限。新環境會依序執行四個 migration gate：先執行 Bac
 本機 Pub/Sub 傳遞使用 Google 官方 Emulator。Backend 與 Worker 需設定
 `PUBSUB_EMULATOR_HOST=127.0.0.1:58085`，RCA Worker 另需設定
 `PUBSUB_AUTO_CREATE=true`。Outbox event 在 Backend request transaction commit 後
-由應用程式即時發布至 Pub/Sub，不再需要獨立的 outbox polling worker。
+由應用程式即時發布至 Pub/Sub，不再需要獨立的 outbox polling worker。Backend startup、
+定期工作與新 request 的 publish 都不會重播既有 `PENDING` 或 `FAILED` backlog；只有
+具 authentication and global authorization 的 operator 才能決定是否手動復原。
 
 正式環境不設定 `PUBSUB_EMULATOR_HOST`；Google client 使用 ADC 與 Workload
 Identity，RCA Worker 維持 `PUBSUB_AUTO_CREATE=false`。此儲存庫不保存任何
 service account key。
+
+### Protected outbox recovery
+
+Outbox recovery is an authenticated and globally authorized operator action,
+not a startup task or a worker loop. The supported Backend REST paths are:
+
+```text
+POST /api/v1/operations/outbox-events/{eventId}/retry
+POST /api/v1/operations/outbox-events/retry-pending?limit=100
+POST /api/v1/operations/outbox-events/retry-failed?limit=100
+```
+
+The single-event path accepts only a durable `PENDING` or `FAILED` event; the
+batch selectors are bounded to `1..100`, use the stored canonical event, and
+record the operator/result. Recovery does not accept payload, topic, project, subscription, or scope overrides. There is no startup, periodic, or incidental backlog replay: inspect a failed event, then use the protected retry path only
+when an operator explicitly authorizes it. Responses do not expose canonical
+payloads or secret material.
 
 Angular 啟動前，Frontend 會載入 `/config.json`。部署環境必須提供以下全部欄位：
 
@@ -151,7 +170,7 @@ Angular 啟動前，Frontend 會載入 `/config.json`。部署環境必須提供
 
 ## GKE 部署
 
-可攜式 Kubernetes base 與透過單一 Job 依序執行四個 migration gate 的發布流程，記錄於
+可攜式 Kubernetes base 與透過單一指令依序執行四個獨立 migration Job 的發布流程，記錄於
 [`deploy/k8s/README.md`](deploy/k8s/README.md)。Namespace、不可變 registry digest、
 Workload Identity 綁定、Secret 資料、Gateway 路由及 Terraform 管理的相依資源都是
 環境輸入，因此不會寫入 base。
@@ -200,7 +219,7 @@ curl -fsS http://127.0.0.1:58085/v1/projects/sre-agent-local/topics
 後續範例均使用：
 
 ```bash
-export DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent'
+export DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent'
 export PUBSUB_EMULATOR_HOST='127.0.0.1:58085'
 export PUBSUB_PROJECT_ID='sre-agent-local'
 export PUBSUB_AUTO_CREATE=true
@@ -209,7 +228,11 @@ export RCA_TOPIC_ID='rca-jobs'
 
 ### 3. 依序套用四個 migration gate
 
-套用 migration 時必須依序執行四個明確 revision 命令；不得跨越未驗證的 revision：
+套用 migration 必須在受控維護窗口進行：先停止 Backend 與 Worker writes，依序執行
+四個明確 revision，並在每個 gate 後查詢兩個 version table。既有 Worker-0002 head
+資料庫只驗證前兩個 gate/source catalog，之後只執行 gate 3、4，絕不可重播或標記
+已發布 revision。完整的 per-gate query、catalog、rollback 與 runtime-restart 條件以
+[`docs/database/postgresql-schema.md`](docs/database/postgresql-schema.md) 的權威流程為準。
 
 ```bash
 (cd backend && BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0002_grafana_normalization_v2)
@@ -238,7 +261,7 @@ Backend 已將 Uvicorn 鎖定在應用程式依賴內；本機直接以 `uv run 
 
 ```bash
 cd backend
-export DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent'
+export DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent'
 export PUBSUB_EMULATOR_HOST='127.0.0.1:58085'
 export PUBSUB_PROJECT_ID='sre-agent-local'
 export RCA_TOPIC_ID='rca-jobs'
@@ -255,7 +278,7 @@ Worker 在本機明確設定 `PUBSUB_AUTO_CREATE=true` 時，會 idempotently �
 
 ```bash
 cd rca-worker
-export DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:55432/sre_agent'
+export DATABASE_URL='postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent'
 export PUBSUB_EMULATOR_HOST='127.0.0.1:58085'
 export PUBSUB_PROJECT_ID='sre-agent-local'
 export PUBSUB_AUTO_CREATE=true

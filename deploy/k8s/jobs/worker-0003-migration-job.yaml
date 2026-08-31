@@ -1,0 +1,54 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: sre-agent-worker-0003-migration-
+  labels:
+    app: sre-agent-worker-0003-migration
+spec:
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: sre-agent-worker-0003-migration
+    spec:
+      serviceAccountName: sre-agent-rca-worker
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migration
+          image: sre-agent-rca-worker:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - alembic
+            - upgrade
+            - 0003_validate_ordinary_runtime_tables
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sre-agent-secrets
+                  key: DATABASE_URL
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi

@@ -84,6 +84,14 @@ def _documented_table_definitions(documentation: str) -> dict[str, str]:
     return definitions
 
 
+def _section_between(
+    documentation: str, start_heading: str, end_heading: str
+) -> str:
+    start = documentation.index(start_heading) + len(start_heading)
+    end = documentation.index(end_heading, start)
+    return documentation[start:end]
+
+
 def _normalize_sql(value: str) -> str:
     return re.sub(r"\s+", " ", value.strip().rstrip(";"))
 
@@ -413,3 +421,37 @@ def test_schema_reference_documents_normalization_v2_migration() -> None:
     )
     assert "folder_code is not projects.id" in documentation
     assert "downgrade" in documentation.lower()
+
+
+def test_schema_reference_separates_0001_baseline_from_0002_incident_mutations() -> None:
+    """Keep the published baseline distinct from its non-replayable evolution."""
+    documentation = DOCUMENTATION_PATH.read_text(encoding="utf-8")
+    historical_0001 = _section_between(
+        documentation,
+        "### Backend-0001 published baseline",
+        "### Backend-0002 normalization and identity mutations",
+    )
+    mutations_0002 = _section_between(
+        documentation,
+        "### Backend-0002 normalization and identity mutations",
+        "## Final UUID-only runtime schema",
+    )
+    final_runtime = _section_between(
+        documentation,
+        "## Final UUID-only runtime schema",
+        "## Retained legacy partition parents",
+    )
+
+    for scope_column in ("team_id", "project_id", "environment_id"):
+        assert f"{scope_column} UUID NOT NULL REFERENCES" in historical_0001
+        assert f"ALTER COLUMN {scope_column} DROP NOT NULL" in mutations_0002
+
+    for identity_v2_column in (
+        "identity_version",
+        "provider",
+        "folder_code",
+        "alert_name",
+    ):
+        assert identity_v2_column not in historical_0001
+        assert f"ADD COLUMN {identity_v2_column}" in mutations_0002
+        assert identity_v2_column in final_runtime

@@ -1,5 +1,7 @@
 import json
+import os
 import shutil
+import subprocess
 import sys
 from importlib import import_module
 from pathlib import Path
@@ -20,7 +22,7 @@ ROOT = Path(__file__).parents[2]
 CONTRACT_PATH = ROOT / "contracts" / "openapi" / "grafana-webhook-v1.yaml"
 OPERATOR_CONTRACT_PATH = ROOT / "contracts" / "openapi" / "operator-api-v1.yaml"
 TABLE_OWNERSHIP_PATH = ROOT / "contracts" / "database" / "table-ownership.yaml"
-LOCAL_COMPOSE_PATH = ROOT / "docker-compose.yml"
+COMPOSE_ENV_EXAMPLE = ROOT / ".env.compose.example"
 APPROVED_BACKEND_WORKER_TABLE_MIGRATIONS = frozenset(
     {"0003_non_partition_runtime_tables.py"}
 )
@@ -34,8 +36,28 @@ def _operator_contract() -> dict:
     return yaml.safe_load(OPERATOR_CONTRACT_PATH.read_text(encoding="utf-8"))
 
 
-def _local_compose() -> dict:
-    return yaml.safe_load(LOCAL_COMPOSE_PATH.read_text(encoding="utf-8"))
+def _render_local_compose(**environment: str) -> dict:
+    completed = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            str(COMPOSE_ENV_EXAMPLE),
+            "config",
+        ],
+        cwd=ROOT,
+        env={**os.environ, **environment},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return yaml.safe_load(completed.stdout)
+
+
+def _published_port(service: dict) -> tuple[str, int]:
+    ports = service["ports"]
+    assert len(ports) == 1
+    return ports[0]["published"], ports[0]["target"]
 
 
 def _resolve_local_ref(document: dict, value: dict) -> dict:
@@ -75,15 +97,19 @@ def test_all_contracts_and_examples_are_valid():
     validate_all(ROOT)
 
 
-def test_local_postgres_compose_restricts_passwordless_access_to_loopback():
-    """Protect local-only trust authentication from becoming network reachable."""
-    postgres = _local_compose()["services"]["postgres"]
+def test_local_postgres_compose_uses_isolated_configurable_port():
+    postgres = _render_local_compose()["services"]["postgres"]
     environment = postgres["environment"]
     password_key = "POSTGRES" + "_PASSWORD"
 
     assert environment["POSTGRES_HOST_AUTH_METHOD"] == "trust"
     assert password_key not in environment
-    assert postgres["ports"] == ["127.0.0.1:55432:5432"]
+    assert _published_port(postgres) == ("5432", 5432)
+
+    overridden = _render_local_compose(POSTGRES_HOST_PORT="15432")["services"][
+        "postgres"
+    ]
+    assert _published_port(overridden) == ("15432", 5432)
 
 
 @pytest.mark.parametrize("example_name", ["grafana-firing.json", "grafana-firing-aws.json"])
@@ -815,12 +841,15 @@ def test_rca_worker_is_an_independent_package_with_its_own_migration_stream():
 
 
 def test_local_compose_uses_the_official_pubsub_emulator_without_credentials():
-    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
-    service = compose["services"]["pubsub-emulator"]
+    service = _render_local_compose()["services"]["pubsub-emulator"]
 
     assert service["image"] == "google/cloud-sdk:578.0.0-emulators"
     assert service["platform"] == "linux/amd64"
-    assert service["ports"] == ["127.0.0.1:58085:8085"]
+    assert _published_port(service) == ("58085", 8085)
+    overridden = _render_local_compose(PUBSUB_HOST_PORT="18085")["services"][
+        "pubsub-emulator"
+    ]
+    assert _published_port(overridden) == ("18085", 8085)
     serialized = json.dumps(service).lower()
     assert "credential" not in serialized
     assert "service_account" not in serialized

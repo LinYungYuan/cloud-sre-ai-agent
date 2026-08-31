@@ -1,3 +1,4 @@
+import asyncio
 import os
 from pathlib import Path
 from time import perf_counter
@@ -6,7 +7,7 @@ from uuid import UUID
 
 import httpx
 import pytest
-from google.api_core.client_options import ClientOptions
+from google.api_core.retry import Retry
 from google.auth.credentials import AnonymousCredentials
 from pydantic import SecretStr
 from sqlalchemy import event, text
@@ -33,19 +34,35 @@ EXAMPLE = (
 
 
 class _PublishFuture:
-    def result(self) -> str:
+    def result(self, timeout: float | None = None) -> str:
+        assert timeout is not None and timeout > 0
         return "published-message"
 
 
 class RecordingPublisherClient:
+    class Transport:
+        def close(self) -> None:
+            return None
+
     def __init__(self) -> None:
         self.messages: list[tuple[str, bytes, dict[str, str]]] = []
         self.stopped = False
+        self.transport = self.Transport()
 
     def topic_path(self, project_id: str, topic_id: str) -> str:
         return f"projects/{project_id}/topics/{topic_id}"
 
-    def publish(self, topic: str, data: bytes, **attributes: str) -> _PublishFuture:
+    def publish(
+        self,
+        topic: str,
+        data: bytes,
+        *,
+        retry: Retry,
+        timeout: float,
+        **attributes: str,
+    ) -> _PublishFuture:
+        assert retry.timeout is not None and retry.timeout > 0
+        assert timeout > 0
         self.messages.append((topic, data, attributes))
         return _PublishFuture()
 
@@ -65,26 +82,63 @@ class _LifecycleConnection:
 
 
 class _LifecycleEngine:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        dispose_error: BaseException | None = None,
+        events: list[str] | None = None,
+    ) -> None:
         self.dispose_calls = 0
+        self.dispose_error = dispose_error
+        self.events = events
 
     def connect(self) -> _LifecycleConnection:
         return _LifecycleConnection()
 
     async def dispose(self) -> None:
         self.dispose_calls += 1
+        if self.events is not None:
+            self.events.append("engine.dispose")
+        if self.dispose_error is not None:
+            raise self.dispose_error
+
+
+class _LifecyclePublisherTransport:
+    def __init__(
+        self,
+        *,
+        close_error: BaseException | None = None,
+        events: list[str] | None = None,
+    ) -> None:
+        self.close_error = close_error
+        self.close_calls = 0
+        self.events = events
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self.events is not None:
+            self.events.append("publisher.transport.close")
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class _LifecyclePublisherClient:
     def __init__(
         self,
         *,
-        topic_error: Exception | None = None,
-        stop_error: Exception | None = None,
+        topic_error: BaseException | None = None,
+        stop_error: BaseException | None = None,
+        transport_close_error: BaseException | None = None,
+        events: list[str] | None = None,
     ) -> None:
         self.topic_error = topic_error
         self.stop_error = stop_error
         self.stop_calls = 0
+        self.transport = _LifecyclePublisherTransport(
+            close_error=transport_close_error,
+            events=events,
+        )
+        self.events = events
 
     def topic_path(self, project_id: str, topic_id: str) -> str:
         del project_id, topic_id
@@ -94,6 +148,8 @@ class _LifecyclePublisherClient:
 
     def stop(self) -> None:
         self.stop_calls += 1
+        if self.events is not None:
+            self.events.append("publisher.stop")
         if self.stop_error is not None:
             raise self.stop_error
 
@@ -160,6 +216,7 @@ async def test_production_resources_stops_client_and_disposes_engine_when_topic_
             raise AssertionError("topic acquisition should fail")
 
     assert client.stop_calls == 1
+    assert client.transport.close_calls == 1
     assert engine.dispose_calls == 1
 
 
@@ -177,6 +234,7 @@ async def test_production_resources_disposes_engine_when_client_stop_fails(
             pass
 
     assert client.stop_calls == 1
+    assert client.transport.close_calls == 1
     assert engine.dispose_calls == 1
 
 
@@ -193,27 +251,261 @@ async def test_production_resources_stops_client_and_disposes_engine_on_normal_e
         pass
 
     assert client.stop_calls == 1
+    assert client.transport.close_calls == 1
     assert engine.dispose_calls == 1
 
 
-def test_local_emulator_client_uses_explicit_endpoint_and_anonymous_credentials(
+@pytest.mark.asyncio
+async def test_production_resources_disposes_engine_when_publisher_transport_close_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    engine = _LifecycleEngine()
+    client = _LifecyclePublisherClient(
+        transport_close_error=RuntimeError("transport close failed")
+    )
+    _stub_resource_dependencies(monkeypatch, engine)
+    monkeypatch.setattr(composition, "create_publisher_client", lambda _: client)
+
+    with pytest.raises(RuntimeError, match="transport close failed"):
+        async with composition.production_resources(_resource_settings()):
+            pass
+
+    assert client.stop_calls == 1
+    assert client.transport.close_calls == 1
+    assert engine.dispose_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_production_resources_preserves_body_error_after_all_cleanup_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    engine = _LifecycleEngine(
+        dispose_error=RuntimeError("engine dispose failed"),
+        events=events,
+    )
+    client = _LifecyclePublisherClient(
+        stop_error=RuntimeError("stop failed"),
+        transport_close_error=RuntimeError("transport close failed"),
+        events=events,
+    )
+    _stub_resource_dependencies(monkeypatch, engine)
+    monkeypatch.setattr(composition, "create_publisher_client", lambda _: client)
+
+    with pytest.raises(RuntimeError, match="body failed"):
+        async with composition.production_resources(_resource_settings()):
+            raise RuntimeError("body failed")
+
+    assert events == [
+        "publisher.stop",
+        "publisher.transport.close",
+        "engine.dispose",
+    ]
+    assert client.stop_calls == 1
+    assert client.transport.close_calls == 1
+    assert engine.dispose_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_production_resources_raises_first_cleanup_error_after_attempting_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    engine = _LifecycleEngine(
+        dispose_error=RuntimeError("engine dispose failed"),
+        events=events,
+    )
+    client = _LifecyclePublisherClient(
+        stop_error=RuntimeError("stop failed"),
+        transport_close_error=RuntimeError("transport close failed"),
+        events=events,
+    )
+    _stub_resource_dependencies(monkeypatch, engine)
+    monkeypatch.setattr(composition, "create_publisher_client", lambda _: client)
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        async with composition.production_resources(_resource_settings()):
+            pass
+
+    assert events == [
+        "publisher.stop",
+        "publisher.transport.close",
+        "engine.dispose",
+    ]
+    assert client.stop_calls == 1
+    assert client.transport.close_calls == 1
+    assert engine.dispose_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_production_resources_preserves_cancellation_after_cleanup_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    engine = _LifecycleEngine(
+        dispose_error=RuntimeError("engine dispose failed"),
+        events=events,
+    )
+    client = _LifecyclePublisherClient(
+        stop_error=RuntimeError("stop failed"),
+        transport_close_error=RuntimeError("transport close failed"),
+        events=events,
+    )
+    _stub_resource_dependencies(monkeypatch, engine)
+    monkeypatch.setattr(composition, "create_publisher_client", lambda _: client)
+
+    with pytest.raises(asyncio.CancelledError):
+        async with composition.production_resources(_resource_settings()):
+            raise asyncio.CancelledError()
+
+    assert events == [
+        "publisher.stop",
+        "publisher.transport.close",
+        "engine.dispose",
+    ]
+    assert client.stop_calls == 1
+    assert client.transport.close_calls == 1
+    assert engine.dispose_calls == 1
+
+
+def test_local_emulator_client_uses_explicit_insecure_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel = object()
     constructed: dict[str, object] = {}
+
+    class FakePublisherTransport:
+        def __init__(
+            self,
+            *,
+            channel: object,
+            credentials: AnonymousCredentials,
+        ) -> None:
+            constructed["created_transport"] = self
+            constructed["transport_channel"] = channel
+            constructed["transport_credentials"] = credentials
 
     class FakePublisherClient:
         def __init__(self, **values: object) -> None:
             constructed.update(values)
 
+    monkeypatch.setenv("PUBSUB_EMULATOR_HOST", "external-value-must-not-change")
+    monkeypatch.setattr(
+        pubsub_publisher.grpc,
+        "insecure_channel",
+        lambda host: constructed.setdefault("channel_host", host) and channel,
+    )
+    monkeypatch.setattr(
+        pubsub_publisher,
+        "PublisherGrpcTransport",
+        FakePublisherTransport,
+    )
     monkeypatch.setattr(
         pubsub_publisher.pubsub_v1, "PublisherClient", FakePublisherClient
     )
 
     pubsub_publisher.create_publisher_client("127.0.0.1:58085")
 
-    assert isinstance(constructed["credentials"], AnonymousCredentials)
-    assert isinstance(constructed["client_options"], ClientOptions)
-    assert constructed["client_options"].api_endpoint == "127.0.0.1:58085"
+    assert constructed["channel_host"] == "127.0.0.1:58085"
+    assert constructed["transport_channel"] is channel
+    assert isinstance(constructed["transport_credentials"], AnonymousCredentials)
+    assert constructed["transport"] is constructed["created_transport"]
+    assert os.environ["PUBSUB_EMULATOR_HOST"] == "external-value-must-not-change"
+
+
+def test_local_emulator_client_closes_transport_when_client_construction_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class FakeChannel:
+        def close(self) -> None:
+            events.append("channel.close")
+
+    class FakePublisherTransport:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def close(self) -> None:
+            events.append("transport.close")
+
+    class FailingPublisherClient:
+        def __init__(self, **_: object) -> None:
+            raise RuntimeError("client construction failed")
+
+    monkeypatch.setattr(
+        pubsub_publisher.grpc,
+        "insecure_channel",
+        lambda _: FakeChannel(),
+    )
+    monkeypatch.setattr(
+        pubsub_publisher,
+        "PublisherGrpcTransport",
+        FakePublisherTransport,
+    )
+    monkeypatch.setattr(
+        pubsub_publisher.pubsub_v1,
+        "PublisherClient",
+        FailingPublisherClient,
+    )
+
+    with pytest.raises(RuntimeError, match="client construction failed"):
+        pubsub_publisher.create_publisher_client("127.0.0.1:58085")
+
+    assert events == ["transport.close"]
+
+
+def test_local_emulator_client_preserves_construction_error_when_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakePublisherTransport:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def close(self) -> None:
+            raise RuntimeError("transport cleanup failed")
+
+    class FailingPublisherClient:
+        def __init__(self, **_: object) -> None:
+            raise RuntimeError("client construction failed")
+
+    monkeypatch.setattr(
+        pubsub_publisher.grpc,
+        "insecure_channel",
+        lambda _: object(),
+    )
+    monkeypatch.setattr(
+        pubsub_publisher,
+        "PublisherGrpcTransport",
+        FakePublisherTransport,
+    )
+    monkeypatch.setattr(
+        pubsub_publisher.pubsub_v1,
+        "PublisherClient",
+        FailingPublisherClient,
+    )
+
+    with pytest.raises(RuntimeError, match="client construction failed"):
+        pubsub_publisher.create_publisher_client("127.0.0.1:58085")
+
+
+def test_publisher_client_uses_adc_defaults_without_an_emulator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    constructed: list[dict[str, object]] = []
+
+    class FakePublisherClient:
+        def __init__(self, **values: object) -> None:
+            constructed.append(values)
+
+    monkeypatch.setattr(
+        pubsub_publisher.pubsub_v1, "PublisherClient", FakePublisherClient
+    )
+
+    client = pubsub_publisher.create_publisher_client(None)
+
+    assert isinstance(client, FakePublisherClient)
+    assert constructed == [{}]
 
 
 @pytest.mark.asyncio

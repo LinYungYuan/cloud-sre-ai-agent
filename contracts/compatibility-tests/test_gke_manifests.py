@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -9,6 +11,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BASE_DIR = REPOSITORY_ROOT / "deploy" / "k8s" / "base"
 JOBS_DIR = REPOSITORY_ROOT / "deploy" / "k8s" / "jobs"
 DEPLOYMENT_RUNBOOK = REPOSITORY_ROOT / "deploy" / "k8s" / "README.md"
+COMPOSE_ENV_EXAMPLE = REPOSITORY_ROOT / ".env.compose.example"
+MIGRATION_RUNNER = REPOSITORY_ROOT / "deploy" / "k8s" / "run-migrations.sh"
 
 # outbox-deployment.yaml 與 partition-cronjob.yaml 已移除
 EXPECTED_RESOURCE_FILES = {
@@ -102,6 +106,159 @@ def _assert_secret_reference(entry: dict[str, Any], key: str) -> None:
     }
 
 
+def _render_compose(**environment: str) -> dict[str, Any]:
+    completed = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            str(COMPOSE_ENV_EXAMPLE),
+            "config",
+        ],
+        cwd=REPOSITORY_ROOT,
+        env={**os.environ, **environment},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rendered: dict[str, Any] = yaml.safe_load(completed.stdout)
+    return rendered
+
+
+def _published_port(service: dict[str, Any]) -> tuple[str, int]:
+    ports = service["ports"]
+    assert len(ports) == 1
+    return ports[0]["published"], ports[0]["target"]
+
+
+def _fake_kubectl(tmp_path: Path) -> tuple[Path, Path]:
+    log_path = tmp_path / "kubectl.log"
+    fake_path = tmp_path / "kubectl"
+    fake_path.write_text(
+        """#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "$KUBECTL_LOG"
+last_arg=''
+for argument in "$@"; do
+  last_arg="$argument"
+done
+if [ "$1" = "wait" ] && [ "${KUBECTL_FAIL_JOB:-}" = "$last_arg" ]; then
+  exit 42
+fi
+if [ "$1" = "create" ]; then
+  case "$3" in
+    *backend-0002*) printf 'backend-0002-job' ;;
+    *worker-0002*) printf 'worker-0002-job' ;;
+    *backend-0003*) printf 'backend-0003-job' ;;
+    *worker-0003*) printf 'worker-0003-job' ;;
+    *) exit 64 ;;
+  esac
+fi
+""",
+        encoding="utf-8",
+    )
+    fake_path.chmod(0o755)
+    return fake_path, log_path
+
+
+def test_migration_runner_creates_and_waits_for_all_four_gates_in_order(
+    tmp_path: Path,
+) -> None:
+    assert MIGRATION_RUNNER.is_file()
+    fake_kubectl, log_path = _fake_kubectl(tmp_path)
+    environment = {
+        **os.environ,
+        "KUBECTL_BIN": str(fake_kubectl),
+        "KUBECTL_LOG": str(log_path),
+        "MIGRATION_JOB_TIMEOUT": "9m",
+    }
+
+    completed = subprocess.run(
+        [str(MIGRATION_RUNNER)],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    calls = log_path.read_text(encoding="utf-8").replace(
+        str(REPOSITORY_ROOT), "<ROOT>"
+    ).splitlines()
+    assert calls == [
+        "apply -f <ROOT>/deploy/k8s/base/serviceaccounts.yaml",
+        "create -f <ROOT>/deploy/k8s/jobs/backend-0002-migration-job.yaml -o jsonpath={.metadata.name}",
+        "wait --for=condition=complete --timeout=9m job/backend-0002-job",
+        "create -f <ROOT>/deploy/k8s/jobs/worker-0002-migration-job.yaml -o jsonpath={.metadata.name}",
+        "wait --for=condition=complete --timeout=9m job/worker-0002-job",
+        "create -f <ROOT>/deploy/k8s/jobs/backend-0003-migration-job.yaml -o jsonpath={.metadata.name}",
+        "wait --for=condition=complete --timeout=9m job/backend-0003-job",
+        "create -f <ROOT>/deploy/k8s/jobs/worker-0003-migration-job.yaml -o jsonpath={.metadata.name}",
+        "wait --for=condition=complete --timeout=9m job/worker-0003-job",
+    ]
+
+
+def test_migration_runner_stops_and_reports_the_failed_gate(tmp_path: Path) -> None:
+    assert MIGRATION_RUNNER.is_file()
+    fake_kubectl, log_path = _fake_kubectl(tmp_path)
+    environment = {
+        **os.environ,
+        "KUBECTL_BIN": str(fake_kubectl),
+        "KUBECTL_LOG": str(log_path),
+        "KUBECTL_FAIL_JOB": "job/worker-0002-job",
+    }
+
+    completed = subprocess.run(
+        [str(MIGRATION_RUNNER)],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    calls = log_path.read_text(encoding="utf-8").replace(
+        str(REPOSITORY_ROOT), "<ROOT>"
+    ).splitlines()
+    assert calls == [
+        "apply -f <ROOT>/deploy/k8s/base/serviceaccounts.yaml",
+        "create -f <ROOT>/deploy/k8s/jobs/backend-0002-migration-job.yaml -o jsonpath={.metadata.name}",
+        "wait --for=condition=complete --timeout=15m job/backend-0002-job",
+        "create -f <ROOT>/deploy/k8s/jobs/worker-0002-migration-job.yaml -o jsonpath={.metadata.name}",
+        "wait --for=condition=complete --timeout=15m job/worker-0002-job",
+        "describe job/worker-0002-job",
+        "logs job/worker-0002-job",
+    ]
+    assert "Worker 0002" in completed.stderr
+
+
+def test_compose_env_file_controls_local_host_ports() -> None:
+    rendered = _render_compose()
+    services = rendered["services"]
+    assert _published_port(services["postgres"]) == ("5432", 5432)
+    assert _published_port(services["pubsub-emulator"]) == ("58085", 8085)
+
+    overridden = _render_compose(
+        POSTGRES_HOST_PORT="15432",
+        PUBSUB_HOST_PORT="18085",
+    )["services"]
+    assert _published_port(overridden["postgres"]) == ("15432", 5432)
+    assert _published_port(overridden["pubsub-emulator"]) == ("18085", 8085)
+
+
+def test_compose_renders_only_infrastructure_services() -> None:
+    services = _render_compose()["services"]
+    assert set(services) == {"postgres", "pubsub-emulator"}
+    assert services["postgres"]["environment"] == {
+        "POSTGRES_DB": "sre_agent",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
+        "POSTGRES_USER": "postgres",
+    }
+    assert "environment" not in services["pubsub-emulator"]
+
+
 def test_kustomization_references_each_base_manifest() -> None:
     kustomization_path = BASE_DIR / "kustomization.yaml"
     assert kustomization_path.is_file()
@@ -134,7 +291,7 @@ def test_base_contains_only_portable_application_resources() -> None:
         "ConfigMap": 1,
         "Deployment": 3,
         "Service": 2,
-        "ServiceAccount": 3,
+        "ServiceAccount": 2,
     }
     assert all("namespace" not in resource["metadata"] for resource in resources)
     assert not {"Secret", "Ingress", "Gateway"} & counts.keys()
@@ -151,7 +308,6 @@ def test_base_contains_only_portable_application_resources() -> None:
     # sre-agent-outbox ServiceAccount 已移除
     assert {resource["metadata"]["name"] for resource in service_accounts} == {
         "sre-agent-backend",
-        "sre-agent-migrator",
         "sre-agent-rca-worker",
     }
     assert all(not resource["metadata"].get("annotations") for resource in service_accounts)
@@ -231,11 +387,13 @@ def test_backend_owns_pubsub_publisher_config_but_excludes_ai_and_mcp_settings()
     }
 
     environment = _environment(container)
-    # Backend 應含 Pub/Sub publisher 配置
-    assert "PUBSUB_PROJECT_ID" in environment, "Backend 必須含 PUBSUB_PROJECT_ID"
-    assert "RCA_TOPIC_ID" in environment, "Backend 必須含 RCA_TOPIC_ID"
-    assert "DATABASE_URL" in environment, "Backend 必須含 DATABASE_URL"
-    assert "GRAFANA_TOKENS" in environment, "Backend 必須含 GRAFANA_TOKENS"
+    assert set(environment) == {
+        "DATABASE_URL",
+        "GRAFANA_TOKENS",
+        "PUBSUB_PROJECT_ID",
+        "RCA_TOPIC_ID",
+        "APP_ENVIRONMENT",
+    }
 
     # Worker 專屬 AI/MCP 設定不應出現在 Backend
     worker_only_keys = {
@@ -319,24 +477,29 @@ def test_worker_owns_subscriber_ai_and_mcp_settings_without_publisher_privileges
     assert "livenessProbe" not in container and "readinessProbe" not in container
 
     environment = _environment(container)
-    # Worker 必須含 subscriber 與 AI/MCP 設定
-    required_worker_keys = {
+    assert set(environment) == {
         "DATABASE_URL",
         "PUBSUB_PROJECT_ID",
+        "RCA_TOPIC_ID",
         "PUBSUB_SUBSCRIPTION_ID",
         "APP_ENVIRONMENT",
         "MODEL_NAME",
+        "PUBSUB_AUTO_CREATE",
+        "WORKER_ID",
+        "MCP_CAPABILITY_MANIFEST",
         "METRICS_MCP_URL",
         "TRACE_MCP_URL",
         "LOG_MCP_URL",
+        "SPECIALIST_ANALYSIS_MODE",
+        "MCP_MAX_RESPONSE_BYTES",
+        "EVIDENCE_CHUNK_CHARS",
+        "EVIDENCE_MAX_CHUNKS",
+        "EVIDENCE_MAX_TOTAL_CHARS",
+        "SPECIALIST_MAX_TOOL_CALLS",
+        "SPECIALIST_MAX_OBSERVATIONS",
+        "RCA_DEADLINE_SECONDS",
+        "AGENT_CORRECTIVE_RETRIES",
     }
-    missing = required_worker_keys - set(environment)
-    assert not missing, f"Worker deployment 缺少必要設定：{sorted(missing)}"
-
-    # Backend 特有的 Grafana token 不應出現在 Worker
-    assert "GRAFANA_TOKENS" not in environment, (
-        "Worker deployment 不應含 GRAFANA_TOKENS（Backend publisher 特有設定）"
-    )
 
     _assert_secret_reference(environment["DATABASE_URL"], "DATABASE_URL")
     assert environment["WORKER_ID"] == {
@@ -381,92 +544,89 @@ def test_config_map_contains_only_approved_non_secret_defaults() -> None:
         assert sensitive_term not in serialized
 
 
-def test_single_migration_job_runs_all_gates_in_order_with_least_privilege() -> None:
-    assert {path.name for path in JOBS_DIR.glob("*.yaml")} == {"migration-job.yaml"}
-    path = JOBS_DIR / "migration-job.yaml"
-    assert path.is_file(), f"migration Job template does not exist: {path}"
-    documents = _load_yaml(path)
-    assert len(documents) == 1
-    job = documents[0]
-
-    assert job["apiVersion"] == "batch/v1"
-    assert job["kind"] == "Job"
-    assert job["metadata"]["generateName"] == "sre-agent-migration-"
-    assert "name" not in job["metadata"]
-    assert "namespace" not in job["metadata"]
-    assert "data" not in job and "stringData" not in job
-
-    assert job["spec"]["backoffLimit"] == 0
-    assert job["spec"]["activeDeadlineSeconds"] == 1800
-    assert job["spec"]["ttlSecondsAfterFinished"] == 86400
-
-    pod_spec = _pod_spec(job)
-    assert pod_spec["restartPolicy"] == "Never"
-    assert pod_spec["serviceAccountName"] == "sre-agent-migrator"
-    assert pod_spec["securityContext"] == {
-        "runAsNonRoot": True,
-        "runAsUser": 65532,
-        "runAsGroup": 65532,
-        "fsGroup": 65532,
-        "seccompProfile": {"type": "RuntimeDefault"},
+def test_migration_jobs_are_immutable_bounded_and_least_privilege() -> None:
+    expectations = {
+        "backend-0002-migration-job.yaml": {
+            "generate_name": "sre-agent-backend-0002-migration-",
+            "image": "sre-agent-backend:latest",
+            "service_account": "sre-agent-backend",
+            "revision": "0002_grafana_normalization_v2",
+        },
+        "worker-0002-migration-job.yaml": {
+            "generate_name": "sre-agent-worker-0002-migration-",
+            "image": "sre-agent-rca-worker:latest",
+            "service_account": "sre-agent-rca-worker",
+            "revision": "0002_adk_specialist_analysis",
+        },
+        "backend-0003-migration-job.yaml": {
+            "generate_name": "sre-agent-backend-0003-migration-",
+            "image": "sre-agent-backend:latest",
+            "service_account": "sre-agent-backend",
+            "revision": "0003_non_partition_runtime_tables",
+        },
+        "worker-0003-migration-job.yaml": {
+            "generate_name": "sre-agent-worker-0003-migration-",
+            "image": "sre-agent-rca-worker:latest",
+            "service_account": "sre-agent-rca-worker",
+            "revision": "0003_validate_ordinary_runtime_tables",
+        },
     }
-
-    init_containers = pod_spec["initContainers"]
-    assert [container["name"] for container in init_containers] == [
-        "backend-0002",
-        "worker-0002",
-        "backend-0003",
-        "worker-0003",
-    ]
-    assert [container["image"] for container in init_containers] == [
-        "sre-agent-backend:latest",
-        "sre-agent-rca-worker:latest",
-        "sre-agent-backend:latest",
-        "sre-agent-rca-worker:latest",
-    ]
-    assert [container["command"] for container in init_containers] == [
-        ["alembic", "upgrade", "0002_grafana_normalization_v2"],
-        ["alembic", "upgrade", "0002_adk_specialist_analysis"],
-        ["alembic", "upgrade", "0003_non_partition_runtime_tables"],
-        ["alembic", "upgrade", "0003_validate_ordinary_runtime_tables"],
-    ]
-
     expected_resources = {
         "requests": {"cpu": "100m", "memory": "256Mi"},
         "limits": {"cpu": "1000m", "memory": "1Gi"},
     }
-    expected_security_context = {
-        "runAsNonRoot": True,
-        "runAsUser": 65532,
-        "runAsGroup": 65532,
-        "allowPrivilegeEscalation": False,
-        "readOnlyRootFilesystem": True,
-        "capabilities": {"drop": ["ALL"]},
-    }
-    for container in init_containers:
+
+    assert {path.name for path in JOBS_DIR.glob("*.yaml")} == set(expectations)
+
+    for filename, expected in expectations.items():
+        path = JOBS_DIR / filename
+        assert path.is_file(), f"migration Job template does not exist: {path}"
+        documents = _load_yaml(path)
+        assert len(documents) == 1
+        job = documents[0]
+
+        assert job["apiVersion"] == "batch/v1"
+        assert job["kind"] == "Job"
+        assert job["metadata"]["generateName"] == expected["generate_name"]
+        assert "name" not in job["metadata"]
+        assert "namespace" not in job["metadata"]
+        assert "data" not in job and "stringData" not in job
+
+        assert job["spec"]["backoffLimit"] == 0
+        assert job["spec"]["activeDeadlineSeconds"] == 900
+        assert job["spec"]["ttlSecondsAfterFinished"] == 86400
+
+        pod_spec = _pod_spec(job)
+        assert pod_spec["restartPolicy"] == "Never"
+        assert pod_spec["serviceAccountName"] == expected["service_account"]
+        assert pod_spec["securityContext"] == {
+            "runAsNonRoot": True,
+            "runAsUser": 65532,
+            "runAsGroup": 65532,
+            "fsGroup": 65532,
+            "seccompProfile": {"type": "RuntimeDefault"},
+        }
+
+        container = _container(job)
+        assert container["image"] == expected["image"]
+        assert container["command"] == [
+            "alembic",
+            "upgrade",
+            expected["revision"],
+        ]
         environment = _environment(container)
         assert set(environment) == {"DATABASE_URL"}
         _assert_secret_reference(environment["DATABASE_URL"], "DATABASE_URL")
-        assert container["securityContext"] == expected_security_context
+        assert "configMapKeyRef" not in yaml.safe_dump(job)
+        assert container["securityContext"] == {
+            "runAsNonRoot": True,
+            "runAsUser": 65532,
+            "runAsGroup": 65532,
+            "allowPrivilegeEscalation": False,
+            "readOnlyRootFilesystem": True,
+            "capabilities": {"drop": ["ALL"]},
+        }
         assert container["resources"] == expected_resources
-
-    assert "upgrade\n    - head" not in yaml.safe_dump(job)
-    assert "configMapKeyRef" not in yaml.safe_dump(job)
-
-    completion = _container(job)
-    assert completion["name"] == "complete"
-    assert completion["image"] == "sre-agent-backend:latest"
-    assert completion["command"] == [
-        "python",
-        "-c",
-        "print('all migrations completed')",
-    ]
-    assert "env" not in completion and "envFrom" not in completion
-    assert completion["securityContext"] == expected_security_context
-    assert completion["resources"] == {
-        "requests": {"cpu": "10m", "memory": "32Mi"},
-        "limits": {"cpu": "100m", "memory": "128Mi"},
-    }
 
 
 def test_release_runbook_fails_fast_and_orders_migrations_before_rollouts() -> None:
@@ -480,9 +640,7 @@ def test_release_runbook_fails_fast_and_orders_migrations_before_rollouts() -> N
     )[0]
     ordered_commands = [
         "set -euo pipefail",
-        "kubectl apply -f deploy/k8s/base/serviceaccounts.yaml",
-        ("MIGRATION_JOB=$(kubectl create -f deploy/k8s/jobs/migration-job.yaml"),
-        'kubectl wait --for=condition=complete --timeout=30m "job/${MIGRATION_JOB}"',
+        "deploy/k8s/run-migrations.sh",
         "kubectl apply -k deploy/k8s/base",
         "kubectl rollout restart deployment/sre-agent-backend",
         "kubectl rollout restart deployment/sre-agent-frontend",
@@ -496,6 +654,15 @@ def test_release_runbook_fails_fast_and_orders_migrations_before_rollouts() -> N
         assert command in release_commands
     positions = [release_commands.index(command) for command in ordered_commands]
     assert positions == sorted(positions)
+
+    for forbidden in (
+        "backend-migration-job.yaml",
+        "worker-migration-job.yaml",
+        "kubectl create -f deploy/k8s/jobs/",
+        "upgrade head",
+        "alembic stamp",
+    ):
+        assert forbidden not in release_commands
 
     # 確認 outbox 相關命令不在 runbook 中
     assert "sre-agent-outbox" not in release_commands, (
