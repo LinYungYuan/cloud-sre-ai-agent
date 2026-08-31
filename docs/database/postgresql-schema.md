@@ -1,21 +1,20 @@
-# PostgreSQL schema reference
+# PostgreSQL 資料庫結構參考文件
 
-This reference describes the release schema after the immutable four-gate
-conversion. Alembic files, not the examples below, are the executable schema
-authority. Backend migrations write `alembic_version_backend`; RCA Worker
-migrations write `alembic_version_rca_worker`. The two streams share an
-application role but retain separate version tables and table-ownership
-boundaries. The required cross-stream order at each interleaved pair is
-**Backend migration → RCA Worker migration**: Backend-0002 before Worker-0002,
-then Backend-0003 before Worker-0003.
+本文件說明不可變四階段轉換完成後的發布資料庫結構。實際可執行的資料庫結構以
+Alembic 檔案為準，而不是以下範例。Backend 遷移會寫入
+`alembic_version_backend`；RCA Worker 遷移會寫入
+`alembic_version_rca_worker`。兩條遷移流程共用同一個應用程式角色，
+但各自保留獨立的版本表與資料表所有權邊界。每組交錯遷移都必須遵循
+**Backend 遷移 → RCA Worker 遷移**的跨流程順序：先執行
+Backend-0002，再執行 Worker-0002；接著執行 Backend-0003，最後執行 Worker-0003。
 
-## 維護窗口與四個 migration gate
+## 維護窗口與四個遷移關卡
 
-This is the authoritative operator procedure. Before gate 1, take an approved
-backup and **停止 Backend 與 RCA Worker 的所有 writes**. Keep every runtime
-stopped until gate 4 and the Worker-0003 的 postcondition catalog checks pass.
-Every gate is explicit; do not substitute an implicit latest target or use a
-version-table shortcut.
+這是正式的維運操作流程。執行關卡 1 前，必須先完成經核准的備份，並且
+**停止 Backend 與 RCA Worker 的所有寫入**。在關卡 4 與 Worker-0003 的
+後置條件系統目錄檢查通過以前，所有執行期服務都必須維持停止狀態。
+每個關卡都必須明確執行；不得改用隱含的最新版本目標，也不得透過直接修改版本表
+來略過遷移。
 
 ```bash
 (cd backend && BACKEND_MIGRATION_ENV_FILE=../.env.backend-migration.example uv run alembic upgrade 0002_grafana_normalization_v2)
@@ -53,28 +52,26 @@ SELECT version_num FROM alembic_version_backend;
 SELECT version_num FROM alembic_version_rca_worker;
 ```
 
-After each query pair, compare both rows with the expected completed gate
-before continuing. A clean database runs all four gates. An existing
-**既有 Worker-0002 head** database first verifies the Backend-0002 and
-Worker-0002 version rows and their source catalog, then **只執行 gate 3 與 gate 4**.
-It must **不得 stamp 或 replay** either published migration.
+每次查詢兩個版本表後，都必須確認兩筆資料符合預期完成的關卡，才能繼續下一步。
+全新資料庫必須執行全部四個關卡。若資料庫目前已位於
+**Worker-0002 head**，應先驗證 Backend-0002、Worker-0002 的版本資料與來源
+系統目錄，然後**只執行關卡 3 與關卡 4**。對於任何已發布的遷移，
+都**不得執行 `stamp` 或重新執行**。
 
-If a gate or catalog check fails before runtime restart, leave writes stopped
-and investigate from the approved backup. Retained legacy parents remain in
-place. After new writes, the exact pre-conversion database state **無法還原**
-through Alembic downgrade. **不得執行 Alembic downgrade**: stop traffic
-and restore from an **approved backup** or migrate the validated delta under
-an explicit recovery plan.
+如果在執行期服務重新啟動前有任一關卡或系統目錄檢查失敗，必須持續停止寫入，
+並以經核准的備份為基礎進行調查。保留的舊版父資料表仍會留在原處。一旦新版本開始
+寫入資料，就**無法透過 Alembic `downgrade` 還原**到轉換前完全相同的資料庫狀態。
+**不得執行 Alembic `downgrade`**；應停止流量並從**經核准的備份**還原，或依照
+明確的復原計畫遷移已驗證的資料差異。
 
-## Historical Backend-0001 and Backend-0002 reference manifest
+## Backend-0001 與 Backend-0002 歷史參考清單
 
-The release schema below supersedes the six partitioned runtime parents, but
-this reference intentionally retains the historical Backend-0001 inventory.
-It makes the immutable migration ancestry auditable; it is **not** an
-instruction to recreate partitioned tables or to restore their composite-key
-interface. `alembic_version_backend` records the Backend stream version.
+以下發布資料庫結構已取代六個分割式執行期父資料表，但本文件仍刻意保留
+Backend-0001 的歷史清單，讓不可變遷移的演進關係可以接受稽核。這些內容
+**不是**重新建立分割表或恢復複合鍵介面的操作指示。
+`alembic_version_backend` 用來記錄 Backend 遷移流程的版本。
 
-### Backend-0001 published baseline
+### Backend-0001 已發布基準
 
 ```sql
 CREATE TABLE teams (
@@ -209,16 +206,15 @@ CREATE TABLE worker_attempts (
 );
 ```
 
-The six partitioned parents are represented by the final runtime DDL below,
-which intentionally replaces their old partition-key columns. The old
-`evidence_records` pointer column is historical only; the canonical table has
-`raw_result BYTEA`, `metadata JSONB`, and `content_hash`.
+下方最終執行期 DDL 代表原本六個分割式父資料表，並刻意移除其舊有的分割鍵欄位。
+舊版 `evidence_records` 的指標欄位僅供歷史參考；正式資料表使用
+`raw_result BYTEA`、`metadata JSONB` 與 `content_hash`。
 
-### Backend-0002 normalization and identity mutations
+### Backend-0002 正規化與識別欄位變更
 
-Backend-0002 additionally introduced the following persistent normalization
-objects and altered columns. `folder_code is not projects.id`; it is a source
-folder identifier mapped by `folder_scope_mappings`.
+Backend-0002 另外加入下列永久保存的正規化物件與欄位變更。
+`folder_code` **不是** `projects.id`；它是由 `folder_scope_mappings`
+對應的來源資料夾識別碼。
 
 ```sql
 CREATE TABLE normalization_rules (
@@ -254,9 +250,8 @@ CREATE INDEX ix_normalization_rules_lookup ON normalization_rules (source_id, en
 CREATE INDEX ix_folder_scope_mappings_lookup ON folder_scope_mappings (source_id, enabled, folder_code);
 ```
 
-The remaining immutable Backend-0001 operational indexes remain part of the
-historical manifest. Their names and predicates are retained for migration
-audit even where a canonical runtime table has since replaced a parent.
+其餘不可變的 Backend-0001 維運索引仍屬於歷史清單的一部分。即使正式執行期
+資料表已取代原本的父資料表，這些索引名稱與條件仍會保留，以供遷移稽核。
 
 ```sql
 CREATE UNIQUE INDEX uq_rca_runs_active_incident
@@ -275,20 +270,17 @@ CREATE INDEX ix_worker_jobs_status_available ON worker_jobs (status, available_a
 CREATE INDEX ix_outbox_events_status_available ON outbox_events (status, available_at);
 ```
 
-## Final UUID-only runtime schema
+## 最終僅使用 UUID 的執行期資料庫結構
 
-The six canonical runtime relations are ordinary PostgreSQL tables. Each has a
-single-column `id UUID PRIMARY KEY`; all foreign keys below use UUID columns
-only. The canonical catalog requirement is `relkind = 'r'` and
-`relispartition = false`. No routing helper or composite foreign key is part of
-the runtime interface. During Backend-0003 conversion, **historical rows are copied and validated before cutover**; row counts, UUID uniqueness, required
-fields, foreign keys, and representative reads/writes are checked before the
-canonical names switch.
+六個正式執行期關聯都是一般 PostgreSQL 資料表。每張表都使用單一欄位的
+`id UUID PRIMARY KEY`，而且下方所有外鍵都只使用 UUID 欄位。正式系統目錄必須符合
+`relkind = 'r'` 與 `relispartition = false`。執行期介面不包含任何路由輔助函式或
+複合外鍵。Backend-0003 轉換期間，會在切換前**複製並驗證歷史資料列**；只有在確認
+資料列數量、UUID 唯一性、必填欄位、外鍵，以及代表性的讀寫操作後，才會切換正式名稱。
 
-The post-Backend-0002 Incident state retains `identity_version`, `provider`,
-`folder_code`, and `alert_name`; scope columns are nullable only because the
-explicit Backend-0002 mutations above dropped their original `NOT NULL`
-requirements.
+Backend-0002 完成後的 Incident 狀態會保留 `identity_version`、`provider`、
+`folder_code` 與 `alert_name`。範圍欄位允許 NULL，僅是因為上方明確列出的
+Backend-0002 變更已移除原有的 `NOT NULL` 限制。
 
 ```sql
 CREATE TABLE webhook_deliveries (
@@ -398,15 +390,14 @@ CREATE TABLE audit_events (
 );
 ```
 
-RCA lifecycle and analysis remain Worker-owned: `worker_jobs` and
-`worker_attempts` preserve their lease, attempt, and failure fields;
-`specialist_runs` preserves its analysis audit fields; and `rca_reports` stores
-`result_status` as `COMPLETE`, `PARTIAL`, or `FAILED`. Exact evidence remains
-durable as `raw_result BYTEA`, object-shaped `metadata JSONB`, and
-`content_hash`; it is not added to the structured-data-only AI context.
-`EvidenceReference` remains an id-only UUID reference.
+RCA 生命週期與分析資料仍由 Worker 擁有：`worker_jobs` 與 `worker_attempts`
+保留其租約、執行嘗試與失敗欄位；`specialist_runs` 保留分析稽核欄位；
+`rca_reports` 則將 `result_status` 儲存為 `COMPLETE`、`PARTIAL` 或 `FAILED`。
+完整證據會持久保存為 `raw_result BYTEA`、物件格式的 `metadata JSONB`
+及 `content_hash`，不會加入僅允許結構化資料的 AI 上下文。
+`EvidenceReference` 仍是只包含 ID 的 UUID 參照。
 
-Use the following read-only catalog check after gate 4:
+關卡 4 完成後，請執行下列唯讀系統目錄檢查：
 
 ```sql
 SELECT c.relname, c.relkind, c.relispartition
@@ -423,13 +414,11 @@ WHERE c.relname IN (
 ) ORDER BY c.relname;
 ```
 
-The first six rows must be ordinary canonical relations; the final six are the
-retained legacy parents.
+前六筆資料必須是一般的正式關聯；後六筆則是保留的舊版父資料表。
 
-## Retained legacy partition parents
+## 保留的舊版分割式父資料表
 
-The conversion preserves, but does not automatically clean up, exactly these
-six historical parent names:
+轉換流程會保留下列六個歷史父資料表名稱，但不會自動清除：
 
 ```text
 webhook_deliveries__partitioned_legacy_0003
@@ -440,29 +429,26 @@ incident_timeline_events__partitioned_legacy_0003
 audit_events__partitioned_legacy_0003
 ```
 
-They exist for audit, post-cutover validation, and an explicit later cleanup
-decision. They are not a second runtime schema and no automatic process drops
-them.
+這些資料表用於稽核、切換後驗證，以及後續經明確核准的清理決策。它們不是第二套
+執行期資料庫結構，也不會由任何自動化流程刪除。
 
-## Scope and ownership
+## 範圍與所有權
 
-`teams`, `projects`, `environments`, and `services` define scope. Backend owns
-scope/source, delivery, alert, incident, timeline, outbox, and audit schema;
-the RCA Worker owns runs, specialist runs, evidence, hypotheses, reports, jobs,
-and attempts. The machine-readable ownership contract in
-`contracts/database/table-ownership.yaml` is authoritative for migration
-ownership.
+`teams`、`projects`、`environments` 與 `services` 用來定義範圍。Backend
+擁有範圍／來源、傳遞、告警、事件、時間軸、outbox 與稽核資料庫結構；RCA Worker
+則擁有執行紀錄、specialist 執行紀錄、證據、假設、報告、工作與執行嘗試。
+遷移所有權以機器可讀的
+`contracts/database/table-ownership.yaml` 契約為準。
 
-Backend, Worker, and both migration streams use the same restricted
-application role. It has the needed application DML and migration DDL but no
-superuser, role-management, database-owner, or unrelated-schema privileges.
+Backend、Worker 與兩條遷移流程使用同一個受限的應用程式角色。該角色具備必要的
+應用程式 DML 與遷移 DDL 權限，但不具備 superuser、角色管理、database owner
+或不相關資料庫結構的權限。
 
-## Local development
+## 本機開發
 
-Use `.env.compose.example` only for local infrastructure ports. The default
-PostgreSQL endpoint is `postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent`
-and the Pub/Sub emulator endpoint is `127.0.0.1:58085`. Runtime and migration
-configuration remain isolated in `.env.backend-api`, `.env.rca-worker`,
-`.env.backend-migration`, `.env.rca-worker-migration`, and `.env.compose` (with
-their committed `.example` templates). OS environment values take precedence;
-a named missing override file fails closed.
+`.env.compose.example` 僅用於設定本機基礎設施的連接埠。預設 PostgreSQL 端點為
+`postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent`，Pub/Sub 模擬器
+端點為 `127.0.0.1:58085`。執行期與遷移設定仍分別存放於
+`.env.backend-api`、`.env.rca-worker`、`.env.backend-migration`、
+`.env.rca-worker-migration` 與 `.env.compose`，並提供已提交的 `.example` 範本。
+作業系統環境變數的優先順序較高；如果明確指定的覆寫檔案不存在，系統會拒絕啟動。
