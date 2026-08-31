@@ -69,7 +69,7 @@
 
 **Reviewer gate:** Reject unless the replacement DDL and copy SQL preserve exact bytes and JSON metadata, the existing `rca_reports.result_status` and Worker lifecycle/analysis catalog objects survive unchanged, and every wrong source version fails before any replacement table is created.
 
-- [ ] **Step 1: Write failing source-contract tests (2–5 minutes)**
+- [x] **Step 1: Write failing source-contract tests (2–5 minutes)**
 
   In `test_four_stage_migration.py`, create a clean database, execute Backend `0002_grafana_normalization_v2` then Worker `0002_adk_specialist_analysis`, and seed two partition months with `raw_result=b"\x00\xffnon-utf8\n{\"a\":1.00}"`, `metadata={"contentType":"application/json","source":"metrics"}`, a SHA-256 content hash, `rca_reports.result_status='PARTIAL'`, lifecycle `failure_code='MCP_TIMEOUT'`, and a `specialist_runs.analysis_result` object. Assert the schema source contains the real Worker fields before conversion.
 
@@ -81,13 +81,13 @@
   ) == "PARTIAL"
   ```
 
-- [ ] **Step 2: Run the focused RED case (2–5 minutes)**
+- [x] **Step 2: Run the focused RED case (2–5 minutes)**
 
   Run: `cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent uv run pytest tests/integration/persistence/test_four_stage_migration.py::test_backend_0003_preserves_worker_0002_evidence_and_lifecycle -v`
 
   Expected: FAIL while running Backend `0003` because its current copy selects `raw_result_reference`, which Worker `0001` removed; the error names `raw_result_reference` or the post-upgrade exact-byte assertion fails. The database fixture must be dropped in `finally` even on this expected failure.
 
-- [ ] **Step 3: Make Backend 0003 validate the exact source and copy it verbatim (2–5 minutes)**
+- [x] **Step 3: Make Backend 0003 validate the exact source and copy it verbatim (2–5 minutes)**
 
   Add a preflight invoked before `_assert_no_duplicate_uuids()` that reads both version tables and catalogs. It must require exactly Backend `0002_grafana_normalization_v2`, Worker `0002_adk_specialist_analysis`, and these Worker-owned conditions: evidence `raw_result`, `metadata`, `content_hash`; report `result_status` with its three-value check; lifecycle `failure_code` columns; `worker_jobs` lease/attempt fields; and specialist analysis columns/checks.
 
@@ -129,7 +129,7 @@
 
   Do not recreate `rca_reports`, `rca_runs`, `worker_jobs`, `worker_attempts`, or `specialist_runs`; catalog assertions prove their Worker `0002` columns and constraints remain untouched. Do not change Worker `0001` or `0002` files.
 
-- [ ] **Step 4: Add fail-closed and preservation acceptance cases (2–5 minutes)**
+- [x] **Step 4: Add fail-closed and preservation acceptance cases (2–5 minutes)**
 
   Add tests for: Worker version still `0001_rca_worker_v1`; a source with `metadata` dropped; a source with a missing `result_status` check; duplicate evidence UUIDs; and rerunning Backend `0003` after its matching version row. The first four must raise `RuntimeError` or duplicate-precheck SQL error before canonical names change. The matching rerun is the sole no-op case and must leave the catalog unchanged.
 
@@ -139,13 +139,13 @@
   assert await table_oid(connection, "evidence_records") == original_oid
   ```
 
-- [ ] **Step 5: Run the focused GREEN tests (2–5 minutes)**
+- [x] **Step 5: Run the focused GREEN tests (2–5 minutes)**
 
   Run: `cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent uv run pytest tests/integration/persistence/test_four_stage_migration.py tests/integration/persistence/test_non_partition_migration.py tests/unit/persistence/test_schema_documentation.py -v`
 
   Expected: PASS. The canonical six tables are ordinary relations with one-column UUID primary keys; retained legacy parents are partitioned; exact bytes, metadata, hashes, report status, failure codes, and analysis columns match the seeded Worker 0002 rows.
 
-- [ ] **Step 6: Commit the pre-rollout correction (2–5 minutes)**
+- [x] **Step 6: Commit the pre-rollout correction (2–5 minutes)**
 
   ```bash
   git add backend/migrations/versions/0003_non_partition_runtime_tables.py backend/tests/integration/persistence/test_four_stage_migration.py backend/tests/integration/persistence/test_non_partition_migration.py backend/tests/unit/persistence/test_schema_documentation.py
@@ -169,7 +169,7 @@
 
 **Reviewer gate:** Reject if the revision can run before corrected Backend 0003, rewrites raw evidence/lifecycle/analysis data, accepts a composite evidence FK, bypasses a wrong version with stamping, or does not test both clean and existing Worker-head databases.
 
-- [ ] **Step 1: Write failing Worker-gate tests (2–5 minutes)**
+- [x] **Step 1: Write failing Worker-gate tests (2–5 minutes)**
 
   Add cases that call Worker target `0003_validate_ordinary_runtime_tables` against: Backend at `0002`; Worker at `0001`; Backend `0003` with a restored `evidence_partition_timestamp` column; and a correct post-conversion database. Assert the first three fail closed and the fourth succeeds without changing seeded data.
 
@@ -178,13 +178,13 @@
       await asyncio.to_thread(upgrade_worker, database.url, "0003_validate_ordinary_runtime_tables")
   ```
 
-- [ ] **Step 2: Run the RED cases (2–5 minutes)**
+- [x] **Step 2: Run the RED cases (2–5 minutes)**
 
   Run: `cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent uv run pytest tests/integration/persistence/test_four_stage_conversion.py -v`
 
   Expected: FAIL because revision `0003_validate_ordinary_runtime_tables` does not exist.
 
-- [ ] **Step 3: Implement a validation-only revision (2–5 minutes)**
+- [x] **Step 3: Implement a validation-only revision (2–5 minutes)**
 
   Implement explicit version and catalog checks. No `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, copy loop, or replacement table appears in this file. It may create only missing ordinary-table indexes and UUID-only foreign-key/unique constraints proven absent from corrected Backend 0003.
 
@@ -207,7 +207,7 @@
 
   `downgrade()` must raise `RuntimeError("Worker 0003 is a forward validation gate; do not downgrade across the ordinary-table conversion")`.
 
-- [ ] **Step 4: Add real clean and existing four-gate acceptance (2–5 minutes)**
+- [x] **Step 4: Add real clean and existing four-gate acceptance (2–5 minutes)**
 
   `test_four_stage_migration.py` executes these exact targets on a disposable clean database:
 
@@ -220,7 +220,7 @@
 
   `test_four_stage_conversion.py` seeds a database already at the first two targets, verifies its version rows and Worker catalog, then executes only the last two targets. Both cases assert identical final version rows, relation kinds, required Worker columns, UUID-only FKs, exact evidence values, and legacy partition parents. Neither case may use `stamp` or `upgrade head`.
 
-- [ ] **Step 5: Run all migration acceptance evidence (2–5 minutes)**
+- [x] **Step 5: Run all migration acceptance evidence (2–5 minutes)**
 
   Run: `cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent uv run pytest tests/integration/persistence/test_four_stage_migration.py -v`
 
@@ -228,7 +228,7 @@
 
   Expected: PASS. Every disposable test database is closed and dropped with bounded cleanup; wrong gates leave no partial replacement tables.
 
-- [ ] **Step 6: Commit the validation gate (2–5 minutes)**
+- [x] **Step 6: Commit the validation gate (2–5 minutes)**
 
   ```bash
   git add rca-worker/migrations/versions/0003_validate_ordinary_runtime_tables.py rca-worker/tests/integration/persistence/test_four_stage_conversion.py rca-worker/tests/integration/persistence/test_schema.py backend/tests/integration/persistence/test_four_stage_migration.py
@@ -255,7 +255,7 @@
 
 **Reviewer gate:** Reject if any partition helper returns, raw bytes are transformed or replaced by a pointer, provenance is omitted, report result status is not stored, UUID-only report/agent contracts change, or the disposable canonical smoke does not read back exact values.
 
-- [ ] **Step 1: Write fidelity regressions against commit 60229b5 (2–5 minutes)**
+- [x] **Step 1: Write fidelity regressions against commit 60229b5 (2–5 minutes)**
 
   Replace the current pointer assertion with exact-byte and provenance assertions. Use a non-UTF-8 byte sequence and non-canonical JSON input; include a `metadata` object carrying content type, normalized scope, request window, and input hash. Add a report test with a partial report and assert `result_status='PARTIAL'`.
 
@@ -267,13 +267,13 @@
   assert reference.model_dump(mode="json") == {"id": str(reference.id)}
   ```
 
-- [ ] **Step 2: Run focused RED tests (2–5 minutes)**
+- [x] **Step 2: Run focused RED tests (2–5 minutes)**
 
   Run: `cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent uv run pytest tests/integration/application/test_persist_evidence.py tests/integration/application/test_persist_report.py -v`
 
   Expected: FAIL because `60229b5` selects/writes `raw_result_reference` and its `INSERT INTO rca_reports` omits `result_status`.
 
-- [ ] **Step 3: Restore canonical persistence fields, not composite keys (2–5 minutes)**
+- [x] **Step 3: Restore canonical persistence fields, not composite keys (2–5 minutes)**
 
   Change evidence insert/list/get SQL to use only UUID ownership predicates and the real ordinary-table fields. Derive the metadata object from the immutable `EvidenceDraft` provenance rather than serializing a replacement pointer.
 
@@ -309,7 +309,7 @@
          :summary, CAST(:report AS JSONB), :result_status
   ```
 
-- [ ] **Step 4: Prove audit, agent, and UUID-only behavior together (2–5 minutes)**
+- [x] **Step 4: Prove audit, agent, and UUID-only behavior together (2–5 minutes)**
 
   Extend production processor tests to persist evidence, retrieve it through `get_specialist_evidence`, create `hypothesis_evidence`, and persist a report. Assert the only evidence reference payload remains `{"evidenceId": "UUID"}` and query predicates never contain partition helper columns.
 
@@ -317,7 +317,7 @@
   ! rg "partition_timestamp|partitionTimestamp|evidence_partition_timestamp|alert_event_partition_timestamp" rca-worker/src/sre_rca_worker
   ```
 
-- [ ] **Step 5: Run focused GREEN plus disposable canonical smoke (2–5 minutes)**
+- [x] **Step 5: Run focused GREEN plus disposable canonical smoke (2–5 minutes)**
 
   Run: `cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent uv run pytest tests/integration/application/test_persist_evidence.py tests/integration/application/test_persist_report.py tests/integration/application/test_production_processor.py tests/eval/test_rca_reports.py tests/unit/application/test_processor_retry.py -v`
 
@@ -325,7 +325,7 @@
 
   Expected: PASS. The smoke starts from four explicit migration targets, persists exact bytes and metadata through Worker runtime, verifies `result_status`, and never invokes a migration `head` target.
 
-- [ ] **Step 6: Commit the superseding runtime fix (2–5 minutes)**
+- [x] **Step 6: Commit the superseding runtime fix (2–5 minutes)**
 
   ```bash
   git add rca-worker/src/sre_rca_worker/persistence/repositories/rca.py rca-worker/src/sre_rca_worker/application/rca/processor.py rca-worker/tests/integration/application/test_persist_evidence.py rca-worker/tests/integration/application/test_persist_report.py rca-worker/tests/integration/application/test_production_processor.py rca-worker/tests/eval/test_rca_reports.py rca-worker/tests/unit/application/test_processor_retry.py
@@ -356,27 +356,27 @@
 
 **Reviewer gate:** Reject if deletion occurs before Tasks 1–3 evidence is attached, if it removes explicit event publication/recovery, or if a console script, import, polling loop, or partition creator remains.
 
-- [ ] **Step 1: Add the failing removal contract (2–5 minutes)**
+- [x] **Step 1: Add the failing removal contract (2–5 minutes)**
 
   Add exact assertions that `backend/pyproject.toml` contains neither `sre-agent-outbox-worker` nor `sre-agent-ensure-partitions`, and source has no `OutboxSettings`, `ensure_monthly_partitions`, `PARTITIONED_TABLES`, `outbox_main`, or `partition_worker` import.
 
-- [ ] **Step 2: Run RED (2–5 minutes)**
+- [x] **Step 2: Run RED (2–5 minutes)**
 
   Run: `uv run --project backend pytest contracts/compatibility-tests/test_design_consistency.py -v`
 
   Expected: FAIL because obsolete entrypoints and modules still exist.
 
-- [ ] **Step 3: Delete only obsolete runtime ownership (2–5 minutes)**
+- [x] **Step 3: Delete only obsolete runtime ownership (2–5 minutes)**
 
   Remove the listed files, console scripts, and their tests. Preserve `application/outbox/publish_events.py`, `application/outbox/recover_events.py`, `integrations/pubsub/publisher.py`, and their Backend composition lifecycle.
 
-- [ ] **Step 4: Run GREEN and static scan (2–5 minutes)**
+- [x] **Step 4: Run GREEN and static scan (2–5 minutes)**
 
   Run: `uv run --project backend pytest contracts/compatibility-tests/test_design_consistency.py -v && ! rg "outbox_main|OutboxSettings|ensure_monthly_partitions|PARTITIONED_TABLES|sre-agent-outbox-worker|sre-agent-ensure-partitions" backend/src backend/pyproject.toml`
 
   Expected: PASS and the scan has no matches.
 
-- [ ] **Step 5: Commit (2–5 minutes)**
+- [x] **Step 5: Commit (2–5 minutes)**
 
   ```bash
   git add -A backend/src/sre_agent backend/tests backend/pyproject.toml contracts/compatibility-tests/test_design_consistency.py
@@ -405,17 +405,17 @@
 
 **Reviewer gate:** Reject if Backend receives Worker AI/MCP values, Worker receives Backend publisher privileges, manifests refer to deleted workloads, or Compose implicitly loads application env files.
 
-- [ ] **Step 1: Add failing manifest ownership assertions (2–5 minutes)**
+- [x] **Step 1: Add failing manifest ownership assertions (2–5 minutes)**
 
   Assert Backend deployment includes Pub/Sub project/topic and publisher identity binding but excludes `MODEL_NAME`, all MCP URLs, analysis mode, evidence limits, and `RCA_DEADLINE_SECONDS`. Assert Worker owns subscriber plus AI/MCP settings, `kustomization.yaml` excludes both deleted resources, and no outbox service account remains.
 
-- [ ] **Step 2: Run RED (2–5 minutes)**
+- [x] **Step 2: Run RED (2–5 minutes)**
 
   Run: `uv run --project backend pytest contracts/compatibility-tests/test_gke_manifests.py -v`
 
   Expected: FAIL because the deleted workloads and old environment ownership are still rendered.
 
-- [ ] **Step 3: Update exact runtime ownership (2–5 minutes)**
+- [x] **Step 3: Update exact runtime ownership (2–5 minutes)**
 
   Delete the two manifests and their kustomization/service-account references. Keep Backend `PUBSUB_PROJECT_ID`, `RCA_TOPIC_ID`, and workload identity publisher permission; keep Worker `PUBSUB_SUBSCRIPTION_ID`, `MODEL_NAME`, MCP fields, and subscriber permission. Set Compose interpolation only through `.env.compose` values:
 
@@ -427,13 +427,13 @@
 
   Documentation commands use `docker compose --env-file .env.compose`; Compose does not name an application `env_file`.
 
-- [ ] **Step 4: Run GREEN and render checks (2–5 minutes)**
+- [x] **Step 4: Run GREEN and render checks (2–5 minutes)**
 
   Run: `uv run --project backend pytest contracts/compatibility-tests/test_gke_manifests.py -v && docker compose --env-file .env.compose.example config >/dev/null && kubectl kustomize deploy/k8s/base >/dev/null`
 
   Expected: PASS; render contains neither an Outbox Deployment nor a Partition CronJob.
 
-- [ ] **Step 5: Commit (2–5 minutes)**
+- [x] **Step 5: Commit (2–5 minutes)**
 
   ```bash
   git add -A docker-compose.yml deploy/k8s contracts/compatibility-tests/test_gke_manifests.py
@@ -458,17 +458,17 @@
 
 **Reviewer gate:** Reject if any operator document uses `upgrade head`, implies automatic outbox replay, describes `raw_result_reference` as canonical evidence, omits either version table, or says a post-write downgrade is lossless.
 
-- [ ] **Step 1: Add failing document-contract tests (2–5 minutes)**
+- [x] **Step 1: Add failing document-contract tests (2–5 minutes)**
 
   Add assertions for all five `.env.*.example` names, the three protected recovery paths, absence of removed runtime startup commands, and each exact migration command below. Assert the document contains `raw_result BYTEA`, `metadata JSONB`, `content_hash`, `result_status`, and retained `__partitioned_legacy_0003` tables.
 
-- [ ] **Step 2: Run RED (2–5 minutes)**
+- [x] **Step 2: Run RED (2–5 minutes)**
 
   Run: `uv run --project backend pytest contracts/compatibility-tests/test_design_consistency.py -v`
 
   Expected: FAIL because the documents still name an abbreviated migration sequence or obsolete workers.
 
-- [ ] **Step 3: Write the explicit maintenance-window commands (2–5 minutes)**
+- [x] **Step 3: Write the explicit maintenance-window commands (2–5 minutes)**
 
   Document these four commands in this order, with writes stopped before the first and runtimes still stopped until the fourth postcondition passes:
 
@@ -488,13 +488,13 @@
 
   State that existing Worker-head databases verify the first two revision rows/catalog and execute only commands three and four; they never stamp or replay migrations. State rollback policy: preserve legacy tables, stop writes on failure, and restore/migrate deltas from an approved backup after new writes; do not run Alembic downgrade.
 
-- [ ] **Step 4: Run GREEN and stale-text scan (2–5 minutes)**
+- [x] **Step 4: Run GREEN and stale-text scan (2–5 minutes)**
 
   Run: `uv run --project backend pytest contracts/compatibility-tests/test_design_consistency.py -v && ! rg "alembic upgrade head|raw_result_reference.*canonical|sre-agent-outbox-worker|sre-agent-ensure-partitions" README.md backend/README.md rca-worker/README.md deploy/k8s/README.md docs/database/postgresql-schema.md`
 
   Expected: PASS with no stale operational instruction.
 
-- [ ] **Step 5: Commit (2–5 minutes)**
+- [x] **Step 5: Commit (2–5 minutes)**
 
   ```bash
   git add README.md backend/README.md rca-worker/README.md deploy/k8s/README.md docs/database/postgresql-schema.md contracts/compatibility-tests/test_design_consistency.py
@@ -515,7 +515,7 @@
 
 **Reviewer gate:** Reject release if any four-gate command is replaced with `head`, any full test/type failure is waived, the acceptance/test database names are not isolated from `sre_agent`, the canonical smoke skips exact evidence provenance, or retained legacy table verification is absent.
 
-- [ ] **Step 1: Establish a fresh disposable acceptance database with explicit revisions (2–5 minutes)**
+- [x] **Step 1: Establish a fresh disposable acceptance database with explicit revisions (2–5 minutes)**
 
   Open and retain one Bash terminal named `Task 7 verification`; all task-specific variables below live in that terminal through Step 6. Discover running containers by their exact published host ports, not by an implicit Compose project. Zero or multiple candidates for either port is a hard stop. Inspect and validate the candidates against the repository's Postgres/Pub/Sub service signatures, record their exact names, bindings, and shared database OID, and never substitute a different container later. The Postgres validation deliberately accepts the inspected standalone project container without requiring Compose labels; the image, command, environment, writable data mount, binding, and database catalog together are its ownership proof. Pub/Sub must carry the expected emulator command and exact Compose service label. Its config-file label must equal either the current worktree's Compose file or the main-checkout Compose file derived from this worktree's absolute Git common directory; capture the accepted exact label and require that same value later. Do not accept a parent/prefix match, a symlink-resolved substitute, or any other path.
 
@@ -759,7 +759,7 @@
 
   Run each mutation or verification block separately and inspect its exit status before pasting the next block. After the first `createdb`, any non-zero result sets `task7_gate_failed='true'`; do not `exit`, close, or replace the named verification terminal, because Step 6 requires its captured container names, bindings, and shared OID. Skip all remaining Step 1-5 actions and go directly to Step 6. After every migration command, query both version tables through `docker exec "$task7_postgres_container" psql ... --dbname=sre_agent_release_acceptance` and compare them with the expected current gate before continuing. Expected: all commands succeed; never replace a command with `upgrade head`. From this point, every Task 7 `createdb`, `psql`, and `dropdb` command must use the captured Postgres container; every emulator outage/restart must use the captured Pub/Sub container. Never run `docker compose up/exec/stop` in Task 7.
 
-- [ ] **Step 2: Run migration, Backend, Worker, and contract suites (2–5 minutes each command)**
+- [x] **Step 2: Run migration, Backend, Worker, and contract suites (2–5 minutes each command)**
 
   ```bash
   task7_step2_tests() {
@@ -784,7 +784,7 @@
 
   Expected: PASS. A test failure is routed to the owning task and that task repeats its own RED/GREEN evidence before this gate is restarted.
 
-- [ ] **Step 3: Run full static checks (2–5 minutes each command)**
+- [x] **Step 3: Run full static checks (2–5 minutes each command)**
 
   ```bash
   task7_step3_static() {
@@ -865,7 +865,7 @@
   task7_run_phase 'Step 3 canonical evidence smoke' task7_step3_canonical_evidence || true
   ```
 
-- [ ] **Step 4: Run request/recovery and evidence end-to-end smoke (2–5 minutes per phase)**
+- [x] **Step 4: Run request/recovery and evidence end-to-end smoke (2–5 minutes per phase)**
 
   Before starting either runtime, seed the exact source configured by `.env.backend-api.example` into the disposable acceptance database. The explicit database argument and first fail-closed assertion are both required; abort if `current_database()` is not exactly `sre_agent_release_acceptance`. Never adapt this command to, or run it against, the shared `sre_agent` database.
 
@@ -1239,7 +1239,7 @@
 
   Expected: the streamed payload reports HTTP `202` and creates a distinct incident/run because its source + folder + alert name identity differs from the first request; its new outbox event is `FAILED` while the emulator is unavailable. Restart does not auto-replay it. Protected recovery returns non-zero `selected`/`published` without payload overrides, the captured Worker job succeeds with one report, and at-least-once processing creates no duplicate RCA run/job/outbox.
 
-- [ ] **Step 5: Capture catalog and rollback-policy evidence (2–5 minutes)**
+- [x] **Step 5: Capture catalog and rollback-policy evidence (2–5 minutes)**
 
   ```bash
   task7_step5_catalog() {
@@ -1270,7 +1270,7 @@
 
   Expected: exactly six canonical `relkind='r'`/`relispartition=false` relations and exactly six retained top-level `__partitioned_legacy_0003` parents with `relkind='p'`/`relispartition=false`, total twelve in the `public` schema. PostgreSQL sets `relispartition=true` only when a relation is itself attached as a child partition; these retained top-level parents are partitioned tables but are not child partitions. Record that no automatic downgrade or legacy cleanup has been executed.
 
-- [ ] **Step 6: Clean disposable databases and commit only task-owned defect fixes (2–5 minutes)**
+- [x] **Step 6: Clean disposable databases and commit only task-owned defect fixes (2–5 minutes)**
 
   This is a mandatory `finally` path after success or any failure in Steps 1–5, including a partially created database or a failed transformed request. Return to the still-open `Task 7 verification` terminal; never discard or reconstruct its captured names/bindings/OID/PIDs. Set `task7_cleanup_failed='false'` and attempt every applicable cleanup subsection even if an earlier cleanup assertion fails, recording `task7_cleanup_failed='true'` instead of exiting. If preflight failed before `task7_mutation_started` became true, take the bounded, read-only branch below: confirm any already captured identities are unchanged, confirm no release database exists, check Pub/Sub health once, and skip the mutation-only cleanup blocks. Any failure after the first database mutation must still take every full cleanup subsection. For full cleanup, use the initialization helper to signal only non-empty run-owned Backend/Worker PIDs with bounded TERM-then-INT shutdown, then boundedly require port 8000 to be clear. TERM receives a 35-second window because the Worker can be inside a 30-second subscriber pull; the five-second INT fallback remains bounded and does not broaden PID ownership. Never use `pkill`, `killall`, a name pattern, `SIGKILL`, or terminate an unrelated process.
 

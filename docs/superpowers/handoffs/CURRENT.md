@@ -19,22 +19,18 @@
 
 ## Current State
 
-整體實作已進入最後 release gate 階段：
+Tasks 1–7 已完成，Task 7 final release gate attempt 14 在 implementation HEAD
+`072e5e3a7fad35d92fe4870dd5b03f9f60eceba1` 全部通過：
 
-- Tasks 1–6 全部完成；Task 6 round 4 文件修正與 Task 4 Pub/Sub emulator transport follow-up 均已通過 independent review。
-- Task 7 attempt 7 fresh 通過 migrations、完整 tests/static/renders/evidence、catalog seed 與第一筆 live 202/PUBLISHED/SUCCEEDED；第二個既有 AWS fixture 因與第一筆共用 source + folder + alert name identity 而沒有建立新 outbox/run/job，故在 recovery 前正確停止。
-- Task 7 procedure 已改為記憶體內產生 distinct recovery alert，並補齊 exact container ownership、fail-closed phase dispatcher、delivery-linked assertions、direct runtime PID ownership 與 bounded INT→TERM cleanup；final independent review APPROVED。
-- Final-gate preflight attempt 8 在 mutation 前拒絕 main-checkout Compose label；procedure 已限縮接受同一 Git repository 的 worktree/main 兩個精確路徑並捕捉實際 label，independent review APPROVED。
-- Final-gate attempt 9 在 Backend 0002 前因全域 uv cache sandbox 權限停止並完整清理；procedure 已固定 repository-local `UV_CACHE_DIR`，且 final exit 同時要求 gate/cleanup 兩旗標為 false，independent review APPROVED。
-- Final-gate attempt 10 通過所有 pre-live gates 與第一筆 live flow，但 emulator-down request 暴露 Pub/Sub 預設約 600 秒 retry、runtime/CLI 都沒有實用上限；controller 只重啟原本捕捉的 emulator 以解除等待，gate 因 event 非 `FAILED` 正確拒絕後續階段並完整清理。
-- 聚焦 TDD 修正保留 pinned Pub/Sub 七種 transient errors 與原 backoff，只將 retry/RPC/result wait 分別限制為 10/10/15 秒；三個 release POST 另有 2 秒 connect、30 秒 overall hard stop。15 個相關測試、完整 Backend Ruff/Pyright、Task 7 Bash syntax 與 diff check 全綠，independent re-review APPROVED。
-- Final-gate attempt 11 證明 bounded outage／FAILED event／no-auto-replay／manual recovery／terminal no-duplicate 全部成功；最後只因 Step 5 錯把 top-level partitioned parent 的 `relispartition` 預期為 true 而停止。實際 PostgreSQL 與 migration tests 均證明正確 tuple 是 `relkind='p'`, `relispartition=false`。
-- Step 5 已限縮 `public` schema 並改為六 canonical `r/f`、六 legacy parents `p/f`、總數 12；新增 design-consistency regression。11 個文件合約測試、Ruff、Pyright、Task 7 Bash syntax 與 diff check 全綠，independent review APPROVED；frozen migrations 未修改。
-- Final-gate attempt 12 再度通過所有 pre-live gates，並建立第二個 bounded `FAILED` event；但 shutdown helper 先等 INT 15 秒、再給 TERM 15 秒，與 Worker 的 30 秒 subscriber pull 在邊界競態，第一次誤判仍存活，mandatory cleanup 隨即成功 reap 同一 PID。
-- Shutdown helper 已改為 TERM first 35 秒、INT fallback 5 秒，且每次 signal 前與每個最後 sleep 後都重驗 exact retained job ownership；合成 boundary test 證明 final-sleep exit 會成功 reap 且不誤送 INT。13 個 design-consistency tests、Ruff、Pyright、Bash syntax 與 diff check 全綠，independent re-review APPROVED。
-- Final-gate attempt 13 顯示 Worker unavailable pull 的 client retry 可超過單次 30 秒 RPC timeout；TERM35+INT5 仍在同一 retained PID 結束前誤判，mandatory cleanup 隨即 reap。這證明繼續延長 timer 不是正確修法。
-- Recovery procedure 已改為：emulator down 時先停止 Backend 防 late publish，再以 immutable ID 恢復並 health-check 空 emulator，之後才停止舊 Worker，最後才啟動 fresh Worker/Backend。舊 Worker 僅在進入 pull loop 前建立 topic/subscription，且不掃描 DB backlog；14 個 design-consistency tests 與 independent review 已鎖定順序、identity/PID safety 與 no-replay 語意。
-- Attempt 13 的兩個 disposable DBs 與 runtimes 已清理；目前只剩 shared `sre_agent|16384`，port 8000 clear，下一次必須從 Safety Preflight 全新重跑，不可沿用任何部分結果。
+- 兩個 isolated disposable databases 均完成四個 explicit migration gates。
+- Backend：354 passed；Worker：434 passed、1 skipped；contracts：60 passed。
+- Backend／Worker Ruff clean；兩邊 Pyright 均為 0 errors、0 warnings。
+- Compose、Kustomize、四個 migration Jobs 與 canonical evidence smoke 全部通過。
+- Live flow 驗證 request-scoped publish、bounded publish failure、no automatic replay、protected manual recovery、terminal Worker processing 與 at-least-once no-duplicate。
+- Catalog 為六張 canonical `r/f` 與六張 retained legacy parent `p/f`，總數 12。
+- Mandatory cleanup 完成：兩個 release databases 已移除，只剩 shared `sre_agent|16384`；port 8000 clear；原 Pub/Sub emulator identity、binding、label 與 health 不變。
+- 完整證據記錄於 `.superpowers/sdd/2026-08-28-immutable-migration-rollout-correction/task-7-report.md` 的 attempt 14 `READY_FOR_FINAL_REVIEW` 段落。
+- Final independent branch/evidence review：**APPROVED，無 Critical／Important finding**。
 
 ## Superpowers Plan
 
@@ -49,7 +45,7 @@
 
 `docs/superpowers/plans/2026-08-26-backend-runtime-simplification-implementation.md` 是較早的 implementation plan；目前 correction plan 已接管，不要回到舊計畫。
 
-目前執行位置：**Task 7 final fresh rerun；recovery ordering 已改為先停 Backend、恢復 emulator、再停 Worker並通過 independent review；所有 disposable DBs 已清理，必須從 Safety Preflight 全新重跑。**
+目前執行位置：**Tasks 1–7 與 final independent review 已完成；待 completion checkpoint commit 與 branch finishing handoff。**
 
 ## Completed
 
@@ -73,65 +69,13 @@
 
 ## In Progress
 
-### Task 7 — post-fix full release gate（attempt 13 被 unavailable pull client retry 停止）
-
-**attempt 13 fresh evidence（已清理，不可作為完成憑證）：**
-
-- Safety preflight ✅
-- Step 1：兩個 disposable DB 四 gate migration ✅（已清理）
-- Step 2 Backend 354 passed ✅
-- Step 2 Worker 434 passed、1 skipped ✅；contracts 56 passed ✅。
-- Static、Compose/Kustomize/four Jobs、canonical evidence smoke ✅。
-- Catalog seed/assertion ✅；第一筆 live 202/PUBLISHED/SUCCEEDED/PARTIAL ✅。
-- 第二筆 bounded `FAILED` event ✅；shutdown ❌：unavailable pull client retry 超過 TERM35+INT5。已改為先停 Backend、恢復 exact emulator/health，再停 Worker，fresh runtimes 僅在兩者清除後啟動；contract 與 independent review APPROVED。
-
-**尚未完成（因 unavailable pull client retry 而正確停止）：**
-
-- Step 4：restart/no-auto-replay/manual recovery/terminal processing。
-- Step 5：fresh 驗證 catalog（六 `r/f` + 六 `p/f`）。
-- Step 6：Cleanup（此次已清理，下次亦需清理）。
-
-**report 檔案目前狀態：** `.superpowers/sdd/2026-08-28-immutable-migration-rollout-correction/task-7-report.md` 已追加 attempt 13 的 NOT READY、unavailable-pull blocker 與 cleanup 證據；下一次仍需以新的 fresh section 記錄完整 rerun。
+沒有 implementation task 仍在進行。只剩 completion checkpoint commit 與 branch finishing handoff。
 
 ## Next Action
 
-下一個動作是**從頭重跑 Task 7 final fresh gate**，嚴格依已修正的 `task-7-rerun-brief.md` 與 tracked Task 7 functions：
-
-### Step 0：Safety Preflight
-
-```bash
-cd /Users/linyungyuan/Desktop/sre-agent2.0/.worktrees/backend-runtime-simplification
-git status --short  # 預期：空白（worktree clean）
-md5 backend/migrations/versions/0001_alert_incident_schema.py   # 預期：207f8b7d579ca78464608682a2542829
-md5 backend/migrations/versions/0002_grafana_normalization_v2.py # 預期：8d920ca8dd68ff94c1467d582e354106
-md5 rca-worker/migrations/versions/0001_rca_worker_v1.py         # 預期：caf5d8b23a248baa200db0f1feb3663c
-md5 rca-worker/migrations/versions/0002_adk_specialist_analysis.py # 預期：4e2c7f97afd8d37345fb295a7ada252f
-docker exec sre-agent20-local-postgres psql -U postgres -c "\l" | grep sre_agent_release  # 預期：無輸出
-docker exec sre-agent20-local-postgres psql -U postgres -d sre_agent -c "SELECT oid FROM pg_database WHERE datname='sre_agent';"  # 預期：16384
-```
-
-### Step 1：建立兩個 Disposable DB，執行四 gate migration
-
-依 `task-7-rerun-brief.md` 的 Fresh Gate 1：建立 `sre_agent_release_acceptance` 與 `sre_agent_release_tests`，對每個依序執行四個 explicit revision（Backend-0002 → Worker-0002 → Backend-0003 → Worker-0003）。每個 gate 後查詢兩個 version tables。
-
-### Step 2：完整測試套件（使用 sre_agent_release_tests）
-
-```bash
-# Backend（預期 345 passed）
-cd backend && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest -q
-
-# RCA Worker（完整）
-cd rca-worker && MIGRATION_TEST_DATABASE_URL=postgresql+asyncpg://postgres@127.0.0.1:5432/sre_agent_release_tests UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest -q
-
-# Contracts
-UV_CACHE_DIR="$PWD/backend/.uv-cache" uv run --project backend pytest contracts/compatibility-tests -q
-```
-
-### Steps 3–8
-
-依 `task-7-rerun-brief.md` 繼續執行靜態分析、Compose/K8s 驗證、canonical evidence smoke、live smoke、catalog 驗證、cleanup。
-
-完成後追加新段落至 `task-7-report.md`，若全部通過回報 `READY_FOR_FINAL_REVIEW`。
+1. 執行精簡 completion verification。
+2. Commit plan checkbox 與本 handoff completion checkpoint；不要 push。
+3. 依 `superpowers:finishing-a-development-branch` 交付 branch integration 選項。
 
 ## Important Decisions
 
@@ -149,24 +93,24 @@ UV_CACHE_DIR="$PWD/backend/.uv-cache" uv run --project backend pytest contracts/
 
 ## Files Changed
 
-本 handoff session 未修改任何 source code 或 migration 檔案。
+本 completion checkpoint 只修改：
 
-最新 implementation commit `4ca879c` 修改（Task 6 round-3）：
+- `docs/superpowers/plans/2026-08-28-immutable-migration-rollout-correction.md`：Tasks 1–7 全部標記完成。
+- `docs/superpowers/handoffs/CURRENT.md`：記錄 attempt 14 release evidence 與 final review 狀態。
 
-- `.superpowers/sdd/2026-08-28-immutable-migration-rollout-correction/task-6-report.md`：記錄 Task 6 round-3 原因、TDD 與驗證證據。
-- `backend/tests/unit/persistence/test_schema_documentation.py`：新增 `_section_between()` 與歷史 schema section boundary regression test。
-- `docs/database/postgresql-schema.md`：分離 Backend-0001 baseline 與 Backend-0002 mutations（新增兩個 heading 邊界，修正 incidents 欄位，補全 0002 ADD COLUMN 清單）。
+Task 7 前置 defect-fix commits：
 
-handoff commit 修改：
-
-- `docs/superpowers/handoffs/CURRENT.md`：本交接文件。
+- `f2181de`：bounded Pub/Sub publish retries。
+- `7777fe6`：修正 retained top-level partition parent catalog gate。
+- `68e28b3`：修正 bounded shutdown boundary。
+- `072e5e3`：調整 recovery shutdown ordering。
 
 ## Git State
 
 - Worktree：`/Users/linyungyuan/Desktop/sre-agent2.0/.worktrees/backend-runtime-simplification`
 - Branch：`codex/backend-runtime-simplification`
-- Implementation HEAD：`07b22bebd719529d83c9963d3dec911745039fd8`（`fix: preserve backend cleanup errors`）
-- Current HEAD：本 handoff checkpoint 提交後請以 `git rev-parse HEAD` 取得。
+- Task 7 verified implementation HEAD：`072e5e3a7fad35d92fe4870dd5b03f9f60eceba1`（`docs: reorder task 7 recovery shutdown`）
+- Current HEAD：completion checkpoint 提交後請以 `git rev-parse HEAD` 取得。
 - Staged files：無
 - Unstaged tracked files：無
 - Untracked files：無
@@ -174,23 +118,14 @@ handoff commit 修改：
 最近相關 commits（新到舊）：
 
 ```text
+072e5e3 docs: reorder task 7 recovery shutdown
+68e28b3 docs: fix task 7 shutdown boundary
+7777fe6 docs: correct task 7 catalog gate
+f2181de fix: bound pubsub publish retries
 07b22be fix: preserve backend cleanup errors
 077ed0b fix: preserve pubsub cleanup failures
 e5b9c8e fix: close pubsub emulator transports
 a37c1d4 fix: use insecure pubsub emulator transports
-fc15ca4 docs: checkpoint task 6 round 4
- c316537 docs: restore migration stream order contract
-3b2cf9a docs: update handoff — task-6 round-3 approved, task-7 partial cleanup
-8911467 docs: add current ai development handoff
-4ca879c docs: separate published schema evolution stages
-51ee41b docs: restore complete schema evolution reference
-b5f20e6 docs: enforce operator-safe four-gate rollout
-83062de fix: enforce explicit deployment gates
-136d3f9 fix: update evidence insert fixture in worker tests
-9ded769 docs: document immutable migration rollout
-4738f88 refactor: simplify runtime deployments
-d7a90cb test: reconcile disposable databases with four gates
-3e21f33 fix: complete exact uuid-only worker evidence audit
 ```
 
 不要 push；使用者只要求 session handoff。
@@ -228,31 +163,25 @@ Verification 結果（本 handoff session fresh 執行）：
 - `ruff check tests/unit/persistence/test_schema_documentation.py`：`All checks passed!`
 - `git diff --check`：clean（exit 0）
 
-### Task 7 中途執行結果（本 handoff session，已清理）
+### Task 7 final release gate attempt 14
 
-- Safety preflight：✅ worktree clean，無 release DBs，OID=16384
-- 不可變 migration MD5：
-  - `0001_alert_incident_schema.py`：`207f8b7d579ca78464608682a2542829`
-  - `0002_grafana_normalization_v2.py`：`8d920ca8dd68ff94c1467d582e354106`
-  - `0001_rca_worker_v1.py`：`caf5d8b23a248baa200db0f1feb3663c`
-  - `0002_adk_specialist_analysis.py`：`4e2c7f97afd8d37345fb295a7ada252f`
-- 四 gate migration（acceptance DB）：每個 gate 的 version 查詢均符合預期。
-- 四 gate migration（tests DB）：每個 gate 的 version 查詢均符合預期。
-- Backend 完整測試：**345 passed, 40 warnings**（warnings 是已知 Alembic path_separator 技術債）。
-- 兩個 disposable DBs 已在 handoff 前清理，shared `sre_agent` OID=16384 不變。
-
-**以上結果不可作為 Task 7 完成的憑證；Task 7 必須全部 fresh gates 從 Step 1 重跑。**
+- Unified verification session：exit 0；完整 log：`/tmp/task7-attempt14.log`。
+- 兩個 disposable DB 四 gate migration：全部通過。
+- Backend：**354 passed, 40 warnings**。
+- Worker：**434 passed, 1 skipped, 62 warnings**。
+- Contracts：**60 passed**。
+- Backend／Worker Ruff：clean；Backend／Worker Pyright：0 errors, 0 warnings。
+- Compose／Kustomize／four Jobs／canonical evidence smoke：全部通過。
+- Live request、failure、no-replay、manual recovery、terminal processing、no-duplicate：全部通過。
+- Catalog：六 canonical `r/f` + 六 retained legacy parents `p/f`，總數 12。
+- Cleanup：release DBs 不存在；shared `sre_agent|16384`；port 8000 clear；Pub/Sub emulator identity 與 health 保持正確。
 
 ## Known Issues
 
-- Task 7 post-fix full release gate 尚未完成（不能宣稱 release ready）。
-- Task 7 必須在確認 release DBs 不存在後從 Safety Preflight 全新重跑；attempt 2–7 的部分結果僅為歷史參考。
 - Full Backend 有 40 個 Alembic `path_separator` deprecation warnings；是技術債，不是 failure。
 - 四 gate fixture 的獨立 report 缺失（minor process debt）。
-- `.superpowers/.../progress.md` 的 Task 7 段落有歷史「complete」記錄，但已被 reopening 條目明確推翻；以最新 reopening 與本 handoff 為準。
 - 本地 branch 比 upstream 多若干 commits；尚未 push（依使用者要求）。
-- `task-7-report.md` 已追加 attempt 2 的 NOT READY 與 cleanup 證據；尚無完整成功 rerun。
-- 下一次 Task 7 開始前必須重新確認 ports、container ownership、disposable DB absence、shared DB OID 與無殘留 processes；不能沿用本 handoff 的 runtime 狀態。
+- Attempt 14 第一筆 live tuple UUID 已在 verification shell 中捕捉並以關聯 assertions 驗證，但未輸出到 log；第二筆 recovery tuple UUID 完整記錄。Independent review 判定這只影響證據可追溯性，不是 release blocker。
 
 ## Do Not Do
 
@@ -267,18 +196,17 @@ Verification 結果（本 handoff session fresh 執行）：
 - 不要把 AI／MCP settings 加回 Backend。
 - 不要把 raw evidence payload 加入 `PersistedEvidence` 或 AI context。
 - 不要放寬或刪除 schema-documentation tests 來讓文件通過。
-- 不要把本 handoff 的 Task 7 中途結果（Backend 345 passed）當作 Task 7 全部完成的憑證。
+- 不要重跑已完成的完整 Task 7 gate，除非 final review 發現會影響 release 判定的實質證據缺口。
 - 不要 stage、commit 或 push scope 外檔案；未獲使用者要求前不要 push。
 
 ## Resume Instructions
 
-下一個 AI 應先讀取本檔、active spec、correction plan、`progress.md`、`task-6-report.md` 與 `task-7-rerun-brief.md`。
+下一個 AI 應先讀取本檔、active spec、correction plan、`progress.md` 與 `task-7-report.md`。
 
 使用 Superpowers 的順序：
 
 1. `superpowers:using-superpowers`：恢復 skill discipline。
-2. `superpowers:verification-before-completion`：Task 7 全部 fresh gates 必須通過才可宣稱 Task 7 完成。
-3. `superpowers:executing-plans` 或 `superpowers:subagent-driven-development`：嚴格依 `task-7-rerun-brief.md` 從 Step 1 全新執行 Task 7。
-4. Task 7 全部 fresh gates 通過後，才使用 `superpowers:requesting-code-review`／`superpowers:verification-before-completion` 做 final review；未全部通過不得宣稱完成。
+2. `superpowers:verification-before-completion`：執行精簡 completion checks。
+3. `superpowers:finishing-a-development-branch`：交付已驗證 branch；不要 push。
 
 本階段不需要 `superpowers:brainstorming`：architecture 與操作政策已核准，下一步是完成既有 verification，不是重新設計。
