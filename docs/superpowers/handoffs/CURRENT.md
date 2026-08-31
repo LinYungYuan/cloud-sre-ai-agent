@@ -32,7 +32,9 @@
 - Step 5 已限縮 `public` schema 並改為六 canonical `r/f`、六 legacy parents `p/f`、總數 12；新增 design-consistency regression。11 個文件合約測試、Ruff、Pyright、Task 7 Bash syntax 與 diff check 全綠，independent review APPROVED；frozen migrations 未修改。
 - Final-gate attempt 12 再度通過所有 pre-live gates，並建立第二個 bounded `FAILED` event；但 shutdown helper 先等 INT 15 秒、再給 TERM 15 秒，與 Worker 的 30 秒 subscriber pull 在邊界競態，第一次誤判仍存活，mandatory cleanup 隨即成功 reap 同一 PID。
 - Shutdown helper 已改為 TERM first 35 秒、INT fallback 5 秒，且每次 signal 前與每個最後 sleep 後都重驗 exact retained job ownership；合成 boundary test 證明 final-sleep exit 會成功 reap 且不誤送 INT。13 個 design-consistency tests、Ruff、Pyright、Bash syntax 與 diff check 全綠，independent re-review APPROVED。
-- Attempt 12 的兩個 disposable DBs 與 runtimes 已清理；目前只剩 shared `sre_agent|16384`，port 8000 clear，下一次必須從 Safety Preflight 全新重跑，不可沿用任何部分結果。
+- Final-gate attempt 13 顯示 Worker unavailable pull 的 client retry 可超過單次 30 秒 RPC timeout；TERM35+INT5 仍在同一 retained PID 結束前誤判，mandatory cleanup 隨即 reap。這證明繼續延長 timer 不是正確修法。
+- Recovery procedure 已改為：emulator down 時先停止 Backend 防 late publish，再以 immutable ID 恢復並 health-check 空 emulator，之後才停止舊 Worker，最後才啟動 fresh Worker/Backend。舊 Worker 僅在進入 pull loop 前建立 topic/subscription，且不掃描 DB backlog；14 個 design-consistency tests 與 independent review 已鎖定順序、identity/PID safety 與 no-replay 語意。
+- Attempt 13 的兩個 disposable DBs 與 runtimes 已清理；目前只剩 shared `sre_agent|16384`，port 8000 clear，下一次必須從 Safety Preflight 全新重跑，不可沿用任何部分結果。
 
 ## Superpowers Plan
 
@@ -47,7 +49,7 @@
 
 `docs/superpowers/plans/2026-08-26-backend-runtime-simplification-implementation.md` 是較早的 implementation plan；目前 correction plan 已接管，不要回到舊計畫。
 
-目前執行位置：**Task 7 final fresh rerun；bounded publish、catalog assertion 與 shutdown-boundary blockers 均已修正並通過 independent review，所有 disposable DBs 已清理，必須從 Safety Preflight 全新重跑。**
+目前執行位置：**Task 7 final fresh rerun；recovery ordering 已改為先停 Backend、恢復 emulator、再停 Worker並通過 independent review；所有 disposable DBs 已清理，必須從 Safety Preflight 全新重跑。**
 
 ## Completed
 
@@ -71,9 +73,9 @@
 
 ## In Progress
 
-### Task 7 — post-fix full release gate（attempt 12 被 Worker shutdown boundary race 停止）
+### Task 7 — post-fix full release gate（attempt 13 被 unavailable pull client retry 停止）
 
-**attempt 12 fresh evidence（已清理，不可作為完成憑證）：**
+**attempt 13 fresh evidence（已清理，不可作為完成憑證）：**
 
 - Safety preflight ✅
 - Step 1：兩個 disposable DB 四 gate migration ✅（已清理）
@@ -81,15 +83,15 @@
 - Step 2 Worker 434 passed、1 skipped ✅；contracts 56 passed ✅。
 - Static、Compose/Kustomize/four Jobs、canonical evidence smoke ✅。
 - Catalog seed/assertion ✅；第一筆 live 202/PUBLISHED/SUCCEEDED/PARTIAL ✅。
-- 第二筆 bounded `FAILED` event ✅；shutdown ❌：TERM 僅剩 15 秒，與 30 秒 pull 邊界競態。已改為 TERM 35 秒 + INT 5 秒、signal 前/最後 sleep 後重新確認 exact job，synthetic regression 與 independent re-review APPROVED。
+- 第二筆 bounded `FAILED` event ✅；shutdown ❌：unavailable pull client retry 超過 TERM35+INT5。已改為先停 Backend、恢復 exact emulator/health，再停 Worker，fresh runtimes 僅在兩者清除後啟動；contract 與 independent review APPROVED。
 
-**尚未完成（因 Worker shutdown boundary race 而正確停止）：**
+**尚未完成（因 unavailable pull client retry 而正確停止）：**
 
 - Step 4：restart/no-auto-replay/manual recovery/terminal processing。
 - Step 5：fresh 驗證 catalog（六 `r/f` + 六 `p/f`）。
 - Step 6：Cleanup（此次已清理，下次亦需清理）。
 
-**report 檔案目前狀態：** `.superpowers/sdd/2026-08-28-immutable-migration-rollout-correction/task-7-report.md` 已追加 attempt 12 的 NOT READY、shutdown-boundary blocker 與 cleanup 證據；下一次仍需以新的 fresh section 記錄完整 rerun。
+**report 檔案目前狀態：** `.superpowers/sdd/2026-08-28-immutable-migration-rollout-correction/task-7-report.md` 已追加 attempt 13 的 NOT READY、unavailable-pull blocker 與 cleanup 證據；下一次仍需以新的 fresh section 記錄完整 rerun。
 
 ## Next Action
 

@@ -342,6 +342,50 @@ task7_shutdown_exact_pid "$probe_pid" 'synthetic-final-sleep'
     assert "unexpected INT" not in result.stderr
 
 
+def test_task7_recovery_restores_emulator_before_stopping_old_worker() -> None:
+    """Prevent late Backend publish without asking an unavailable Worker to stop."""
+    plan = _text(ROLLOUT_PLAN)
+    recovery = _block_after(plan, "task7_step4_restart_emulator() {").split(
+        "task7_run_phase 'Step 4 restart runtimes'", maxsplit=1
+    )[0]
+
+    backend_shutdown = recovery.index(
+        'task7_shutdown_exact_pid "$task7_backend_pid" \'Backend\''
+    )
+    emulator_start = recovery.index('docker start "$task7_pubsub_id"')
+    emulator_ready = recovery.index(
+        'test "$task7_emulator_ready" = \'true\''
+    )
+    worker_shutdown = recovery.index(
+        'task7_shutdown_exact_pid "$task7_worker_pid" \'Worker\''
+    )
+    fresh_runtime_start = recovery.index("task7_step4_restart_runtimes() {")
+    assert (
+        backend_shutdown
+        < emulator_start
+        < emulator_ready
+        < worker_shutdown
+        < fresh_runtime_start
+    )
+
+    assert (
+        'docker inspect "$task7_pubsub_container" --format \'{{.Id}}\''
+        in recovery
+    )
+    assert '= "$task7_pubsub_id"' in recovery
+    assert (
+        "curl -fsS "
+        "'http://127.0.0.1:58085/v1/projects/sre-agent-local/topics'"
+        in recovery
+    )
+    assert 'task7_backend_pid=\'\'' in recovery
+    assert 'task7_worker_pid=\'\'' in recovery
+    assert "no timed-out publish can resume late" in plan
+    assert "The old Worker does not recreate topics after an emulator restart" in plan
+    for forbidden in ("pkill", "killall", "kill -KILL", "SIGKILL"):
+        assert forbidden not in recovery
+
+
 def test_docs_do_not_reference_removed_runtime_commands() -> None:
     """文件不得含已刪除的 outbox worker 或 partition 啟動命令。"""
     forbidden = (

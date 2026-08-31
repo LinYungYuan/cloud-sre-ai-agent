@@ -1090,7 +1090,7 @@
   task7_run_phase 'Step 4 capture failed event' task7_step4_capture_failed_event || true
   ```
 
-  Stop only the exact run-owned PIDs and wait for both, then restart the immutable emulator by ID. Never use `pkill`, `killall`, or a name pattern:
+  Stop the exact run-owned Backend while the emulator is still unavailable so no timed-out publish can resume late. Then restart the immutable emulator by ID and require health before stopping the exact run-owned Worker. The old Worker does not recreate topics after an emulator restart; restoring the empty emulator first lets its unavailable pull settle without permitting backlog replay. Never use `pkill`, `killall`, or a name pattern:
 
   ```bash
   task7_step4_restart_emulator() {
@@ -1098,9 +1098,6 @@
   task7_shutdown_exact_pid "$task7_backend_pid" 'Backend' \
     || { task7_fail 'exact Backend process did not stop within the bounded shutdown'; return 1; }
   task7_backend_pid=''
-  task7_shutdown_exact_pid "$task7_worker_pid" 'Worker' \
-    || { task7_fail 'exact Worker process did not stop within the bounded shutdown'; return 1; }
-  task7_worker_pid=''
   test "$(docker inspect "$task7_pubsub_container" --format '{{.State.Status}}')" = 'exited' \
     && test "$(docker inspect "$task7_pubsub_container" --format '{{.Id}}')" = "$task7_pubsub_id" \
     && test "$(docker inspect "$task7_pubsub_container" | jq -ce '.[0].HostConfig.PortBindings["8085/tcp"]')" = "$task7_pubsub_binding" \
@@ -1124,6 +1121,9 @@
   done
   test "$task7_emulator_ready" = 'true' \
     || { echo 'Pub/Sub emulator did not become ready within 30 seconds' >&2; task7_gate_failed='true'; return 1; }
+  task7_shutdown_exact_pid "$task7_worker_pid" 'Worker' \
+    || { task7_fail 'exact Worker process did not stop within the bounded shutdown after emulator recovery'; return 1; }
+  task7_worker_pid=''
   }
   task7_run_phase 'Step 4 restart emulator' task7_step4_restart_emulator || true
   ```
