@@ -112,6 +112,13 @@ ENV_EXAMPLE_FILES = (
 )
 
 SCHEMA_DOC = ROOT / "docs" / "database" / "postgresql-schema.md"
+ROLLOUT_PLAN = (
+    ROOT
+    / "docs"
+    / "superpowers"
+    / "plans"
+    / "2026-08-28-immutable-migration-rollout-correction.md"
+)
 ROOT_README = ROOT / "README.md"
 BACKEND_README = ROOT / "backend" / "README.md"
 WORKER_README = ROOT / "rca-worker" / "README.md"
@@ -220,6 +227,38 @@ def test_schema_doc_describes_one_final_uuid_only_runtime_schema() -> None:
     for table in expected_legacy:
         assert table in legacy
     assert "autevents__partitioned_legacy_0003" not in text
+
+
+def test_task7_catalog_gate_checks_public_top_level_legacy_parents() -> None:
+    """Task 7 catalog evidence must match PostgreSQL top-level parent metadata."""
+    task7_catalog = _block_after(
+        _text(ROLLOUT_PLAN), "task7_step5_catalog() {"
+    ).split("task7_run_phase 'Step 5 catalog'", maxsplit=1)[0]
+    canonical_tables = (
+        "webhook_deliveries",
+        "alert_events",
+        "evidence_records",
+        "incident_messages",
+        "incident_timeline_events",
+        "audit_events",
+    )
+
+    assert "JOIN pg_namespace AS n ON n.oid = c.relnamespace" in task7_catalog
+    assert "WHERE n.nspname = 'public' AND c.relname IN (" in task7_catalog
+    for table in canonical_tables:
+        assert task7_catalog.count(f"'{table}'") == 1
+        assert task7_catalog.count(f"'{table}__partitioned_legacy_0003'") == 1
+    assert (
+        "'$1 !~ /__partitioned_legacy_0003$/ && $2 == \"r\" && $3 == \"f\""
+        in task7_catalog
+    )
+    assert (
+        "'$1 ~ /__partitioned_legacy_0003$/ && $2 == \"p\" && $3 == \"f\""
+        in task7_catalog
+    )
+    assert "$3 == \"t\"" not in task7_catalog
+    assert task7_catalog.count("')\" -eq 6") == 2
+    assert task7_catalog.count("')\" -eq 12") == 1
 
 
 def test_docs_do_not_reference_removed_runtime_commands() -> None:

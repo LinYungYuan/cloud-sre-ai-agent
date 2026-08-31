@@ -1227,7 +1227,8 @@
   task7_catalog=$(docker exec "$task7_postgres_container" psql -U postgres -d sre_agent_release_acceptance -v ON_ERROR_STOP=1 -AtF '|' -c "
   SELECT c.relname, c.relkind, c.relispartition
   FROM pg_class AS c
-  WHERE c.relname IN (
+  JOIN pg_namespace AS n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'public' AND c.relname IN (
       'webhook_deliveries','alert_events','evidence_records','incident_messages',
       'incident_timeline_events','audit_events',
       'webhook_deliveries__partitioned_legacy_0003',
@@ -1239,7 +1240,7 @@
   ) ORDER BY c.relname") \
     || { task7_fail 'unable to capture Task 7 relation catalog'; return 1; }
   test "$(printf '%s\n' "$task7_catalog" | awk -F '|' '$1 !~ /__partitioned_legacy_0003$/ && $2 == "r" && $3 == "f" { n++ } END { print n + 0 }')" -eq 6 \
-    && test "$(printf '%s\n' "$task7_catalog" | awk -F '|' '$1 ~ /__partitioned_legacy_0003$/ && $2 == "p" && $3 == "t" { n++ } END { print n + 0 }')" -eq 6 \
+    && test "$(printf '%s\n' "$task7_catalog" | awk -F '|' '$1 ~ /__partitioned_legacy_0003$/ && $2 == "p" && $3 == "f" { n++ } END { print n + 0 }')" -eq 6 \
     && test "$(printf '%s\n' "$task7_catalog" | awk 'NF { n++ } END { print n + 0 }')" -eq 12 \
     || { task7_fail 'catalog must be six canonical ordinary tables plus six retained legacy partitioned parents'; return 1; }
   printf '%s\n' "$task7_catalog"
@@ -1247,7 +1248,7 @@
   task7_run_phase 'Step 5 catalog' task7_step5_catalog || true
   ```
 
-  Expected: exactly six canonical `relkind='r'`/`relispartition=false` relations and exactly six retained `__partitioned_legacy_0003` parents with `relkind='p'`/`relispartition=true`, total twelve. Record that no automatic downgrade or legacy cleanup has been executed.
+  Expected: exactly six canonical `relkind='r'`/`relispartition=false` relations and exactly six retained top-level `__partitioned_legacy_0003` parents with `relkind='p'`/`relispartition=false`, total twelve in the `public` schema. PostgreSQL sets `relispartition=true` only when a relation is itself attached as a child partition; these retained top-level parents are partitioned tables but are not child partitions. Record that no automatic downgrade or legacy cleanup has been executed.
 
 - [ ] **Step 6: Clean disposable databases and commit only task-owned defect fixes (2–5 minutes)**
 
